@@ -1,5 +1,5 @@
 import { Navigate, useLocation } from 'react-router-dom';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/useAuth';
 
 const ProtectedRoute = ({ children, allowedRoles = [] }) => {
   const { isAuthenticated, isAuthLoading, user, role } = useAuth();
@@ -47,7 +47,9 @@ const ProtectedRoute = ({ children, allowedRoles = [] }) => {
             ? '/directorate/dashboard'
         : normalizedRole === 'instructor'
           ? '/instructor-dashboard'
-          : '/student-dashboard';
+          : normalizedRole === 'lab_assistant'
+            ? '/lab-assistant/dashboard'
+            : '/student-dashboard';
 
     return <Navigate to={redirectTarget} replace state={{ from: location }} />;
   }

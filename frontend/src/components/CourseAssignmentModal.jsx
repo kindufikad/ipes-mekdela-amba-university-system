@@ -81,13 +81,21 @@ const CourseAssignmentModal = ({ courses: initialCourses = [], instructors: init
   }, [courses, departmentId]);
 
   const handleDeptChange = (courseId, value) => {
-    setAssignments((current) => ({ ...current, [courseId]: { ...(current[courseId] || {}), deptId: value, instructorId: '' } }));
+    setAssignments((current) => ({ ...current, [courseId]: { ...(current[courseId] || {}), deptId: value, instructorId: '', staffId: '', staffRole: '', role: '' } }));
     loadInstructorsForCourse(courseId, value || departmentId);
   };
 
   const updateRow = (courseId, field, value) => {
     if (field === 'instructorId') {
-      setAssignments((current) => ({ ...current, [courseId]: { ...(current[courseId] || {}), instructorId: value } }));
+      setAssignments((current) => ({
+        ...current,
+        [courseId]: {
+          ...(current[courseId] || {}),
+          instructorId: value,
+          staffId: value,
+          role: current[courseId]?.staffRole || current[courseId]?.role || 'instructor',
+        },
+      }));
       return;
     }
     setAssignments((current) => ({ ...current, [courseId]: { ...(current[courseId] || {}), [field]: value } }));
@@ -95,9 +103,17 @@ const CourseAssignmentModal = ({ courses: initialCourses = [], instructors: init
 
   const submit = async (event) => {
     event.preventDefault();
-    const assignedRows = courses.map((course) => ({ courseId: course.id, instructorId: assignments[course.id]?.instructorId })).filter((row) => row.instructorId);
+    const assignedRows = courses
+      .map((course) => {
+        const row = assignments[course.id] || {};
+        const staffId = row.staffId || row.instructorId;
+        const role = String(row.staffRole || row.role || 'instructor').trim().toLowerCase();
+        if (!staffId) return null;
+        return { courseId: course.id, staffId, instructorId: staffId, role };
+      })
+      .filter(Boolean);
     if (!filters.programType || !filters.yearLevel || !filters.semester || !filters.section || !assignedRows.length) {
-      toast.error('Select all filters, a section, and at least one instructor.');
+      toast.error('Select all filters, a section, and at least one staff member.');
       return;
     }
     setSaving(true);
@@ -111,15 +127,31 @@ const CourseAssignmentModal = ({ courses: initialCourses = [], instructors: init
     } finally { setSaving(false); }
   };
 
-  const instructorLabel = (instructor) => {
-    const name = instructor.full_name || instructor.instructor_name || instructor.name || instructor.email;
-    const role = String(instructor.role || '').toLowerCase();
-    return `${name}${role && role !== 'instructor' ? ` (${role.replaceAll('_', ' ').toUpperCase()})` : ''}`;
+  const getRoleLabel = (role) => {
+    const normalized = String(role || 'instructor').toLowerCase();
+    if (normalized === 'academic_director') return 'ACADEMIC DIRECTOR';
+    if (normalized === 'department_head' || normalized === 'dept_head') return 'DEPT HEAD';
+    if (normalized === 'college_dean' || normalized === 'dean') return 'COLLEGE DEAN';
+    if (normalized === 'lab_assistant') return 'LAB ASSISTANT';
+    return 'INSTRUCTOR';
   };
 
-  return <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/40 p-4"><form onSubmit={submit} className="w-full max-w-6xl rounded-3xl bg-white p-6 shadow-xl"><div className="flex items-center justify-between"><div><h3 className="text-lg font-semibold text-gray-900">Assign Courses</h3><p className="text-sm text-gray-500">Select an instructor independently for each course.</p></div><button type="button" onClick={onClose} className="text-gray-500" aria-label="Close">✕</button></div>
+  const instructorLabel = (instructor) => {
+    const name = instructor.full_name || instructor.instructor_name || instructor.name || instructor.email;
+    return `${name} (${getRoleLabel(instructor.role)})`;
+  };
+
+  return <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/40 p-4"><form onSubmit={submit} className="w-full max-w-6xl rounded-3xl bg-white p-6 shadow-xl"><div className="flex items-center justify-between"><div><h3 className="text-lg font-semibold text-gray-900">Assign Courses</h3><p className="text-sm text-gray-500">Select an instructor or lab assistant independently for each course.</p></div><button type="button" onClick={onClose} className="text-gray-500" aria-label="Close">✕</button></div>
     <div className="mt-5 grid gap-4 sm:grid-cols-4"><label className="text-sm text-gray-600"><span className="mb-1 block font-medium">Program Type</span><select value={filters.programType} onChange={updateFilter('programType')} className={selectClass}><option value="">Select</option><option>Regular</option><option>Extension</option><option>Summer</option></select></label><label className="text-sm text-gray-600"><span className="mb-1 block font-medium">Year Level</span><select value={filters.yearLevel} onChange={updateFilter('yearLevel')} className={selectClass}><option value="">Select</option>{years.map((year) => <option key={year}>{year}</option>)}</select></label><label className="text-sm text-gray-600"><span className="mb-1 block font-medium">Semester</span><select value={filters.semester} onChange={updateFilter('semester')} className={selectClass}><option value="">Select</option><option>I</option><option>II</option></select></label><label className="text-sm text-gray-600"><span className="mb-1 block font-medium">Section</span><select value={filters.section} onChange={updateFilter('section')} className={selectClass}><option value="">Select</option>{sections.map((section) => <option key={section}>{section}</option>)}</select></label></div>
-    <div className="mt-6 overflow-x-auto rounded-xl border border-slate-200"><table className="min-w-full text-left text-sm"><thead className="bg-slate-50 text-xs uppercase text-slate-500"><tr><th className="px-4 py-3">Course</th><th className="px-4 py-3">Instructor Department</th><th className="px-4 py-3">Instructor</th></tr></thead><tbody className="divide-y divide-slate-100">{loadingCourses ? <tr><td colSpan="3" className="px-4 py-8 text-center text-slate-500">Loading courses...</td></tr> : courses.length ? courses.map((course) => { const row = assignments[course.id] || {}; const department = row.deptId || String(departmentId || ''); const instructors = rowInstructors[course.id] || (department === String(departmentId) ? defaultInstructors : []); return <tr key={course.id}><td className="px-4 py-4 font-medium text-slate-900">{course.code || course.course_code} · {course.name || course.course_title}</td><td className="px-4 py-4"><select value={department} onChange={(event) => handleDeptChange(course.id, event.target.value)} className={selectClass}><option value={String(departmentId || '')}>Current Department</option>{departments.filter((item) => String(item.id) !== String(departmentId)).map((item) => <option key={item.id} value={item.id}>{item.name || item.department_name}</option>)}</select></td><td className="px-4 py-4"><select value={row.instructorId || ''} onChange={(event) => updateRow(course.id, 'instructorId', event.target.value)} onFocus={() => loadRowInstructors(course.id, department)} className={selectClass}><option value="">Select instructor</option>{instructors.map((instructor) => <option key={instructor.instructor_id || instructor.id || instructor.user_id} value={instructor.instructor_id || instructor.id || instructor.user_id}>{instructorLabel(instructor)}</option>)}</select></td></tr>; }) : <tr><td colSpan="3" className="px-4 py-8 text-center text-slate-500">Select Year Level and Semester to load courses.</td></tr>}</tbody></table></div>
+    <div className="mt-6 overflow-x-auto rounded-xl border border-slate-200"><table className="min-w-full text-left text-sm"><thead className="bg-slate-50 text-xs uppercase text-slate-500"><tr><th className="px-4 py-3">Course</th><th className="px-4 py-3">Instructor Department</th><th className="px-4 py-3">Instructor / Lab Assistant</th></tr></thead><tbody className="divide-y divide-slate-100">{loadingCourses ? <tr><td colSpan="3" className="px-4 py-8 text-center text-slate-500">Loading courses...</td></tr> : courses.length ? courses.map((course) => { const row = assignments[course.id] || {}; const department = row.deptId || String(departmentId || ''); const instructors = rowInstructors[course.id] || (department === String(departmentId) ? defaultInstructors : []); return <tr key={course.id}><td className="px-4 py-4 font-medium text-slate-900">{course.code || course.course_code} · {course.name || course.course_title}</td><td className="px-4 py-4"><select value={department} onChange={(event) => handleDeptChange(course.id, event.target.value)} className={selectClass}><option value={String(departmentId || '')}>Current Department</option>{departments.filter((item) => String(item.id) !== String(departmentId)).map((item) => <option key={item.id} value={item.id}>{item.name || item.department_name}</option>)}</select></td><td className="px-4 py-4"><select value={row.instructorId || ''} onChange={(event) => {
+            const staffId = event.target.value;
+            const selectedStaff = instructors.find((item) => String(item.staff_id ?? item.instructor_id ?? item.id ?? item.user_id) === String(staffId)) || null;
+            updateRow(course.id, 'instructorId', staffId);
+            updateRow(course.id, 'staffRole', String(selectedStaff?.role || 'instructor').toLowerCase());
+            const role = String(selectedStaff?.role || 'instructor').toLowerCase();
+            updateRow(course.id, 'staffRole', role);
+            updateRow(course.id, 'role', role);
+          }} onFocus={() => loadRowInstructors(course.id, department)} className={selectClass}><option value="">Select instructor / lab assistant</option>{instructors.map((instructor) => <option key={instructor.staff_id ?? instructor.instructor_id ?? instructor.id ?? instructor.user_id} value={String(instructor.staff_id ?? instructor.instructor_id ?? instructor.id ?? instructor.user_id)}>{instructorLabel(instructor)}</option>)}</select></td></tr>; }) : <tr><td colSpan="3" className="px-4 py-8 text-center text-slate-500">Select Year Level and Semester to load courses.</td></tr>}</tbody></table></div>
     <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={onClose} className="rounded-xl border border-gray-200 px-4 py-2 text-sm font-semibold text-gray-700">Cancel</button><button type="submit" disabled={saving} className="rounded-xl bg-ieps-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{saving ? 'Saving...' : 'Assign Courses'}</button></div>
   </form></div>;
 };

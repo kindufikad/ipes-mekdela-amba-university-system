@@ -1,33 +1,62 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
 import { evaluationApi, registrationApi } from '../services/api';
 
-const PublishEvaluation = ({ departmentId }) => {
+const PublishEvaluation = ({ departmentId, role = 'dept_head' }) => {
+  const isDepartmentHead = ['dept_head', 'depthead', 'department_head'].includes(String(role).toLowerCase());
+  const canPublishPeer = isDepartmentHead;
   const [target, setTarget] = useState('student');
   const [assignments, setAssignments] = useState([]);
-  const [filters, setFilters] = useState({ program_type: '', year_level: '', semester: '', section: '' });
+  const [filters, setFilters] = useState({ program_type: '', year_level: '', semester: '', section: '', staff_type: 'all' });
   const [loading, setLoading] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [departmentStaff, setDepartmentStaff] = useState([]);
   const [alreadyPublished, setAlreadyPublished] = useState({ student: false, instructor: false });
+  const [peerEvaluationStarted, setPeerEvaluationStarted] = useState(false);
+  const [peerEvaluationFullyCompleted, setPeerEvaluationFullyCompleted] = useState(false);
+  const [peerHasSubmissions, setPeerHasSubmissions] = useState(false);
+  const [studentEvaluationStarted, setStudentEvaluationStarted] = useState(false);
+  const [studentEvaluationFullyCompleted, setStudentEvaluationFullyCompleted] = useState(false);
+  const publishFilters = { ...filters, academic_year: new Date().getFullYear() };
 
-  const unpublish = async () => {
+  const handleUnpublish = async () => {
+    const evaluationStarted = target === 'student' ? studentEvaluationStarted : peerEvaluationStarted;
+    const evaluationFullyCompleted = target === 'student' ? studentEvaluationFullyCompleted : peerEvaluationFullyCompleted;
+    if (target === 'instructor' && peerHasSubmissions) {
+      toast.error('Peer evaluations cannot be unpublished after a submission exists.');
+      return;
+    }
+    if (evaluationStarted && !evaluationFullyCompleted) {
+      toast.error('You can only unpublish an evaluation that has not started or is fully completed.');
+      return;
+    }
     if (!window.confirm(target === 'student' ? 'Withdraw this student evaluation batch?' : 'Withdraw peer evaluations for this department?')) return;
     setPublishing(true);
     try {
       const payload = target === 'student'
         ? { department_id: departmentId, ...filters, academic_year: new Date().getFullYear() }
-        : { academic_year: new Date().getFullYear(), semester: 'Semester I' };
+        : { department_id: departmentId, academic_year: new Date().getFullYear(), semester: 'Semester I' };
       const result = target === 'student'
         ? await evaluationApi.unpublishStudent(payload)
         : await evaluationApi.unpublishDepartmentPeerEvaluations(payload);
-      if (target === 'instructor') {
-        await evaluationApi.togglePeerPublish({ department_id: departmentId, publish_status: 0 });
-      }
       setAlreadyPublished((current) => ({ ...current, [target]: false }));
+      if (target === 'instructor') {
+        setPeerEvaluationStarted(false);
+        setPeerEvaluationFullyCompleted(false);
+        setPeerHasSubmissions(false);
+      } else {
+        setStudentEvaluationStarted(false);
+        setStudentEvaluationFullyCompleted(false);
+      }
       toast.success(result?.message || 'Evaluation unpublished successfully.');
-      const rows = await evaluationApi.getPublishAssignments({ department: departmentId });
+      const rows = await evaluationApi.getPublishAssignments({ department: departmentId, staff_type: filters.staff_type });
       setAssignments(Array.isArray(rows) ? rows : []);
+      if (target === 'student') {
+        const status = await evaluationApi.getPublishStatuses(departmentId, publishFilters);
+        setStudentEvaluationStarted(Boolean(status?.studentEvaluationStarted));
+        setStudentEvaluationFullyCompleted(Boolean(status?.studentEvaluationFullyCompleted));
+        setAlreadyPublished((current) => ({ ...current, student: Boolean(status?.is_student_published) }));
+      }
     } catch (error) {
       toast.error(error.message || 'Unable to unpublish evaluation.');
     } finally {
@@ -40,8 +69,15 @@ const PublishEvaluation = ({ departmentId }) => {
     const loadAssignments = async () => {
       setLoading(true);
       try {
-        const rows = await evaluationApi.getPublishAssignments({ department: departmentId });
-        if (!cancelled) setAssignments(Array.isArray(rows) ? rows : []);
+        const rows = await evaluationApi.getPublishAssignments({ department: departmentId, staff_type: filters.staff_type });
+        if (!cancelled) {
+          const nextAssignments = Array.isArray(rows) ? rows : [];
+          setAssignments(nextAssignments);
+          if (!isDepartmentHead) {
+            const instructors = [...new Map(nextAssignments.filter((row) => row.instructor_id).map((row) => [row.instructor_id, row])).values()];
+            setDepartmentStaff(instructors.map((instructor) => ({ ...instructor, displayName: instructor.instructor_name || 'Instructor' })));
+          }
+        }
       } catch (error) {
         if (!cancelled) toast.error(error.message || 'Unable to load course assignments.');
       } finally {
@@ -50,24 +86,32 @@ const PublishEvaluation = ({ departmentId }) => {
     };
     if (departmentId) void loadAssignments();
     return () => { cancelled = true; };
-  }, [departmentId]);
+  }, [departmentId, isDepartmentHead, filters.staff_type]);
 
   useEffect(() => {
     let cancelled = false;
     const loadPublishStatuses = async () => {
       try {
-        const status = await evaluationApi.getPublishStatuses(departmentId);
+        const status = await evaluationApi.getPublishStatuses(departmentId, publishFilters);
+        const peerStatus = canPublishPeer ? await evaluationApi.getPeerPublishStatus({ department_id: departmentId, academic_year: new Date().getFullYear(), semester: 'Semester I' }) : null;
         if (!cancelled) setAlreadyPublished({
           student: Boolean(status?.is_student_published),
-          instructor: Boolean(status?.is_peer_published),
+          instructor: Boolean(peerStatus?.isPublished || status?.is_peer_published),
         });
+        if (!cancelled) {
+          setPeerEvaluationStarted(Boolean(peerStatus?.hasStarted));
+          setPeerEvaluationFullyCompleted(Boolean(peerStatus?.fullyCompleted));
+          setPeerHasSubmissions(Boolean(peerStatus?.hasSubmissions));
+          setStudentEvaluationStarted(Boolean(status?.studentEvaluationStarted));
+          setStudentEvaluationFullyCompleted(Boolean(status?.studentEvaluationFullyCompleted));
+        }
       } catch (error) {
         if (!cancelled) toast.error(error.message || 'Unable to load publish statuses.');
       }
     };
     if (departmentId) void loadPublishStatuses();
     return () => { cancelled = true; };
-  }, [departmentId]);
+  }, [departmentId, isDepartmentHead, canPublishPeer, filters.program_type, filters.year_level, filters.semester, filters.section]);
 
   useEffect(() => {
     let cancelled = false;
@@ -75,7 +119,7 @@ const PublishEvaluation = ({ departmentId }) => {
       try {
         const rows = await registrationApi.getUsers();
         const staff = (Array.isArray(rows) ? rows : [])
-          .filter((user) => ['instructor', 'dept_head', 'college_dean', 'academic_directorate'].includes(String(user.role).toLowerCase()))
+          .filter((user) => ['instructor', 'lab_assistant', 'college_dean', 'dean', 'academic_directorate', 'academic_director', 'directorate'].includes(String(user.role).toLowerCase()))
           .filter((user) => String(user.status || 'active').toLowerCase() === 'active')
           .map((user) => ({
             ...user,
@@ -89,32 +133,42 @@ const PublishEvaluation = ({ departmentId }) => {
         }
       }
     };
-    if (departmentId) void loadDepartmentStaff();
+    if (departmentId && isDepartmentHead) void loadDepartmentStaff();
     return () => { cancelled = true; };
-  }, [departmentId]);
+  }, [departmentId, isDepartmentHead]);
 
   const updateFilter = (field) => (event) => setFilters((current) => ({ ...current, [field]: event.target.value }));
-  const matchingAssignments = assignments.filter((assignment) => Object.entries(filters).every(([field, value]) => !value || String(assignment[field] || '').toLowerCase() === value.toLowerCase()));
+  const getStaffType = (record) => String(record.target_type || record.publish_role || record.assigned_role || record.role || '').toLowerCase() === 'lab_assistant' ? 'lab_assistant' : 'instructor';
+  const matchingAssignments = assignments.filter((assignment) => filters.staff_type === 'all' || getStaffType(assignment) === filters.staff_type).filter((assignment) => Object.entries(filters).every(([field, value]) => field === 'staff_type' || !value || String(assignment[field] || '').toLowerCase() === value.toLowerCase()));
+  const visibleStaff = departmentStaff.filter((staff) => filters.staff_type === 'all' || getStaffType(staff) === filters.staff_type);
   const targetAlreadyPublished = alreadyPublished[target] || (target === 'student' && matchingAssignments.some((assignment) => assignment.is_student_published));
+  const targetEvaluationStarted = target === 'student' ? studentEvaluationStarted : peerEvaluationStarted;
+  const targetEvaluationFullyCompleted = target === 'student' ? studentEvaluationFullyCompleted : peerEvaluationFullyCompleted;
+  const canUnpublish = !targetEvaluationStarted || targetEvaluationFullyCompleted;
+  const instructorCount = departmentStaff.filter((staff) => String(staff.role).toLowerCase() === 'instructor').length;
+  const canPublish = !publishing
+    && !loading
+    && (target !== 'instructor' || instructorCount >= 1)
+    && !targetAlreadyPublished
+    && (!targetEvaluationStarted || targetEvaluationFullyCompleted);
+  const canUnpublishTarget = target === 'instructor' ? !peerHasSubmissions : canUnpublish;
   const options = (field) => [...new Set(assignments.map((assignment) => assignment[field]).filter(Boolean))];
 
   const publish = async () => {
-    if (targetAlreadyPublished) {
+    if (targetAlreadyPublished || (targetEvaluationStarted && !targetEvaluationFullyCompleted)) {
       toast.error(target === 'student' ? 'Evaluation form has already been published for this section/batch.' : 'Peer evaluations have already been published for this department.');
       return;
     }
     setPublishing(true);
     try {
-      const payload = { department_id: departmentId, ...filters, academic_year: new Date().getFullYear() };
-      if (target === 'instructor') {
-        await evaluationApi.togglePeerPublish({ department_id: departmentId, publish_status: 1 });
-      }
+      const payload = { department_id: departmentId, ...publishFilters, staff_type: filters.staff_type };
       const result = target === 'student'
         ? await evaluationApi.publishStudent(payload)
-        : await evaluationApi.publishDepartmentPeerEvaluations({
+        : await evaluationApi.publishPeerEvaluation({
           department_id: departmentId,
           academic_year: new Date().getFullYear(),
           semester: 'Semester I',
+          staff_type: filters.staff_type,
         });
       if (result?.isAlreadyPublished) {
         setAlreadyPublished((current) => ({ ...current, [target]: true }));
@@ -123,7 +177,7 @@ const PublishEvaluation = ({ departmentId }) => {
       }
       setAlreadyPublished((current) => ({ ...current, [target]: true }));
       toast.success(result?.message || `Evaluation published to ${target}s.`);
-      const rows = await evaluationApi.getPublishAssignments({ department: departmentId });
+      const rows = await evaluationApi.getPublishAssignments({ department: departmentId, staff_type: filters.staff_type });
       setAssignments(Array.isArray(rows) ? rows : []);
     } catch (error) {
       if (error.response?.data?.isAlreadyPublished || error.message?.toLowerCase().includes('already published')) {
@@ -144,30 +198,31 @@ const PublishEvaluation = ({ departmentId }) => {
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div><h2 className="text-2xl font-semibold text-slate-900">Publish Evaluation Form</h2><p className="mt-1 text-sm text-slate-500">Activate evaluation forms separately from course assignment.</p></div>
           <div className="flex gap-2 rounded-xl bg-slate-100 p-1">
-            {['student', 'instructor'].map((value) => <button key={value} type="button" onClick={() => setTarget(value)} className={`rounded-lg px-4 py-2 text-sm font-semibold ${target === value ? 'bg-white text-ieps-blue-600 shadow-sm' : 'text-slate-600'}`}>{value === 'student' ? 'Student' : 'Instructor'}</button>)}
+            {(canPublishPeer ? ['student', 'instructor'] : ['student']).map((value) => <button key={value} type="button" onClick={() => setTarget(value)} className={`rounded-lg px-4 py-2 text-sm font-semibold ${target === value ? 'bg-white text-ieps-blue-600 shadow-sm' : 'text-slate-600'}`}>{value === 'student' ? 'Student' : 'Peer Evaluation'}</button>)}
           </div>
         </div>
 
         {target === 'student' ? (
-          <div className="mt-6 grid gap-4 md:grid-cols-4">
+          <div className="mt-6 grid gap-4 md:grid-cols-5">
             {Object.entries(labels).map(([field, label]) => <label key={field} className="text-sm text-slate-600"><span className="mb-1 block font-medium">{label}</span><select value={filters[field]} onChange={updateFilter(field)} className={selectClass}><option value="">All</option>{options(field).map((option) => <option key={option} value={option}>{option}</option>)}</select></label>)}
+            <label className="text-sm text-slate-600"><span className="mb-1 block font-medium">Staff Type</span><select value={filters.staff_type} onChange={updateFilter('staff_type')} className={selectClass}><option value="all">All Staff Types</option><option value="instructor">Instructors Only</option><option value="lab_assistant">Lab Assistants Only</option></select></label>
           </div>
         ) : (
           <div className="mt-6 overflow-x-auto rounded-2xl border border-gray-200">
             <table className="min-w-full text-left text-sm">
               <thead className="bg-slate-50 text-slate-600"><tr><th className="px-4 py-3 font-semibold">#</th><th className="px-4 py-3 font-semibold">Instructor Name</th><th className="px-4 py-3 font-semibold">Role</th></tr></thead>
               <tbody className="divide-y divide-gray-100">
-                {departmentStaff.map((staff, index) => <tr key={staff.id} className="hover:bg-gray-50"><td className="px-4 py-3">{index + 1}</td><td className="px-4 py-3 font-medium text-gray-800">{staff.displayName}</td><td className="px-4 py-3 capitalize">{String(staff.role).replaceAll('_', ' ')}</td></tr>)}
-                {!departmentStaff.length && <tr><td colSpan={3} className="px-4 py-8 text-center text-slate-500">No active academic staff found for this department.</td></tr>}
+                {visibleStaff.map((staff, index) => <tr key={staff.id} className="hover:bg-gray-50"><td className="px-4 py-3">{index + 1}</td><td className="px-4 py-3 font-medium text-gray-800">{staff.displayName}</td><td className="px-4 py-3 capitalize">{String(staff.role).replaceAll('_', ' ')}</td></tr>)}
+                {!visibleStaff.length && <tr><td colSpan={3} className="px-4 py-8 text-center text-slate-500">No active academic staff found for this department.</td></tr>}
               </tbody>
             </table>
           </div>
         )}
 
-        <div className="mt-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between"><p className="text-sm text-slate-500">{target === 'student' ? (loading ? 'Loading assignments...' : `${matchingAssignments.length} assigned course${matchingAssignments.length === 1 ? '' : 's'} match the selected filters.`) : `${departmentStaff.length} active academic staff in this department.`}</p><div className="flex flex-wrap gap-2"><button type="button" disabled={publishing || loading || (target === 'instructor' && departmentStaff.length < 2) || targetAlreadyPublished} onClick={publish} className="rounded-xl bg-ieps-blue-600 px-5 py-3 text-sm font-semibold text-white disabled:opacity-50">{targetAlreadyPublished ? '✓ Already Published' : publishing ? 'Publishing...' : `Publish Evaluation to ${target === 'student' ? 'Students' : 'Instructors'}`}</button>{(target === 'instructor' || targetAlreadyPublished) && <button type="button" disabled={publishing} onClick={unpublish} className="rounded-xl border border-amber-300 px-5 py-3 text-sm font-semibold text-amber-700 hover:bg-amber-50 disabled:opacity-50">{publishing ? 'Withdrawing...' : target === 'student' ? 'Unpublish' : 'Unpublish Peer Evaluation'}</button>}</div></div>
+          <div className="mt-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between"><p className="text-sm text-gray-500">{target === 'student' ? (loading ? 'Loading assignments...' : `${matchingAssignments.length} assigned course${matchingAssignments.length === 1 ? '' : 's'} match the selected filters.`) : `${departmentStaff.length} active academic staff in this department.`}</p><div className="flex min-h-12 w-full flex-wrap items-center justify-start gap-2 md:w-auto md:min-w-[18rem] md:justify-end">{(target === 'instructor' ? !targetAlreadyPublished : canPublish) && <button type="button" onClick={publish} disabled={!canPublish} className="inline-flex min-h-12 items-center justify-center rounded-xl bg-ieps-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-ieps-blue-700 disabled:cursor-not-allowed disabled:opacity-50">{publishing ? 'Publishing...' : target === 'instructor' ? 'Publish Peer Evaluation' : 'Publish Evaluation to Students'}</button>}{target === 'instructor' && !targetAlreadyPublished && instructorCount < 1 && <span className="text-right text-xs font-medium text-slate-500">At least one active instructor is required to publish peer evaluations.</span>}{targetAlreadyPublished && canUnpublishTarget && <button type="button" onClick={handleUnpublish} className="inline-flex min-h-12 items-center justify-center rounded-xl border border-amber-300 px-5 py-3 text-sm font-semibold text-amber-700 transition hover:bg-amber-50">{publishing ? 'Withdrawing...' : target === 'student' ? 'Unpublish' : 'Unpublish Peer Evaluation'}</button>}{target === 'instructor' && targetAlreadyPublished && peerHasSubmissions && <span className="text-right text-xs font-medium text-slate-500">Peer evaluations cannot be unpublished after a submission exists.</span>}</div></div>
       </div>
 
-      {target === 'student' && <div className="overflow-x-auto rounded-3xl border border-gray-200 bg-white shadow-sm"><table className="min-w-full text-left text-sm"><thead className="bg-slate-50 text-slate-600"><tr><th className="px-4 py-3 font-semibold">Course</th><th className="px-4 py-3 font-semibold">Instructor</th><th className="px-4 py-3 font-semibold">Program</th><th className="px-4 py-3 font-semibold">Year / Section</th><th className="px-4 py-3 font-semibold">Status</th></tr></thead><tbody className="divide-y divide-gray-100">{matchingAssignments.map((assignment) => <tr key={assignment.id}><td className="px-4 py-3">{assignment.course_code} · {assignment.course_name}</td><td className="px-4 py-3">{assignment.instructor_name || '-'}</td><td className="px-4 py-3">{assignment.program_type || '-'}</td><td className="px-4 py-3">{assignment.year_level || '-'} / {assignment.section || '-'}</td><td className="px-4 py-3">{assignment.is_student_published ? 'Published' : 'Not published'}</td></tr>)}{!matchingAssignments.length && <tr><td colSpan={5} className="px-4 py-10 text-center text-slate-500">No assigned courses match the selected filters.</td></tr>}</tbody></table></div>}
+      {target === 'student' && <div className="overflow-x-auto rounded-3xl border border-gray-200 bg-white shadow-sm"><table className="min-w-full text-left text-sm"><thead className="bg-slate-50 text-slate-600"><tr><th className="px-4 py-3 font-semibold">Course</th><th className="px-4 py-3 font-semibold">Instructor / Staff</th><th className="px-4 py-3 font-semibold">Type</th><th className="px-4 py-3 font-semibold">Program</th><th className="px-4 py-3 font-semibold">Year / Section</th><th className="px-4 py-3 font-semibold">Status</th></tr></thead><tbody className="divide-y divide-gray-100">{matchingAssignments.map((assignment) => <tr key={assignment.id}><td className="px-4 py-3">{assignment.course_code} · {assignment.course_name}</td><td className="px-4 py-3">{assignment.instructor_name || '-'}</td><td className="px-4 py-3"><span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${assignment.type === 'Lab Assistant' ? 'bg-violet-100 text-violet-700' : 'bg-blue-100 text-blue-700'}`}>{assignment.type || 'Course / Instructor'}</span></td><td className="px-4 py-3">{assignment.program_type || '-'}</td><td className="px-4 py-3">{assignment.year_level || '-'} / {assignment.section || '-'}</td><td className="px-4 py-3">{assignment.is_student_published ? 'Published' : 'Not published'}</td></tr>)}{!matchingAssignments.length && <tr><td colSpan={6} className="px-4 py-10 text-center text-slate-500">No assigned courses or lab assistants match the selected filters.</td></tr>}</tbody></table></div>}
     </section>
   );
 };

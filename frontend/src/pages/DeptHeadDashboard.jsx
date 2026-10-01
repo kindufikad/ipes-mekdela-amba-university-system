@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   FaUsers,
@@ -11,13 +11,13 @@ import {
   FaBell,
   FaDatabase,
 } from 'react-icons/fa';
+import { BarChart3, CheckCircle2, Clock3, Eye, Filter, RefreshCw, RotateCcw, Search, Send, Trash2, Users, X } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { adminData } from '../data/adminOptions';
-import StudentsSection from '../components/admin/StudentsSection';
 import InstructorsSection from '../components/admin/InstructorsSection';
 import EvaluationWorkflow from '../components/EvaluationWorkflow';
-import { LanguageContext } from '../context/LanguageContext';
-import { useAuth } from '../context/AuthContext';
+import { useTranslation } from '../context/useTranslation';
+import { useAuth } from '../context/useAuth';
 import { departmentApi, registrationApi, evaluationApi, courseAssignmentApi } from '../services/api';
 import DispatchEvaluationModal from '../components/DispatchEvaluationModal';
 import EvaluationTemplateBuilder from '../components/EvaluationTemplateBuilder';
@@ -27,54 +27,78 @@ import CourseAssignmentModal from '../components/CourseAssignmentModal';
 import DeptHeadPerformanceDashboard from '../components/DeptHeadPerformanceDashboard';
 import PublishEvaluation from './PublishEvaluation';
 import OfficialDepartmentReport from '../components/OfficialDepartmentReport';
+import { getReportCompletion } from '../utils/reportCompletion';
+import { printDocument } from '../utils/printDocument';
+import DepartmentResultCertificates from '../components/DepartmentResultCertificates';
 import { dispatchForm, SUBMISSIONS_UPDATED_EVENT } from '../services/formSubmissions';
+import EvaluationTracking from '../components/EvaluationTracking';
+import IPESAISmartInsights from '../components/ai/IPESAISmartInsights';
+import { AnomaliesModal, PendingStudentsModal } from '../components/ai/AIActionModals';
+import calculateEvaluationScores from '../utils/calculateEvaluationScores';
 
 const STUDENT_EVAL_TEMPLATE_KEY = 'ipesStudentEvalTemplate';
 
-const initialUsers = [
-  { id: 1, fullName: 'Alemu Bekele', email: 'alemu@mu.edu.et', role: 'Student', collegeId: 'college-1', departmentId: 'dept-1', programId: 'program-2', studentId: '2024-001', programType: 'Regular', academicYear: '2024/25', semester: 'Semester I', yearLevel: 'Year 3', section: 'A' },
-  { id: 2, fullName: 'Dr. Selamawit Tadesse', email: 'selam@mu.edu.et', role: 'Instructor', collegeId: 'college-1', departmentId: 'dept-1', programId: 'program-2', employeeId: 'INS-001', specialization: 'Software Engineering', departmentName: 'Computer Science', learningLevel: 'Master Degree' },
-];
-
-const initialCourses = [
-  { id: 1, name: 'Software Engineering', code: 'SE401', collegeId: 'college-1', departmentId: 'dept-1', creditHours: '3' },
-  { id: 2, name: 'Database Systems', code: 'CS402', collegeId: 'college-1', departmentId: 'dept-1', creditHours: '3' },
-];
-
-const initialEvaluations = [
-  { id: 1, instructorId: 2, instructorName: 'Dr. Selamawit Tadesse', courseCode: 'CS401', courseName: 'Software Engineering', averageScore: 4.6, completed: 18, pending: 2, status: 'On track' },
-  { id: 2, instructorId: 3, instructorName: 'Prof. Bekele Dadi', courseCode: 'CS402', courseName: 'Database Systems', averageScore: 4.4, completed: 15, pending: 5, status: 'Needs follow-up' },
-];
-
-// assignments feature removed for DeptHead view
-
-const DeptHeadDashboard = () => {
-  const { strings } = useContext(LanguageContext);
+const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () => {} }) => {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const { user } = useAuth();
   const currentUser = user || null;
+  const normalizedRole = String(currentUser?.role || '').trim().toLowerCase();
+  const isDepartmentSummaryRole = ['depthead', 'dept_head', 'department_head', 'college_dean', 'dean'].includes(normalizedRole);
   const departmentId = currentUser?.department_id || currentUser?.departmentId || currentUser?.department || null;
   const today = new Date().toISOString().split('T')[0];
 
   const [activeTab, setActiveTab] = useState('overview');
   const [viewDataTab, setViewDataTab] = useState('instructors');
   const [viewDataRows, setViewDataRows] = useState([]);
+  const [viewDataCurrentPage, setViewDataCurrentPage] = useState(1);
+  const [viewDataItemsPerPage, setViewDataItemsPerPage] = useState(5);
+  const [editingCourseId, setEditingCourseId] = useState(null);
+  const [editingCourse, setEditingCourse] = useState(null);
+  const [savingCourseEdit, setSavingCourseEdit] = useState(false);
+  const [deletingCourseId, setDeletingCourseId] = useState(null);
+  const [studentFilter, setStudentFilter] = useState({ year: 'ALL', semester: 'ALL', section: 'ALL', program: 'ALL', search: '' });
+  const [courseFilter, setCourseFilter] = useState({ year: 'ALL', semester: 'ALL' });
+  const [selectedViewDataStudent, setSelectedViewDataStudent] = useState(null);
   const [assignments, setAssignments] = useState([]);
+  const [selectedForDelete, setSelectedForDelete] = useState(null);
+  const [deletingAssignment, setDeletingAssignment] = useState(false);
+  const [assignmentFilters, setAssignmentFilters] = useState({ staffType: 'ALL', year: 'ALL', semester: 'ALL', section: 'ALL', search: '' });
+  const [assignmentCurrentPage, setAssignmentCurrentPage] = useState(1);
+  const [assignmentItemsPerPage, setAssignmentItemsPerPage] = useState(5);
+  const [editingAssignment, setEditingAssignment] = useState(null);
+  const [assignmentEditStaff, setAssignmentEditStaff] = useState([]);
+  const [assignmentEditForm, setAssignmentEditForm] = useState(null);
+  const [assignmentEditSaving, setAssignmentEditSaving] = useState(false);
   const [selectedAssignmentIdForEvaluation, setSelectedAssignmentIdForEvaluation] = useState('');
+
+  useEffect(() => {
+    if (!selectedForDelete) return undefined;
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape' && !deletingAssignment) setSelectedForDelete(null);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [deletingAssignment, selectedForDelete]);
   const [users, setUsers] = useState([]);
   const [assignmentInstructors, setAssignmentInstructors] = useState([]);
   const [studentFilters, setStudentFilters] = useState({ yearLevel: 'all', section: 'all' });
-  const [courses, setCourses] = useState(initialCourses);
-  const [overviewStats, setOverviewStats] = useState({ totalInstructors: 0, totalStudents: 0, totalCourses: 0, activeAssignments: 0 });
+  const [courses, setCourses] = useState([]);
+  const [overviewStats, setOverviewStats] = useState({ totalInstructors: 0, totalStudents: 0, totalCourses: 0, totalLabAssistants: 0, activeAssignments: 0 });
   const [departmentCoursesLoading, setDepartmentCoursesLoading] = useState(false);
-  const [evaluations, setEvaluations] = useState(initialEvaluations);
+  const [evaluations, setEvaluations] = useState([]);
+  const [departmentReports, setDepartmentReports] = useState([]);
   const [formNotification, setFormNotification] = useState('');
   const [trackingView, setTrackingView] = useState('student');
-  const [trackingFilters, setTrackingFilters] = useState({ year_level: 'All Years', section: 'All Sections', program_type: 'All Programs', instructor_id: '' });
-  const [studentTrackingRows, setStudentTrackingRows] = useState([]);
+  const [trackingFilters, setTrackingFilters] = useState({ year_level: 'All Years', section: 'All Sections', program_type: 'All Programs', evaluatee_id: '', target_role: 'instructor' });
+  const [trackingSearch, setTrackingSearch] = useState('');
+  const [trackingDetails, setTrackingDetails] = useState(null);
+  const [trackingResultRows, setTrackingResultRows] = useState([]);
   const [peerTrackingInstructor, setPeerTrackingInstructor] = useState('');
+  const [peerTrackingRole, setPeerTrackingRole] = useState('instructor');
   const [peerTrackingRows, setPeerTrackingRows] = useState([]);
   const [deptTrackingInstructor, setDeptTrackingInstructor] = useState('');
+  const [deptTrackingRole, setDeptTrackingRole] = useState('instructor');
   const [deptTrackingRows, setDeptTrackingRows] = useState([]);
   const [trackingLoading, setTrackingLoading] = useState(false);
   const [trackingMessage, setTrackingMessage] = useState('');
@@ -99,6 +123,8 @@ const DeptHeadDashboard = () => {
   const [submissions, setSubmissions] = useState([]);
   const [loadingData, setLoadingData] = useState(true);
   const [deptInstructorsList, setDeptInstructorsList] = useState([]);
+  const [staffCurrentPage, setStaffCurrentPage] = useState(1);
+  const [staffItemsPerPage, setStaffItemsPerPage] = useState(5);
   const [deptEvalLoading, setDeptEvalLoading] = useState(false);
   const [selectedDeptInstructor, setSelectedDeptInstructor] = useState(null);
   const [showDeptEvalModal, setShowDeptEvalModal] = useState(false);
@@ -108,11 +134,182 @@ const DeptHeadDashboard = () => {
   const [showEvaluationBreakdown, setShowEvaluationBreakdown] = useState(false);
   const [selectedEvaluation, setSelectedEvaluation] = useState(null);
   const [courseForm, setCourseForm] = useState({ name: '', code: '', yearLevel: '', semester: '', creditHours: '' });
-  const [reportAcademicYear, setReportAcademicYear] = useState('2025/2026');
-  const [reportSemester, setReportSemester] = useState('Semester II');
+  const [reportAcademicYear, setReportAcademicYear] = useState(() => String(new Date().getFullYear()));
+  const [reportSemester, setReportSemester] = useState('Semester I');
   const [officialReportRow, setOfficialReportRow] = useState(null);
   const [courseCsvFile, setCourseCsvFile] = useState(null);
   const [courseCsvUploading, setCourseCsvUploading] = useState(false);
+  const [aiInsights, setAiInsights] = useState({});
+  const [pendingStudents, setPendingStudents] = useState([]);
+  const [pendingStudentsLoading, setPendingStudentsLoading] = useState(false);
+  const [pendingModalOpen, setPendingModalOpen] = useState(false);
+  const [anomalyOnly, setAnomalyOnly] = useState(false);
+  const [anomaliesModalOpen, setAnomaliesModalOpen] = useState(false);
+
+  const handleAiAction = async (actionType) => {
+    if (actionType === 'VIEW_PENDING' || actionType === 'VIEW_DEPARTMENT_PENDING') {
+      setPendingModalOpen(true);
+      setPendingStudentsLoading(true);
+      try {
+        const rows = await evaluationApi.getDeptHeadPendingStudents();
+        setPendingStudents(Array.isArray(rows) ? rows : []);
+      } catch {
+        setPendingStudents([]);
+      } finally {
+        setPendingStudentsLoading(false);
+      }
+    }
+    if (actionType === 'INSPECT_ANOMALIES' || actionType === 'INSPECT_SCORE_ANOMALIES') {
+      setAnomalyOnly(true);
+      setAnomaliesModalOpen(true);
+      return true;
+    }
+    if (actionType === 'SEND_REMINDERS') {
+      await sendEvaluationReminder();
+    }
+    if (actionType === 'EXPORT_SUMMARY' || actionType === 'EXPORT_REPORT') {
+      const rows = aiInsights?.summary || [];
+      const csv = [
+        ['Metric', 'Value'],
+        ['Completion rate', `${Number(aiInsights?.completionRate ?? 0).toFixed(1)}%`],
+        ['Average evaluation score', `${Number(aiInsights?.averageScore ?? 0).toFixed(1)}%`],
+        ['Top feedback keywords', Array.isArray(aiInsights?.topFeedbackKeywords) ? aiInsights.topFeedbackKeywords.join(' | ') : ''],
+        ...rows.map((entry) => ['Observation', entry]),
+      ].map((row) => row.map((cell) => `"${String(cell ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `dept-head-ai-insights-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      toast.success('AI insight summary exported successfully.');
+    }
+  };
+
+  const filteredViewDataRows = useMemo(() => {
+    if (viewDataTab === 'students') {
+      const normalize = (value) => String(value || '').trim().toLowerCase();
+      const yearToken = (value) => {
+        const normalized = normalize(value);
+        const roman = { i: '1', ii: '2', iii: '3', iv: '4', v: '5' };
+        return roman[normalized.replace(/^year\s+/, '')] || normalized.match(/\d+/)?.[0] || normalized;
+      };
+      const section = (value) => normalize(value).replace(/^section\s*/, '');
+      return viewDataRows.filter((student) => {
+        const search = normalize(studentFilter.search);
+        const name = student.name || student.full_name || `${student.first_name || ''} ${student.last_name || ''}`;
+        const studentId = student.student_id || student.studentId || '';
+        return (studentFilter.year === 'ALL' || yearToken(student.year_level || student.year) === yearToken(studentFilter.year))
+          && (studentFilter.semester === 'ALL' || normalize(student.semester) === normalize(studentFilter.semester))
+          && (studentFilter.section === 'ALL' || section(student.section) === section(studentFilter.section))
+          && (studentFilter.program === 'ALL' || normalize(student.program_type || student.program) === normalize(studentFilter.program))
+          && (!search || normalize(name).includes(search) || normalize(studentId).includes(search));
+      });
+    }
+    if (viewDataTab === 'courses') {
+      const normalize = (value) => String(value || '').trim().toLowerCase();
+      const yearToken = (value) => normalize(value).match(/\d+/)?.[0] || ({ i: '1', ii: '2', iii: '3', iv: '4', v: '5' }[normalize(value).replace(/^year\s+/, '')] || normalize(value));
+      return viewDataRows.filter((course) => (
+        (courseFilter.year === 'ALL' || yearToken(course.year_level || course.year) === yearToken(courseFilter.year))
+        && (courseFilter.semester === 'ALL' || normalize(course.semester) === normalize(courseFilter.semester))
+      ));
+    }
+    return viewDataRows;
+  }, [courseFilter, studentFilter, viewDataRows, viewDataTab]);
+
+  const viewDataTotalItems = filteredViewDataRows.length;
+  const viewDataTotalPages = Math.max(1, Math.ceil(viewDataTotalItems / viewDataItemsPerPage));
+  const paginatedViewData = useMemo(() => {
+    const startIndex = (viewDataCurrentPage - 1) * viewDataItemsPerPage;
+    return filteredViewDataRows.slice(startIndex, startIndex + viewDataItemsPerPage);
+  }, [filteredViewDataRows, viewDataCurrentPage, viewDataItemsPerPage]);
+  const viewDataStartRecord = viewDataTotalItems === 0 ? 0 : (viewDataCurrentPage - 1) * viewDataItemsPerPage + 1;
+  const viewDataEndRecord = Math.min(viewDataCurrentPage * viewDataItemsPerPage, viewDataTotalItems);
+  const selectedStudentCourses = useMemo(() => {
+    if (!selectedViewDataStudent) return [];
+    const normalize = (value) => String(value || '').trim().toLowerCase();
+    const studentYear = normalize(selectedViewDataStudent.year_level || selectedViewDataStudent.year);
+    const studentSection = normalize(selectedViewDataStudent.section).replace(/^section\s*/, '');
+    const studentSemester = normalize(selectedViewDataStudent.semester);
+    return assignments
+      .filter((assignment) => normalize(assignment.year_level || assignment.year) === studentYear
+        && normalize(assignment.section).replace(/^section\s*/, '') === studentSection
+        && (!studentSemester || normalize(assignment.semester) === studentSemester))
+      .map((assignment) => courses.find((course) => String(course.id) === String(assignment.course_id)) || assignment)
+      .filter((course, index, rows) => rows.findIndex((item) => String(item.id || item.course_id) === String(course.id || course.course_id)) === index);
+  }, [assignments, courses, selectedViewDataStudent]);
+
+  useEffect(() => {
+    setViewDataCurrentPage(1);
+  }, [studentFilter, courseFilter, viewDataTab]);
+
+  useEffect(() => {
+    if (viewDataCurrentPage > viewDataTotalPages) setViewDataCurrentPage(viewDataTotalPages);
+  }, [viewDataCurrentPage, viewDataTotalPages]);
+
+  const staffTotalItems = deptInstructorsList.length;
+  const staffTotalPages = Math.max(1, Math.ceil(staffTotalItems / staffItemsPerPage));
+  const paginatedStaff = useMemo(() => {
+    const startIndex = (staffCurrentPage - 1) * staffItemsPerPage;
+    return deptInstructorsList.slice(startIndex, startIndex + staffItemsPerPage);
+  }, [deptInstructorsList, staffCurrentPage, staffItemsPerPage]);
+  const staffStartRecord = staffTotalItems === 0 ? 0 : (staffCurrentPage - 1) * staffItemsPerPage + 1;
+  const staffEndRecord = Math.min(staffCurrentPage * staffItemsPerPage, staffTotalItems);
+
+  const filteredAssignments = useMemo(() => {
+    const search = assignmentFilters.search.trim().toLowerCase();
+    return assignments.filter((assignment) => {
+      const year = String(assignment.year_level || assignment.yearLevel || '').trim();
+      const semester = String(assignment.semester || '').trim();
+      const section = String(assignment.section || '').trim();
+      const normalizeYear = (value) => value.toLowerCase().replace(/\b(year|freshman)\b/g, '').replace(/[^0-9]/g, '');
+      const normalizeSemester = (value) => value.toLowerCase().replace(/^semester\s*/, '').trim();
+      const normalizeSection = (value) => value.toLowerCase().replace(/^section\s*/i, '').trim();
+      const courseName = String(assignment.course_name || assignment.course_title || assignment.courseName || '').toLowerCase();
+      const courseCode = String(assignment.course_code || assignment.courseCode || '').toLowerCase();
+      const instructorName = String(assignment.staff_name || assignment.instructor_name || assignment.instructorName || '').toLowerCase();
+      const staffRole = String(assignment.staff_role || assignment.assigned_role || 'instructor').toLowerCase();
+      return (String(assignment.department_id || assignment.departmentId || departmentId) === String(departmentId))
+        && (assignmentFilters.staffType === 'ALL' || staffRole === assignmentFilters.staffType.toLowerCase())
+        && (assignmentFilters.year === 'ALL' || normalizeYear(year) === normalizeYear(assignmentFilters.year))
+        && (assignmentFilters.semester === 'ALL' || normalizeSemester(semester) === normalizeSemester(assignmentFilters.semester))
+        && (assignmentFilters.section === 'ALL' || normalizeSection(section) === normalizeSection(assignmentFilters.section))
+        && (!search || `${courseName} ${courseCode} ${instructorName}`.includes(search));
+    });
+  }, [assignmentFilters, assignments, departmentId]);
+  const assignmentYearOptions = [...new Set(assignments.map((assignment) => String(assignment.year_level || '').trim()).filter(Boolean))].sort();
+  const assignmentSectionOptions = [...new Set(assignments.map((assignment) => String(assignment.section || '').trim()).filter(Boolean))].sort();
+  const assignmentTotalItems = filteredAssignments.length;
+  const assignmentTotalPages = Math.max(1, Math.ceil(assignmentTotalItems / assignmentItemsPerPage));
+  const paginatedAssignments = useMemo(() => {
+    const startIndex = (assignmentCurrentPage - 1) * assignmentItemsPerPage;
+    return filteredAssignments.slice(startIndex, startIndex + assignmentItemsPerPage);
+  }, [filteredAssignments, assignmentCurrentPage, assignmentItemsPerPage]);
+  const assignmentStartRecord = assignmentTotalItems === 0 ? 0 : (assignmentCurrentPage - 1) * assignmentItemsPerPage + 1;
+  const assignmentEndRecord = Math.min(assignmentCurrentPage * assignmentItemsPerPage, assignmentTotalItems);
+
+  useEffect(() => {
+    setStaffCurrentPage(1);
+  }, [deptInstructorsList]);
+
+  useEffect(() => {
+    if (staffCurrentPage > staffTotalPages) setStaffCurrentPage(staffTotalPages);
+  }, [staffCurrentPage, staffTotalPages]);
+
+  useEffect(() => {
+    setAssignmentCurrentPage(1);
+  }, [assignments]);
+
+  useEffect(() => {
+    setAssignmentCurrentPage(1);
+  }, [assignmentFilters]);
+
+  useEffect(() => {
+    if (assignmentCurrentPage > assignmentTotalPages) setAssignmentCurrentPage(assignmentTotalPages);
+  }, [assignmentCurrentPage, assignmentTotalPages]);
 
   useEffect(() => {
     const refreshSubmissions = async () => {
@@ -160,11 +357,15 @@ const DeptHeadDashboard = () => {
         return;
       }
 
-      const [usersResult, coursesResult, evaluationsResult, assignmentsResult] = await Promise.allSettled([
+      const [usersResult, coursesResult, evaluationsResult, reportsResult, assignmentsResult] = await Promise.allSettled([
         registrationApi.getUsers(),
         departmentApi.getDepartmentCourses(departmentId),
         registrationApi.getEvaluations(),
-        courseAssignmentApi.getAll(),
+        evaluationApi.getDepartmentReports({
+          academic_year: reportAcademicYear,
+          semester: reportSemester,
+        }),
+        courseAssignmentApi.getDeptHeadAssignments({ department_id: departmentId }),
       ]);
 
       if (usersResult.status === 'fulfilled' && Array.isArray(usersResult.value)) {
@@ -189,6 +390,9 @@ const DeptHeadDashboard = () => {
       if (evaluationsResult.status === 'fulfilled' && Array.isArray(evaluationsResult.value)) {
         setEvaluations(evaluationsResult.value);
       }
+      if (reportsResult.status === 'fulfilled' && Array.isArray(reportsResult.value)) {
+        setDepartmentReports(reportsResult.value);
+      }
       if (assignmentsResult.status === 'fulfilled' && Array.isArray(assignmentsResult.value)) {
         setAssignments(assignmentsResult.value);
       }
@@ -197,7 +401,7 @@ const DeptHeadDashboard = () => {
     } finally {
       setLoadingData(false);
     }
-  }, [departmentId, normalizeUserRecord]);
+  }, [departmentId, normalizeUserRecord, reportAcademicYear, reportSemester]);
 
   const loadStudentTemplate = useCallback(async () => {
     try {
@@ -219,13 +423,15 @@ const DeptHeadDashboard = () => {
     setDepartmentCoursesLoading(true);
     try {
       const result = await departmentApi.getDepartmentCourses(departmentId);
-      setCourses((Array.isArray(result?.courses) ? result.courses : []).map((course) => ({
+      const loadedCourses = (Array.isArray(result?.courses) ? result.courses : []).map((course) => ({
         ...course,
         code: course.code || course.course_code || '',
         name: course.name || course.course_name || '',
         creditHours: course.credits ?? course.credit_hours ?? course.creditHours ?? '0',
         departmentId: course.department_id || departmentId,
-      })));
+      }));
+      setCourses(loadedCourses);
+      setViewDataRows(loadedCourses);
     } catch (error) {
       console.error('Unable to load department courses:', error);
       setCourses([]);
@@ -245,6 +451,7 @@ const DeptHeadDashboard = () => {
             totalInstructors: Number(stats?.totalInstructors || 0),
             totalStudents: Number(stats?.totalStudents || 0),
             totalCourses: Number(stats?.totalCourses || 0),
+            totalLabAssistants: Number(stats?.totalLabAssistants || 0),
             activeAssignments: Number(stats?.activeAssignments || 0),
           });
         }
@@ -268,7 +475,9 @@ const DeptHeadDashboard = () => {
       try {
         const result = viewDataTab === 'students'
           ? await departmentApi.getDepartmentStudents(departmentId)
-          : await departmentApi.getDepartmentData(viewDataTab, departmentId);
+          : viewDataTab === 'lab_assistants'
+            ? await departmentApi.getLabAssistants(departmentId)
+            : await departmentApi.getDepartmentData(viewDataTab, departmentId);
         if (cancelled) return;
         setViewDataRows(Array.isArray(result) ? result : []);
         if (viewDataTab === 'instructors') setAssignmentInstructors(Array.isArray(result) ? result : []);
@@ -291,26 +500,26 @@ const DeptHeadDashboard = () => {
   };
 
   const sidebarItems = [
-    { key: 'overview', label: '🏠 Overview', icon: FaShieldAlt },
-    { key: 'courses', label: '📚 Course Registration', icon: FaBook },
-    { key: 'viewData', label: '📊 View Data', icon: FaDatabase },
-    { key: 'assignments', label: '📝 Course Assignments', icon: FaClipboardCheck },
-    { key: 'publishEvaluation', label: '📣 Publish Evaluation Form', icon: FaBell },
-    { key: 'evaluateInstructor', label: '📊 Evaluate Instructor', icon: FaGraduationCap },
-    { key: 'tracking', label: '📋 Evaluation Tracking', icon: FaChartBar },
-    { key: 'performanceDashboard', label: 'Performance Dashboard', icon: FaChartBar },
-    { key: 'reports', label: '📈 View Department Reports', icon: FaChartBar },
+    { key: 'overview', labelKey: 'overview', icon: FaShieldAlt },
+    { key: 'courses', labelKey: 'courses', icon: FaBook },
+    { key: 'viewData', labelKey: 'viewData', icon: FaDatabase },
+    { key: 'assignments', labelKey: 'assignments', icon: FaClipboardCheck },
+    { key: 'publishEvaluation', labelKey: 'publishEvaluation', icon: FaBell },
+    { key: 'evaluateInstructor', labelKey: 'evaluateStaff', icon: FaGraduationCap },
+    { key: 'tracking', labelKey: 'tracking', icon: FaChartBar },
+    { key: 'performanceDashboard', labelKey: 'performance', icon: FaChartBar },
+    { key: 'reports', labelKey: 'reports', icon: FaChartBar },
   ];
 
   const tabTitleMap = {
-    overview: 'Overview',
-    courses: 'Course Registration',
-    viewData: 'Department Data Hub',
-    assignments: 'Course Assignments',
-    evaluateInstructor: 'Evaluate Instructor',
-    tracking: 'Evaluation Tracking',
-    performanceDashboard: 'Performance Dashboard',
-    reports: 'View Department Reports',
+    overview: t('deptHeadDashboard.overview'),
+    courses: t('deptHeadDashboard.courses'),
+    viewData: t('deptHeadDashboard.viewData'),
+    assignments: t('deptHeadDashboard.assignments'),
+    evaluateInstructor: t('deptHeadDashboard.evaluateStaff'),
+    tracking: t('deptHeadDashboard.tracking'),
+    performanceDashboard: t('deptHeadDashboard.performance'),
+    reports: t('deptHeadDashboard.reports'),
   };
 
   const normalizeCourseRecord = (course) => ({
@@ -327,33 +536,75 @@ const DeptHeadDashboard = () => {
 
   const instructors = useMemo(() => (users || []).filter((user) => String(user.role).toLowerCase() === 'instructor'), [users]);
   const departmentStaff = useMemo(() => (users || []).filter((user) => (
-    ['instructor', 'dept_head', 'college_dean', 'academic_directorate'].includes(String(user.role).toLowerCase())
+    ['instructor', 'dept_head', 'college_dean', 'academic_director', 'academic_directorate', 'director'].includes(String(user.role).toLowerCase())
       && String(user.departmentId || departmentId) === String(departmentId)
   )), [users, departmentId]);
   const students = useMemo(() => (users || []).filter((user) => String(user.role).toLowerCase() === 'student'), [users]);
+
+  const getDisplayRoleTitle = (role = '') => {
+    const normalized = String(role).trim().toLowerCase();
+    if (normalized === 'academic_director' || normalized === 'director' || normalized === 'academic_directorate') return 'ACADEMIC DIRECTOR';
+    if (normalized === 'dept_head' || normalized === 'department_head') return 'DEPT HEAD';
+    if (normalized === 'college_dean' || normalized === 'dean') return 'COLLEGE DEAN';
+    if (normalized === 'lab_assistant') return 'LAB ASSISTANT';
+    return 'INSTRUCTOR';
+  };
+
+  const trackingTargets = useMemo(() => {
+    const roleFilters = ['instructor', 'lab_assistant', 'dept_head', 'department_head', 'dean', 'college_dean', 'academic_director', 'director'];
+    const rows = (users || [])
+      .filter((user) => {
+        const role = String(user.role || '').trim().toLowerCase();
+        return roleFilters.includes(role) && String(user.departmentId || departmentId) === String(departmentId);
+      })
+      .map((user) => ({
+        id: user.id,
+        user_id: user.user_id || user.id,
+        full_name: user.fullName || user.full_name || user.username || 'Unknown Staff',
+        role: String(user.role || '').trim().toLowerCase().replace(/^department_head$/, 'dept_head').replace(/^college_dean$/, 'dean'),
+      }));
+
+    return rows.sort((a, b) => a.full_name.localeCompare(b.full_name));
+  }, [departmentId, users]);
 
   const handleTrackingFilterChange = (field) => (value) => {
     setTrackingFilters((current) => ({ ...current, [field]: value }));
   };
 
+  const handleTrackingTargetChange = (value) => {
+    const selectedTarget = trackingTargets.find((target) => String(target.id) === String(value));
+    setTrackingFilters((current) => ({
+      ...current,
+      evaluatee_id: value || '',
+      target_role: selectedTarget?.role || 'instructor',
+    }));
+  };
+
   const fetchStudentTracking = async () => {
+    if (!trackingFilters.evaluatee_id) {
+      setTrackingMessage('Please select a target instructor or lab assistant first.');
+      return;
+    }
     setTrackingLoading(true);
     setTrackingMessage('');
     try {
-      const rows = await evaluationApi.getDeptHeadStudentTracking({
+      const rows = await evaluationApi.getEvaluationTrackingResults({
+        department_id: departmentId,
+        instructor_id: trackingFilters.evaluatee_id || undefined,
         year_level: trackingFilters.year_level,
         section: trackingFilters.section,
         program_type: trackingFilters.program_type,
-        instructor_id: trackingFilters.instructor_id || undefined,
+        evaluatee_id: trackingFilters.evaluatee_id || undefined,
+        target_role: trackingFilters.target_role || 'instructor',
       });
-      setStudentTrackingRows(Array.isArray(rows) ? rows : []);
+      setTrackingResultRows(Array.isArray(rows) ? rows : []);
       if (!rows || rows.length === 0) {
         setTrackingMessage('No student evaluation rows matched the selected filters.');
       }
     } catch (error) {
       console.error('Student tracking fetch failed:', error);
       setTrackingMessage(error.message || 'Unable to load student tracking data.');
-      setStudentTrackingRows([]);
+      setTrackingResultRows([]);
     } finally {
       setTrackingLoading(false);
     }
@@ -361,16 +612,19 @@ const DeptHeadDashboard = () => {
 
   const fetchPeerTracking = async () => {
     if (!peerTrackingInstructor) {
-      setTrackingMessage('Please select an instructor first.');
+      setTrackingMessage('Please select a target instructor or lab assistant first.');
       return;
     }
     setTrackingLoading(true);
     setTrackingMessage('');
     try {
-      const rows = await evaluationApi.getDeptHeadPeerTracking({ target_instructor_id: peerTrackingInstructor });
+      const rows = await evaluationApi.getDeptHeadPeerTracking({
+        evaluatee_id: peerTrackingInstructor,
+        target_role: peerTrackingRole,
+      });
       setPeerTrackingRows(Array.isArray(rows) ? rows : []);
       if (!rows || rows.length === 0) {
-        setTrackingMessage('No peer evaluation rows found for this instructor.');
+        setTrackingMessage('No peer evaluation rows found for this target.');
       }
     } catch (error) {
       console.error('Peer tracking fetch failed:', error);
@@ -383,16 +637,19 @@ const DeptHeadDashboard = () => {
 
   const fetchDeptHeadTracking = async () => {
     if (!deptTrackingInstructor) {
-      setTrackingMessage('Please select an instructor first.');
+      setTrackingMessage('Please select a target instructor or lab assistant first.');
       return;
     }
     setTrackingLoading(true);
     setTrackingMessage('');
     try {
-      const rows = await evaluationApi.getDeptHeadDeptHeadTracking({ instructor_id: deptTrackingInstructor });
+      const rows = await evaluationApi.getDeptHeadDeptHeadTracking({
+        evaluatee_id: deptTrackingInstructor,
+        target_role: deptTrackingRole,
+      });
       setDeptTrackingRows(Array.isArray(rows) ? rows : []);
       if (!rows || rows.length === 0) {
-        setTrackingMessage('No department head evaluation rows found for this instructor.');
+        setTrackingMessage('No department head evaluation rows found for this target.');
       }
     } catch (error) {
       console.error('Dept head tracking fetch failed:', error);
@@ -407,10 +664,14 @@ const DeptHeadDashboard = () => {
     setReminderSending(true);
     setReminderTarget(evaluatorId ? String(evaluatorId) : 'all');
     try {
-      const result = await evaluationApi.sendReminder(evaluatorId
-        ? { target_id: evaluatorId, evaluation_type: evaluationType, department_id: departmentId }
-        : { send_to_all_pending: true, department_id: departmentId });
-      toast.success(evaluatorId ? `Reminder sent successfully to ${name || 'the pending evaluator'}.` : `Reminders sent to ${result?.sent || 0} pending evaluators.`);
+      const result = evaluatorId
+        ? await evaluationApi.sendReminder({ target_id: evaluatorId, evaluation_type: evaluationType, department_id: departmentId })
+        : await evaluationApi.sendReminder({ send_to_all_pending: true, department_id: departmentId });
+      const reminderCount = Number(result?.sent ?? result?.data?.sent ?? 0);
+      const telegramCount = Number(result?.telegramSent ?? result?.data?.telegramSent ?? 0);
+      toast.success(evaluatorId
+        ? `Reminder sent to ${name || 'the pending evaluator'}; ${telegramCount} urgent Telegram messages sent.`
+        : `Reminders sent to ${reminderCount} pending evaluators; ${telegramCount} urgent Telegram messages sent.`);
     } catch (error) {
       toast.error(error?.message || 'Unable to send evaluation reminder.');
     } finally {
@@ -419,13 +680,60 @@ const DeptHeadDashboard = () => {
     }
   };
 
+  const resetTrackingFilters = () => {
+    setTrackingView('student');
+    setAnomalyOnly(false);
+    setTrackingSearch('');
+    setTrackingFilters({ year_level: 'All Years', section: 'All Sections', program_type: 'All Programs', evaluatee_id: '', target_role: 'instructor' });
+    setPeerTrackingInstructor('');
+    setDeptTrackingInstructor('');
+    setTrackingResultRows([]);
+    setPeerTrackingRows([]);
+    setDeptTrackingRows([]);
+    setTrackingMessage('Filters reset. Select a target and fetch tracking data.');
+  };
+
+  const matchesTrackingSearch = (row) => {
+    const query = trackingSearch.trim().toLowerCase();
+    return !query || JSON.stringify(row).toLowerCase().includes(query);
+  };
+  const isAnomaly = (row) => Number(row.score_variance ?? row.variance ?? row.scoreVariance) === 0
+    && Number(row.total_evaluations ?? row.evaluation_count ?? row.totalEvaluations) > 1;
+  const visibleTrackingResultRows = trackingResultRows.filter((row) => (!anomalyOnly || isAnomaly(row)) && matchesTrackingSearch(row));
+  const visiblePeerTrackingRows = peerTrackingRows.filter(matchesTrackingSearch);
+  const visibleDeptTrackingRows = deptTrackingRows.filter(matchesTrackingSearch);
+  const trackingMetrics = useMemo(() => {
+    const student = trackingResultRows.reduce((summary, row) => ({
+      required: summary.required + Number(row.total_evaluations || 0),
+      completed: summary.completed + Number(row.completed_evaluations || 0),
+    }), { required: 0, completed: 0 });
+    const peer = peerTrackingRows.reduce((summary, row) => ({
+      required: summary.required + 1,
+      completed: summary.completed + (String(row.status || '').toLowerCase() === 'submitted' ? 1 : 0),
+    }), { required: 0, completed: 0 });
+    const deptHead = deptTrackingRows.reduce((summary, row) => ({
+      required: summary.required + 1,
+      completed: summary.completed + (['submitted', 'completed', 'approved'].includes(String(row.status || '').toLowerCase()) ? 1 : 0),
+    }), { required: 0, completed: 0 });
+    const active = trackingView === 'student' ? student : trackingView === 'peer' ? peer : trackingView === 'dept_head' ? deptHead : {
+      required: student.required + peer.required + deptHead.required,
+      completed: student.completed + peer.completed + deptHead.completed,
+    };
+    return { ...active, pending: Math.max(0, active.required - active.completed), rate: active.required ? (active.completed / active.required) * 100 : 0 };
+  }, [deptTrackingRows, peerTrackingRows, trackingResultRows, trackingView]);
+
   const loadDeptHeadInstructors = useCallback(async () => {
     if (!departmentId) return;
     setDeptEvalLoading(true);
     try {
       const data = await evaluationApi.getDeptHeadInstructors({ department_id: departmentId });
-      // API returns an array of instructors
-      setDeptInstructorsList(Array.isArray(data) ? data : (data && Array.isArray(data.data) ? data.data : data || []));
+      const rows = Array.isArray(data) ? data : (data && Array.isArray(data.data) ? data.data : data || []);
+      const currentUserId = currentUser?.id || currentUser?.user_id;
+      const currentInstructorId = currentUser?.instructor_id || currentUser?.instructorId;
+      setDeptInstructorsList(rows.filter((row) => (
+        (!currentUserId || String(row.user_id) !== String(currentUserId))
+        && (!currentInstructorId || String(row.instructor_id || row.evaluatee_id) !== String(currentInstructorId))
+      )));
     } catch (error) {
       if (error?.status !== 403) console.error('Unable to load dept head instructors:', error);
       setDeptInstructorsList([]);
@@ -445,16 +753,19 @@ const DeptHeadDashboard = () => {
     setTrackingLoading(true);
     setTrackingMessage('');
     try {
-      const result = await evaluationApi.calculatePublishFinalResults({
+      const publishConfig = {
         department_id: departmentId,
         academic_year: reportAcademicYear || String(new Date().getFullYear()),
         semester: reportSemester || 'Semester I',
-      });
+      };
+      const result = await evaluationApi.calculatePublishFinalResults(publishConfig);
+      const publishData = result?.data || result || {};
+      const publishedAt = publishData?.published_at || publishData?.publishedAt || new Date().toISOString();
       setTrackingMessage('Final results have been calculated and published successfully.');
-      console.log('Publish result', result);
+      console.log('Publish result', { ...publishData, published_at: publishedAt });
     } catch (error) {
       console.error('Calculate publish failed:', error);
-      setTrackingMessage(error.message || 'Unable to calculate and publish final results.');
+      setTrackingMessage(error?.message || 'Unable to calculate and publish final results.');
     } finally {
       setTrackingLoading(false);
     }
@@ -485,14 +796,19 @@ const DeptHeadDashboard = () => {
     setDeptEvalSubmitting(true);
     setDeptEvalError('');
     try {
+      const targetRole = String(selectedDeptInstructor.target_role || selectedDeptInstructor.role || 'instructor').toLowerCase();
       const payload = {
         evaluator_id: user?.id || user?.user_id,
-        instructor_id: selectedDeptInstructor.instructor_id || selectedDeptInstructor.id,
+        evaluatee_id: selectedDeptInstructor.evaluatee_id || selectedDeptInstructor.instructor_id || selectedDeptInstructor.id,
+        instructor_id: selectedDeptInstructor.instructor_id || selectedDeptInstructor.evaluatee_id || selectedDeptInstructor.id,
+        target_role: targetRole,
         department_id: departmentId,
         criteria_scores: criteriaScores,
         total_score: totalScore,
       };
-      const result = await evaluationApi.submitDeptHeadEvaluation(payload);
+      const result = selectedDeptInstructor.evaluation_id
+        ? await evaluationApi.updateDeptHeadEvaluation(selectedDeptInstructor.evaluation_id, payload)
+        : await evaluationApi.submitDeptHeadEvaluation(payload);
       toast.success('Evaluation submitted successfully.');
       // update local list
       setDeptInstructorsList((current) => current.map((item) => (String(item.instructor_id) === String(selectedDeptInstructor.instructor_id) ? { ...item, evaluation_status: 'Submitted', total_score: totalScore, criteria_scores: criteriaScores } : item)));
@@ -549,7 +865,7 @@ const DeptHeadDashboard = () => {
   }, [evaluations]);
 
   const departmentInstructors = useMemo(
-    () => (instructors || []).filter((instructor) => String(instructor.departmentId) === String(departmentId)),
+    () => (instructors || []).filter((instructor) => String(instructor.departmentId || instructor.department_id) === String(departmentId)),
     [instructors, departmentId]
   );
 
@@ -570,58 +886,217 @@ const DeptHeadDashboard = () => {
     [departmentAssignments]
   );
 
-  const departmentReportRows = useMemo(() => (departmentInstructors || []).map((instructor) => {
-    const matchingEvaluations = evaluations.filter((evaluation) => String(evaluation.instructor_id || evaluation.instructorId || evaluation.target_instructor_id || '') === String(instructor.id));
-    const evaluation = matchingEvaluations[0] || {};
-    const studentScore = Number(evaluation.student_score ?? evaluation.studentScore ?? evaluation.student_average ?? 0);
-    const peerScore = Number(evaluation.peer_score ?? evaluation.peerScore ?? evaluation.peer_average ?? 0);
-    const deptHeadScore = Number(evaluation.dept_head_score ?? evaluation.deptHeadScore ?? evaluation.department_score ?? evaluation.score ?? 0);
-    const finalScore = Number(evaluation.total_score ?? evaluation.final_score ?? (studentScore + peerScore + deptHeadScore));
-    return {
-      id: instructor.id,
-      instructorName: instructor.fullName || instructor.username || 'Unknown Instructor',
-      employeeId: instructor.employeeId || instructor.employee_id || 'N/A',
-      studentScore,
-      peerScore,
-      deptHeadScore,
-      finalScore,
-      status: evaluation.status === 'Completed' || evaluation.status === 'Submitted' || finalScore > 0 ? 'Completed' : 'Pending',
-    };
-  }), [departmentInstructors, evaluations]);
+  const departmentReportRows = useMemo(() => {
+    const sourceRows = Array.isArray(departmentReports) && departmentReports.length ? departmentReports : departmentInstructors;
+    const allowedReportRoles = ['instructor', 'lab assistant', 'lab_assistant'];
+    const filteredSourceRows = sourceRows.filter((sourceRow) => allowedReportRoles.includes(
+      String(sourceRow.role || sourceRow.user_role || sourceRow.userRole || '').trim().toLowerCase()
+    ));
+    const currentUserId = currentUser?.id || currentUser?.user_id;
+    const currentInstructorId = currentUser?.instructor_id || currentUser?.instructorId;
+    const merged = new Map();
+
+    filteredSourceRows.forEach((sourceRow) => {
+      const instructor = departmentInstructors.find((candidate) => String(candidate.id || candidate.instructor_id || candidate.instructorId) === String(sourceRow.instructor_id || sourceRow.instructorId || sourceRow.id)) || {};
+      const instructorId = sourceRow.instructor_id || sourceRow.instructorId || sourceRow.id || instructor.id || instructor.instructor_id || instructor.instructorId;
+      if (!instructorId) return;
+
+      const key = String(instructorId);
+      const existing = merged.get(key) || {
+        id: instructorId,
+        user_id: instructor.user_id || instructor.userId || sourceRow.user_id || sourceRow.userId,
+        role: instructor.role || sourceRow.role || 'Instructor',
+        full_name: sourceRow.name || sourceRow.full_name || instructor.fullName || instructor.full_name || instructor.username || 'Unknown Instructor',
+        department_name: sourceRow.department_name || sourceRow.department || instructor.departmentName || instructor.department_name || currentUser?.department_name || currentUser?.department || '',
+        instructorName: sourceRow.name || sourceRow.full_name || instructor.fullName || instructor.username || 'Unknown Instructor',
+        employeeId: sourceRow.employee_id || instructor.employeeId || instructor.employee_id || 'N/A',
+        studentScore: 0,
+        peerScore: 0,
+        deptHeadScore: 0,
+        finalScore: 0,
+        totalEvaluators: 0,
+        requiredStudentEvaluators: 0,
+        totalPeerEvaluators: 0,
+        requiredPeerEvaluators: 0,
+        totalDeptHeadEvaluators: 0,
+        hasStudentEval: false,
+        hasDeptHeadEval: false,
+        hasPeerEval: false,
+        deptHeadSubmitted: false,
+        canPrint: false,
+        missingRoles: [],
+        assignedClasses: '',
+        status: 'Pending',
+      };
+
+      const matchingEvaluations = departmentReports.filter((evaluation) => String(evaluation.instructor_id || evaluation.instructorId || evaluation.target_instructor_id || evaluation.id || '') === String(instructorId));
+      const evaluation = matchingEvaluations[0] || sourceRow || {};
+      const studentScore = Number(evaluation.student_score ?? evaluation.studentScore ?? evaluation.student_average ?? sourceRow.student_score ?? sourceRow.studentScore ?? sourceRow.student_average ?? 0);
+      const peerScore = Number(evaluation.peer_score ?? evaluation.peerScore ?? evaluation.peer_average ?? sourceRow.peer_score ?? sourceRow.peerScore ?? sourceRow.peer_average ?? 0);
+      const deptHeadScore = Number(evaluation.dept_head_score ?? evaluation.deptHeadScore ?? evaluation.dept_head_average ?? evaluation.deptHeadRaw ?? evaluation.department_score ?? evaluation.score ?? sourceRow.dept_head_score ?? sourceRow.deptHeadScore ?? sourceRow.dept_head_average ?? sourceRow.deptHeadRaw ?? sourceRow.department_score ?? 0);
+      const normalizedDeptHeadScore = deptHeadScore > 0 && deptHeadScore <= 30 ? (deptHeadScore / 30) * 100 : deptHeadScore;
+      const studentWeightedValue = Number(evaluation.student_weighted ?? evaluation.studentWeighted ?? sourceRow.student_weighted ?? sourceRow.studentWeighted ?? 0);
+      const deptHeadWeightedValue = Number(evaluation.dept_head_weighted ?? evaluation.deptHeadWeighted ?? sourceRow.dept_head_weighted ?? sourceRow.deptHeadWeighted ?? 0);
+      const peerWeightedValue = Number(evaluation.peer_weighted ?? evaluation.peerWeighted ?? sourceRow.peer_weighted ?? sourceRow.peerWeighted ?? 0);
+      const studentWeighted = studentWeightedValue > 0 ? studentWeightedValue : Number((studentScore * 0.5).toFixed(2));
+      const deptHeadWeighted = deptHeadWeightedValue > 0 ? deptHeadWeightedValue : Number((normalizedDeptHeadScore * 0.3).toFixed(2));
+      const peerWeighted = peerWeightedValue > 0 ? peerWeightedValue : Number((peerScore * 0.2).toFixed(2));
+      const evaluated = calculateEvaluationScores(studentScore, normalizedDeptHeadScore, peerScore);
+      const persistedFinalScore = Number(evaluation.total_score ?? evaluation.totalWeightedScore ?? sourceRow.total_score ?? sourceRow.totalWeightedScore ?? 0);
+      const finalScore = evaluated.totalScore > 0 ? evaluated.totalScore : persistedFinalScore;
+      const totalEvaluators = Number(evaluation.total_student_evaluators ?? evaluation.totalEvaluatorsCount ?? sourceRow.total_student_evaluators ?? sourceRow.totalEvaluatorsCount ?? 0);
+      const requiredStudentEvaluators = Number(evaluation.required_student_evaluators ?? sourceRow.required_student_evaluators ?? 0);
+      const totalPeerEvaluators = Number(evaluation.total_peer_evaluators ?? sourceRow.total_peer_evaluators ?? 0);
+      const requiredPeerEvaluators = Number(evaluation.required_peer_evaluators ?? sourceRow.required_peer_evaluators ?? 0);
+      const totalDeptHeadEvaluators = Number(evaluation.total_dept_head_evaluators ?? sourceRow.total_dept_head_evaluators ?? 0);
+      const deptHeadSubmittedValue = evaluation.dept_head_submitted ?? sourceRow.dept_head_submitted ?? evaluation.deptHeadSubmitted ?? sourceRow.deptHeadSubmitted;
+      const deptHeadSubmitted = deptHeadSubmittedValue === true
+        || deptHeadSubmittedValue === 1
+        || deptHeadSubmittedValue === '1'
+        || String(deptHeadSubmittedValue || '').toLowerCase() === 'true'
+        || totalDeptHeadEvaluators > 0;
+      const hasStudentEval = evaluation.hasStudentEval === true || studentScore > 0 || totalEvaluators > 0;
+      const hasDeptHeadEval = evaluation.hasDeptHeadEval === true || deptHeadScore > 0 || deptHeadSubmitted;
+      const hasPeerEval = evaluation.hasPeerEval === true || peerScore > 0 || totalPeerEvaluators > 0;
+      const assignedClasses = String(evaluation.assigned_classes || evaluation.assignedClasses || sourceRow.assigned_classes || sourceRow.assignedClasses || '').trim();
+
+      existing.studentScore = existing.studentScore || studentScore || 0;
+      existing.peerScore = existing.peerScore || peerScore || 0;
+      existing.deptHeadScore = existing.deptHeadScore || deptHeadScore || 0;
+      existing.finalScore = Math.max(existing.finalScore || 0, finalScore || 0);
+      existing.totalEvaluators = Math.max(existing.totalEvaluators || 0, totalEvaluators || 0);
+      existing.requiredStudentEvaluators = Math.max(existing.requiredStudentEvaluators || 0, requiredStudentEvaluators || 0);
+      existing.totalPeerEvaluators = Math.max(existing.totalPeerEvaluators || 0, totalPeerEvaluators || 0);
+      existing.requiredPeerEvaluators = Math.max(existing.requiredPeerEvaluators || 0, requiredPeerEvaluators || 0);
+      existing.totalDeptHeadEvaluators = Math.max(existing.totalDeptHeadEvaluators || 0, totalDeptHeadEvaluators || 0);
+      existing.hasStudentEval = existing.hasStudentEval || hasStudentEval;
+      existing.hasDeptHeadEval = existing.hasDeptHeadEval || hasDeptHeadEval;
+      existing.hasPeerEval = existing.hasPeerEval || hasPeerEval;
+      existing.deptHeadSubmitted = existing.deptHeadSubmitted || deptHeadSubmitted;
+      existing.canPrint = existing.hasStudentEval && existing.hasDeptHeadEval && existing.hasPeerEval;
+      existing.missingRoles = evaluation.missing_roles || existing.missingRoles;
+      if (assignedClasses) existing.assignedClasses = existing.assignedClasses ? `${existing.assignedClasses}, ${assignedClasses}` : assignedClasses;
+      if (existing.full_name === 'Unknown Instructor' && (sourceRow.name || sourceRow.full_name || instructor.fullName || instructor.full_name)) {
+        existing.full_name = sourceRow.name || sourceRow.full_name || instructor.fullName || instructor.full_name || instructor.username || 'Unknown Instructor';
+      }
+      existing.instructorName = existing.full_name;
+      existing.employeeId = existing.employeeId || sourceRow.employee_id || instructor.employeeId || instructor.employee_id || 'N/A';
+      existing.status = existing.canPrint ? 'Completed' : 'Pending Submissions';
+      merged.set(key, existing);
+    });
+
+    return Array.from(merged.values()).filter((sourceRow) => {
+      const userId = currentUser?.id || currentUser?.user_id;
+      const instructorId = currentUser?.instructor_id || currentUser?.instructorId;
+      return (
+        (!userId || String(sourceRow.user_id || '') !== String(userId)) &&
+        (!instructorId || String(sourceRow.id || '') !== String(instructorId))
+      );
+    }).map((row) => {
+      const normalizedRow = {
+        ...row,
+        student_average: row.studentScore,
+        peer_average: row.peerScore,
+        dept_head_score: row.deptHeadScore,
+        dept_head_submitted: row.deptHeadSubmitted ? 1 : 0,
+        final_score: row.finalScore,
+        studentRaw: Number(row.studentScore || 0),
+        studentWeighted: Number((Number(row.studentScore || 0) * 0.5).toFixed(2)),
+        deptHeadRaw: Number(row.deptHeadScore > 0 && row.deptHeadScore <= 30 ? ((row.deptHeadScore / 30) * 100).toFixed(2) : Number(row.deptHeadScore || 0).toFixed(2)),
+        deptHeadWeighted: Number((Number(row.deptHeadScore > 0 && row.deptHeadScore <= 30 ? (row.deptHeadScore / 30) * 100 : row.deptHeadScore || 0) * 0.3).toFixed(2)),
+        peerRaw: Number(row.peerScore || 0),
+        peerWeighted: Number((Number(row.peerScore || 0) * 0.2).toFixed(2)),
+        total_student_evaluators: row.totalEvaluators,
+        required_student_evaluators: row.requiredStudentEvaluators,
+        total_peer_evaluators: row.totalPeerEvaluators,
+        required_peer_evaluators: row.requiredPeerEvaluators,
+        total_dept_head_evaluators: row.totalDeptHeadEvaluators,
+        totalEvaluatorsCount: row.totalEvaluators,
+        finalScore: row.finalScore,
+        assignedClasses: row.assignedClasses || 'N/A',
+        assigned_classes: row.assignedClasses || 'N/A',
+      };
+      const completion = getReportCompletion(normalizedRow);
+      return {
+        ...normalizedRow,
+        hasStudentEval: completion.hasStudentEval,
+        hasDeptHeadEval: completion.hasDeptHeadEval,
+        hasPeerEval: completion.hasPeerEval,
+        isReadyToPrint: completion.canPrint,
+        canPrint: completion.canPrint,
+        can_print: completion.canPrint,
+        missingRoles: completion.missing,
+        missing_roles: completion.missing,
+        status: completion.canPrint ? 'Completed' : 'Pending Submissions',
+      };
+    });
+  }, [currentUser?.department, currentUser?.department_name, currentUser?.id, currentUser?.user_id, currentUser?.instructor_id, currentUser?.instructorId, departmentInstructors, departmentReports]);
 
   const reportSummary = useMemo(() => {
     const total = departmentReportRows.length;
     const completed = departmentReportRows.filter((row) => row.status === 'Completed').length;
     const scores = departmentReportRows.map((row) => row.finalScore).filter((score) => score > 0);
     const average = scores.length ? scores.reduce((sum, score) => sum + score, 0) / scores.length : 0;
-    const highest = departmentReportRows.reduce((best, row) => row.finalScore > (best?.finalScore || 0) ? row : best, null);
+    const highest = departmentReportRows.filter((row) => row.finalScore > 0).reduce((best, row) => !best || row.finalScore > best.finalScore ? row : best, null);
     const lowest = departmentReportRows.filter((row) => row.finalScore > 0).reduce((worst, row) => !worst || row.finalScore < worst.finalScore ? row : worst, null);
     return { total, completed, pending: total - completed, average, highest, lowest };
   }, [departmentReportRows]);
 
-  const printOfficialReport = (row = departmentReportRows[0]) => {
-    setOfficialReportRow(row || null);
-    document.body.classList.add('printing-official-report');
-    window.setTimeout(() => {
-      window.print();
-      window.setTimeout(() => document.body.classList.remove('printing-official-report'), 100);
-    }, 0);
-  };
+  const isPrintableReportRole = (row = {}) => ['instructor', 'lab assistant', 'lab_assistant']
+    .includes(String(row.role || '').trim().toLowerCase());
 
-  const urgentReminders = useMemo(() => {
-    const reminders = [];
-    const overdueEvaluations = evaluations.filter((item) => item.pending > 0);
-    if (overdueEvaluations.length) {
-      reminders.push({ id: 'eval-pending', label: `${overdueEvaluations.length} instructors have pending evaluation follow-up`, severity: 'high' });
+  const printOfficialReport = async (row = departmentReportRows[0]) => {
+    if (!isPrintableReportRole(row)) {
+      window.alert('Reports can only be generated for Instructors and Lab Assistants.');
+      return;
     }
-    if (Number(evaluationSummary.avgScore) < 4.5) {
-      reminders.push({ id: 'low-score', label: 'Average evaluation score is under the target threshold', severity: 'medium' });
+    const completion = getReportCompletion(row);
+    if (!completion.canPrint) {
+      window.alert(completion.message);
+      return;
     }
-    if (!courses.length) {
-      reminders.push({ id: 'no-courses', label: 'No courses are currently registered for your department', severity: 'high' });
+    let printableRow = row || null;
+    const instructorId = row?.instructor_id || row?.instructorId || row?.id;
+    if (instructorId) {
+      try {
+        const freshReport = await evaluationApi.getPrintEfficiencyReport(instructorId, {
+          academic_year: reportAcademicYear,
+          semester: reportSemester,
+        });
+        printableRow = {
+          ...row,
+          ...freshReport,
+          name: freshReport.instructor_name || row.name || row.instructorName,
+          full_name: freshReport.instructor_name || row.full_name || row.instructorName,
+          studentRaw: freshReport.student_average,
+          studentWeighted: freshReport.student_weighted,
+          deptHeadRaw: freshReport.dept_head_score,
+          deptHeadWeighted: freshReport.dept_head_weighted,
+          peerRaw: freshReport.peer_average,
+          peerWeighted: freshReport.peer_weighted,
+          total_students_evaluated_count: freshReport.total_students_evaluated_count,
+          total_peers_evaluated_count: freshReport.total_peers_evaluated_count,
+          final_score: freshReport.total_score,
+          total_score: freshReport.total_score,
+        };
+        const refreshedCompletion = getReportCompletion(printableRow);
+        if (!refreshedCompletion.canPrint) {
+          window.alert(refreshedCompletion.message);
+          return;
+        }
+      } catch (error) {
+        console.error('Unable to refresh printable evaluation report:', error);
+        window.alert('Unable to refresh the complete evaluation result for printing.');
+        return;
+      }
     }
-    return reminders;
-  }, [courses.length, evaluations, evaluationSummary.avgScore]);
+    setOfficialReportRow(printableRow);
+    window.requestAnimationFrame(() => {
+      printDocument('printing-official-report').catch((error) => {
+        console.error('Unable to open print preview:', error);
+      });
+    });
+  };
 
   const [showAssignModal, setShowAssignModal] = useState(false);
   const [showPublishModal, setShowPublishModal] = useState(false);
@@ -842,14 +1317,61 @@ const DeptHeadDashboard = () => {
     }
   };
 
-  const handleDeleteAssignment = async (assignmentId) => {
-    if (!window.confirm('Delete this course assignment?')) return;
+  const handleDeleteAssignment = (assignment) => {
+    setSelectedForDelete(assignment);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!selectedForDelete || deletingAssignment) return;
+    const assignmentId = selectedForDelete.assignment_id || selectedForDelete.id;
+    setDeletingAssignment(true);
     try {
       await courseAssignmentApi.deleteAssignment(assignmentId);
-      setAssignments((current) => current.filter((assignment) => String(assignment.id) !== String(assignmentId)));
+      setAssignments((current) => current.filter((assignment) => String(assignment.assignment_id || assignment.id) !== String(assignmentId)));
       toast.success('Course assignment deleted successfully.');
+      setSelectedForDelete(null);
     } catch (error) {
       toast.error(error?.message || 'Unable to delete course assignment.');
+    } finally {
+      setDeletingAssignment(false);
+    }
+  };
+
+  const handleEditAssignment = async (assignment) => {
+    try {
+      const staffRows = await courseAssignmentApi.getDepartmentInstructors(departmentId);
+      const staffType = String(assignment.staff_role || assignment.assigned_role || 'instructor').toLowerCase();
+      setAssignmentEditStaff(Array.isArray(staffRows) ? staffRows : []);
+      setEditingAssignment(assignment);
+      setAssignmentEditForm({
+        staff_type: staffType,
+        staff_id: String(assignment.staff_id || assignment.lab_assistant_id || assignment.instructor_id || ''),
+        academic_year: assignment.academic_year || '',
+        year_level: assignment.year_level || '',
+        semester: assignment.semester || '',
+        section: assignment.section || '',
+        program_type: assignment.program_type || '',
+      });
+    } catch (error) {
+      toast.error(error?.message || 'Unable to load department staff.');
+    }
+  };
+
+  const handleSaveAssignment = async (event) => {
+    event.preventDefault();
+    if (!editingAssignment || !assignmentEditForm) return;
+    setAssignmentEditSaving(true);
+    try {
+      await courseAssignmentApi.updateDeptHeadAssignment(editingAssignment.assignment_id || editingAssignment.id, assignmentEditForm);
+      const updatedRows = await courseAssignmentApi.getDeptHeadAssignments({ department_id: departmentId });
+      setAssignments(Array.isArray(updatedRows) ? updatedRows : []);
+      setEditingAssignment(null);
+      setAssignmentEditForm(null);
+      toast.success('Course assignment updated successfully.');
+    } catch (error) {
+      toast.error(error?.message || 'Unable to update course assignment.');
+    } finally {
+      setAssignmentEditSaving(false);
     }
   };
 
@@ -875,6 +1397,73 @@ const DeptHeadDashboard = () => {
     } catch (error) {
       console.error('Delete failed', error);
       toast.error('Unable to delete the user.');
+    }
+  };
+
+  const startCourseEdit = (course) => {
+    const normalized = normalizeCourseRecord(course);
+    setEditingCourseId(course.id);
+    setEditingCourse({
+      code: normalized.code,
+      name: normalized.name,
+      year_level: course.year_level || course.year || '',
+      semester: course.semester || '',
+    });
+  };
+
+  const cancelCourseEdit = () => {
+    setEditingCourseId(null);
+    setEditingCourse(null);
+  };
+
+  const handleSaveCourseEdit = async (course) => {
+    const courseCode = String(editingCourse?.code || '').trim();
+    const courseName = String(editingCourse?.name || '').trim();
+    if (!courseCode || !courseName) {
+      toast.error('Course code and course name are required.');
+      return;
+    }
+    const duplicateCode = courses.some((candidate) => (
+      String(candidate.id) !== String(course.id)
+      && String(candidate.code || candidate.course_code || '').trim().toLowerCase() === courseCode.toLowerCase()
+    ));
+    if (duplicateCode) {
+      toast.error('This course code is already registered.');
+      return;
+    }
+
+    setSavingCourseEdit(true);
+    try {
+      await registrationApi.updateCourse(course.id, {
+        course_code: courseCode,
+        course_name: courseName,
+        department_id: course.department_id || course.departmentId || departmentId,
+        year_level: String(editingCourse.year_level || '').trim(),
+        semester: String(editingCourse.semester || '').trim(),
+      });
+      cancelCourseEdit();
+      await loadDepartmentCourses();
+      toast.success('Course updated successfully.');
+    } catch (error) {
+      toast.error(error?.message || 'Unable to update course.');
+    } finally {
+      setSavingCourseEdit(false);
+    }
+  };
+
+  const handleDeleteCourse = async (course) => {
+    const normalized = normalizeCourseRecord(course);
+    if (!window.confirm(`Delete ${normalized.code} - ${normalized.name}? This will also remove its course assignments.`)) return;
+    setDeletingCourseId(course.id);
+    try {
+      await registrationApi.deleteCourse(course.id);
+      if (String(editingCourseId) === String(course.id)) cancelCourseEdit();
+      await loadDepartmentCourses();
+      toast.success('Course deleted successfully.');
+    } catch (error) {
+      toast.error(error?.message || 'Unable to delete course.');
+    } finally {
+      setDeletingCourseId(null);
     }
   };
 
@@ -981,31 +1570,38 @@ const DeptHeadDashboard = () => {
       case 'overview':
         return (
           <div className="space-y-6">
-            <div className="grid gap-4 md:grid-cols-4">
+            <div className="grid gap-4 md:grid-cols-5">
               <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm">
                 <div className="flex items-center justify-between">
-                  <p className="text-sm text-gray-500">Total Instructors</p>
+                  <p className="text-sm text-gray-500">{t('deptHeadDashboard.totalInstructors')}</p>
                   <FaUsers className="text-blue-500" />
                 </div>
                 <p className="mt-3 text-2xl font-bold text-gray-800">{overviewStats.totalInstructors}</p>
               </div>
               <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm">
                 <div className="flex items-center justify-between">
-                  <p className="text-sm text-gray-500">Total Students</p>
+                  <p className="text-sm text-gray-500">{t('deptHeadDashboard.totalStudents')}</p>
                   <FaGraduationCap className="text-green-500" />
                 </div>
                 <p className="mt-3 text-2xl font-bold text-gray-800">{overviewStats.totalStudents}</p>
               </div>
               <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm">
                 <div className="flex items-center justify-between">
-                  <p className="text-sm text-gray-500">Total Courses</p>
+                  <p className="text-sm text-gray-500">{t('deptHeadDashboard.totalCourses')}</p>
                   <FaBook className="text-indigo-500" />
                 </div>
                 <p className="mt-3 text-2xl font-bold text-gray-800">{overviewStats.totalCourses}</p>
               </div>
               <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm">
                 <div className="flex items-center justify-between">
-                  <p className="text-sm text-gray-500">Active Assignments</p>
+                  <p className="text-sm text-gray-500">{t('deptHeadDashboard.totalLabAssistants')}</p>
+                  <FaUsers className="text-orange-500" />
+                </div>
+                <p className="mt-3 text-2xl font-bold text-gray-800">{overviewStats.totalLabAssistants}</p>
+              </div>
+              <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm text-gray-500">{t('deptHeadDashboard.activeAssignments')}</p>
                   <FaClipboardCheck className="text-purple-500" />
                 </div>
                 <p className="mt-3 text-2xl font-bold text-gray-800">{overviewStats.activeAssignments}</p>
@@ -1014,15 +1610,15 @@ const DeptHeadDashboard = () => {
 
             <div className="grid gap-4 md:grid-cols-3">
               <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm">
-                <p className="text-sm text-gray-500">Open evaluations</p>
+                <p className="text-sm text-gray-500">{t('deptHeadDashboard.openEvaluations')}</p>
                 <p className="mt-3 text-3xl font-semibold text-slate-900">{displayEvaluations.length}</p>
               </div>
               <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm">
-                <p className="text-sm text-gray-500">Average score</p>
+                <p className="text-sm text-gray-500">{t('deptHeadDashboard.averageScore')}</p>
                 <p className="mt-3 text-3xl font-semibold text-slate-900">{displayEvaluations.length ? (displayEvaluations.reduce((sum, item) => sum + item.averageScore, 0) / displayEvaluations.length).toFixed(1) : '0.0'}</p>
               </div>
               <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm">
-                <p className="text-sm text-gray-500">Pending review items</p>
+                <p className="text-sm text-gray-500">{t('deptHeadDashboard.pendingReviewItems')}</p>
                 <p className="mt-3 text-3xl font-semibold text-slate-900">{displayEvaluations.reduce((sum, item) => sum + item.pending, 0)}</p>
               </div>
             </div>
@@ -1044,6 +1640,18 @@ const DeptHeadDashboard = () => {
               >
                 <FaChalkboardTeacher />
                 Instructors
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewDataTab('lab_assistants')}
+                className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-sm font-semibold transition ${
+                  viewDataTab === 'lab_assistants'
+                    ? 'border border-ieps-blue-200 bg-white text-ieps-blue-600 shadow-md'
+                    : 'border border-gray-200 bg-gray-50 text-gray-700 hover:bg-white'
+                }`}
+              >
+                <FaUsers />
+                Lab Assistants
               </button>
               <button
                 type="button"
@@ -1073,7 +1681,7 @@ const DeptHeadDashboard = () => {
 
             {/* Tab Content */}
             {viewDataTab === 'instructors' && (
-              <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+              <div className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm sm:p-6">
                 <div className="mb-6">
                   <h3 className="text-lg font-semibold text-slate-900">Department Instructors</h3>
                   <p className="text-sm text-gray-500">Instructors loaded from the department database.</p>
@@ -1081,11 +1689,11 @@ const DeptHeadDashboard = () => {
                 {viewDataRows.length === 0 ? (
                   <div className="rounded-3xl border border-dashed border-gray-200 bg-gray-50 p-8 text-center text-sm text-gray-600">No instructors registered for your department yet.</div>
                 ) : (
-                  <div className="overflow-x-auto">
+                  <div className="touch-pan-x overscroll-x-contain overflow-x-auto">
                     <table className="min-w-full divide-y divide-gray-200 text-left text-sm">
                       <thead className="bg-gray-50 text-gray-600"><tr><th className="px-4 py-3 font-semibold">ID</th><th className="px-4 py-3 font-semibold">Name</th><th className="px-4 py-3 font-semibold">Email</th><th className="px-4 py-3 font-semibold">Employee ID</th><th className="px-4 py-3 font-semibold">Status</th></tr></thead>
                       <tbody className="divide-y divide-gray-100">
-                        {viewDataRows.map((instructor) => (
+                        {paginatedViewData.map((instructor) => (
                           <tr key={instructor.id || instructor.instructor_id} className="hover:bg-gray-50"><td className="px-4 py-3">{instructor.id || instructor.instructor_id}</td><td className="px-4 py-3 font-medium text-gray-800">{instructor.instructor_name || instructor.name || instructor.fullName || instructor.username || instructor.email}</td><td className="px-4 py-3">{instructor.email || instructor.username || '-'}</td><td className="px-4 py-3">{instructor.employee_id || instructor.employeeId || '-'}</td><td className="px-4 py-3">Active</td></tr>
                         ))}
                       </tbody>
@@ -1095,9 +1703,65 @@ const DeptHeadDashboard = () => {
               </div>
             )}
 
+            {viewDataTab === 'lab_assistants' && (
+              <div className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm sm:p-6">
+                <div className="mb-6">
+                  <h3 className="text-lg font-semibold text-slate-900">Department Lab Assistants</h3>
+                  <p className="text-sm text-gray-500">Lab assistants registered in this department.</p>
+                </div>
+                {viewDataRows.length === 0 ? (
+                  <div className="rounded-3xl border border-dashed border-gray-200 bg-gray-50 p-8 text-center text-sm text-gray-600">No lab assistants registered for your department yet.</div>
+                ) : (
+                  <div className="touch-pan-x overscroll-x-contain overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200 text-left text-sm">
+                      <thead className="bg-gray-50 text-gray-600">
+                        <tr>
+                          <th className="px-4 py-3 font-semibold">First Name</th>
+                          <th className="px-4 py-3 font-semibold">Last Name</th>
+                          <th className="px-4 py-3 font-semibold">Email</th>
+                          <th className="px-4 py-3 font-semibold">Employee ID</th>
+                          <th className="px-4 py-3 font-semibold">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {paginatedViewData.map((assistant) => (
+                          <tr key={assistant.id || assistant.user_id} className="hover:bg-gray-50">
+                            <td className="px-4 py-3 font-medium text-gray-800">{assistant.first_name || '-'}</td>
+                            <td className="px-4 py-3">{assistant.last_name || '-'}</td>
+                            <td className="px-4 py-3">{assistant.email || '-'}</td>
+                            <td className="px-4 py-3">{assistant.employee_id || '-'}</td>
+                            <td className="px-4 py-3">
+                              <span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${String(assistant.status || 'active').toLowerCase() === 'active' ? 'bg-emerald-100 text-emerald-700' : 'bg-yellow-100 text-yellow-700'}`}>
+                                {assistant.status || 'Active'}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+
             {viewDataTab === 'students' && (
-              <div>
-                <StudentsSection departmentId={departmentId} initialStudents={viewDataRows} />
+              <div className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm sm:p-6 dark:border-slate-700 dark:bg-slate-800">
+                <div className="mb-6"><h3 className="text-lg font-semibold text-slate-900 dark:text-white">Department Students</h3><p className="text-sm text-gray-500 dark:text-slate-400">Students loaded from the department database.</p></div>
+                <div className="mb-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+                  {[['Year Level', 'year', ['ALL', '1st Year', '2nd Year', '3rd Year', '4th Year', '5th Year']], ['Semester', 'semester', ['ALL', 'Semester I', 'Semester II']], ['Section', 'section', ['ALL', 'Section A', 'Section B', 'Section C', 'Section D']], ['Program Type', 'program', ['ALL', 'Regular', 'Extension', 'Summer']]].map(([label, field, options]) => <label key={field} className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}<select value={studentFilter[field]} onChange={(event) => setStudentFilter((current) => ({ ...current, [field]: event.target.value }))} className="mt-2 h-10 w-full rounded-xl border border-gray-300 bg-white px-3 text-sm font-normal normal-case tracking-normal text-slate-700">{options.map((option) => <option key={option} value={option}>{option === 'ALL' ? `All ${label === 'Program Type' ? 'Programs' : label.replace(' Level', 's')}` : option}</option>)}</select></label>)}
+                  <label className="text-xs font-semibold uppercase tracking-wide text-slate-500 sm:col-span-2">Search student<input value={studentFilter.search} onChange={(event) => setStudentFilter((current) => ({ ...current, search: event.target.value }))} placeholder="Name or Student ID" className="mt-2 h-10 w-full rounded-xl border border-gray-300 px-3 text-sm font-normal normal-case tracking-normal text-slate-700" /></label>
+                  <button type="button" onClick={() => setStudentFilter({ year: 'ALL', semester: 'ALL', section: 'ALL', program: 'ALL', search: '' })} className="inline-flex h-10 items-center justify-center gap-2 self-end rounded-xl border border-gray-300 px-3 text-sm font-semibold text-slate-700 hover:bg-slate-50"><RotateCcw size={15} /> Reset Filters</button>
+                </div>
+                <div className="overflow-x-auto"><table className="min-w-full divide-y divide-gray-200 text-left text-sm"><thead className="bg-gray-50 text-gray-600 dark:bg-slate-700/50 dark:text-slate-300"><tr><th className="px-4 py-3 font-semibold">Student ID</th><th className="px-4 py-3 font-semibold">Full Name</th><th className="px-4 py-3 font-semibold">Program Type</th><th className="px-4 py-3 font-semibold">Year / Section</th><th className="px-4 py-3 font-semibold">Status</th><th className="px-4 py-3 font-semibold">Courses</th></tr></thead><tbody className="divide-y divide-gray-100 dark:divide-slate-700">{paginatedViewData.length ? paginatedViewData.map((student, index) => <tr key={student.id || student.student_id || student.user_id || `student-${index}`} className="text-gray-700 hover:bg-gray-50 dark:text-slate-200 dark:hover:bg-slate-700/30"><td className="px-4 py-3">{student.student_id || student.studentId || '-'}</td><td className="px-4 py-3 font-medium text-gray-900 dark:text-white">{student.name || student.full_name || `${student.first_name || ''} ${student.last_name || ''}`.trim() || '-'}</td><td className="px-4 py-3">{student.program_type || student.program || '-'}</td><td className="px-4 py-3">{student.year_level || student.year || '-'} / {student.section || '-'}</td><td className="px-4 py-3"><span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">{student.status || 'Active'}</span></td><td className="px-4 py-3"><button type="button" onClick={() => setSelectedViewDataStudent(student)} className="inline-flex items-center gap-1 text-sm font-semibold text-blue-700 hover:text-blue-900"><Eye size={15} /> View Courses</button></td></tr>) : <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-500 dark:text-slate-400">No students match the selected filters.</td></tr>}</tbody></table></div>
+              </div>
+            )}
+
+            {selectedViewDataStudent && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4" role="dialog" aria-modal="true" aria-labelledby="student-courses-title">
+                <div className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl">
+                  <div className="flex items-start justify-between gap-4 border-b border-slate-200 pb-4"><div><h2 id="student-courses-title" className="text-xl font-bold text-slate-900">Enrolled Courses</h2><p className="mt-1 text-sm text-slate-500">{selectedViewDataStudent.name || selectedViewDataStudent.full_name || selectedViewDataStudent.student_id} · {selectedViewDataStudent.semester || 'Current semester'}</p></div><button type="button" onClick={() => setSelectedViewDataStudent(null)} aria-label="Close enrolled courses" className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"><X /></button></div>
+                  {selectedStudentCourses.length ? <div className="mt-5 divide-y divide-slate-100 rounded-xl border border-slate-200">{selectedStudentCourses.map((course, index) => <div key={course.id || course.course_id || `${course.course_code}-${index}`} className="flex items-center justify-between gap-4 px-4 py-3"><div><p className="font-semibold text-slate-900">{course.code || course.course_code || '-'}</p><p className="text-sm text-slate-600">{course.name || course.course_name || '-'}</p></div><span className="text-xs text-slate-500">{course.semester || selectedViewDataStudent.semester || '-'}</span></div>)}</div> : <p className="mt-5 rounded-xl border border-dashed border-slate-300 bg-slate-50 p-6 text-center text-sm text-slate-600">No enrolled courses found for this student&apos;s current cohort.</p>}
+                </div>
               </div>
             )}
 
@@ -1116,6 +1780,10 @@ const DeptHeadDashboard = () => {
                     Refresh courses
                   </button>
                 </div>
+                <div className="mb-5 flex flex-wrap gap-3">
+                  {['year', 'semester'].map((field) => <label key={field} className="text-xs font-semibold uppercase tracking-wide text-slate-500">{field === 'year' ? 'Year Level' : 'Semester'}<select value={courseFilter[field]} onChange={(event) => setCourseFilter((current) => ({ ...current, [field]: event.target.value }))} className="ml-2 h-10 rounded-xl border border-gray-300 bg-white px-3 text-sm font-normal normal-case tracking-normal text-slate-700"><option value="ALL">All {field === 'year' ? 'Years' : 'Semesters'}</option>{(field === 'year' ? ['1st Year', '2nd Year', '3rd Year', '4th Year', '5th Year'] : ['Semester I', 'Semester II']).map((option) => <option key={option}>{option}</option>)}</select></label>)}
+                  <button type="button" onClick={() => setCourseFilter({ year: 'ALL', semester: 'ALL' })} className="inline-flex h-10 items-center gap-2 rounded-xl border border-gray-300 px-3 text-sm font-semibold text-slate-700 hover:bg-slate-50"><RotateCcw size={15} /> Reset</button>
+                </div>
 
                 {departmentCoursesLoading ? (
                   <div className="rounded-3xl border border-dashed border-gray-200 bg-gray-50 p-8 text-center text-sm text-gray-600">
@@ -1133,18 +1801,27 @@ const DeptHeadDashboard = () => {
                           <th className="px-4 py-3 font-semibold">#</th>
                           <th className="px-4 py-3 font-semibold">Course Code</th>
                           <th className="px-4 py-3 font-semibold">Course Name</th>
-                          <th className="px-4 py-3 font-semibold">Department</th>
+                          <th className="px-4 py-3 font-semibold">Year Level</th>
+                          <th className="px-4 py-3 font-semibold">Semester</th>
+                          <th className="px-4 py-3 font-semibold">Department Name</th>
+                          <th className="px-4 py-3 font-semibold">Status</th>
+                          <th className="px-4 py-3 font-semibold">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
-                        {departmentCourses.map((course, index) => {
+                        {paginatedViewData.map((course, index) => {
                           const normalized = normalizeCourseRecord(course);
+                          const isEditing = String(editingCourseId) === String(course.id);
                           return (
                             <tr key={course.id || `${course.course_code}-${index}`} className="hover:bg-gray-50">
                               <td className="px-4 py-3 text-gray-700">{index + 1}</td>
-                              <td className="px-4 py-3 text-gray-700">{normalized.code}</td>
-                              <td className="px-4 py-3 text-gray-700">{normalized.name}</td>
-                              <td className="px-4 py-3 text-gray-700">{normalized.departmentName || course.department_name || 'Unknown'}</td>
+                              <td className="px-4 py-3 text-gray-700">{isEditing ? <input aria-label="Course Code" value={editingCourse.code} onChange={(event) => setEditingCourse((current) => ({ ...current, code: event.target.value }))} className="w-32 rounded-lg border border-gray-300 px-2 py-1.5 text-sm" /> : normalized.code}</td>
+                              <td className="px-4 py-3 text-gray-700">{isEditing ? <input aria-label="Course Name" value={editingCourse.name} onChange={(event) => setEditingCourse((current) => ({ ...current, name: event.target.value }))} className="min-w-48 rounded-lg border border-gray-300 px-2 py-1.5 text-sm" /> : normalized.name}</td>
+                              <td className="px-4 py-3 text-gray-700">{isEditing ? <input aria-label="Year Level" value={editingCourse.year_level} onChange={(event) => setEditingCourse((current) => ({ ...current, year_level: event.target.value }))} className="w-28 rounded-lg border border-gray-300 px-2 py-1.5 text-sm" /> : course.year_level || course.year || '-'}</td>
+                              <td className="px-4 py-3 text-gray-700">{isEditing ? <input aria-label="Semester" value={editingCourse.semester} onChange={(event) => setEditingCourse((current) => ({ ...current, semester: event.target.value }))} className="w-32 rounded-lg border border-gray-300 px-2 py-1.5 text-sm" /> : course.semester || '-'}</td>
+                              <td className="px-4 py-3 text-gray-700">{normalized.departmentName || course.department_name || course.department || 'Unknown'}</td>
+                              <td className="px-4 py-3 text-gray-700">{course.status || 'Active'}</td>
+                              <td className="px-4 py-3"><div className="flex items-center gap-2 whitespace-nowrap">{isEditing ? <><button type="button" onClick={() => handleSaveCourseEdit(course)} disabled={savingCourseEdit} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50">{savingCourseEdit ? 'Saving…' : 'Save'}</button><button type="button" onClick={cancelCourseEdit} disabled={savingCourseEdit} className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50">Cancel</button></> : <><button type="button" onClick={() => startCourseEdit(course)} className="rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-50">Edit</button><button type="button" onClick={() => handleDeleteCourse(course)} disabled={String(deletingCourseId) === String(course.id)} className="rounded-lg border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50">{String(deletingCourseId) === String(course.id) ? 'Deleting…' : 'Delete'}</button></>}</div></td>
                             </tr>
                           );
                         })}
@@ -1154,6 +1831,24 @@ const DeptHeadDashboard = () => {
                 )}
               </div>
             )}
+
+            <div className="flex flex-col gap-4 border-t border-gray-200 pt-4 text-sm text-gray-600 dark:border-slate-700 dark:text-slate-300 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-wrap items-center gap-4">
+                <span>Showing <strong className="text-gray-900 dark:text-white">{viewDataStartRecord}</strong> to <strong className="text-gray-900 dark:text-white">{viewDataEndRecord}</strong> of <strong className="text-gray-900 dark:text-white">{viewDataTotalItems}</strong> records</span>
+                <label className="flex items-center gap-2 text-xs text-gray-500 dark:text-slate-400" htmlFor="view-data-page-size">Rows:
+                  <select id="view-data-page-size" value={viewDataItemsPerPage} onChange={(event) => { setViewDataItemsPerPage(Number(event.target.value)); setViewDataCurrentPage(1); }} className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-sm text-gray-700 outline-none focus:ring-2 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-200">
+                    <option value={5}>5</option>
+                    <option value={10}>10</option>
+                    <option value={20}>20</option>
+                  </select>
+                </label>
+              </div>
+              <div className="flex items-center gap-1" aria-label="View Data pagination">
+                <button type="button" onClick={() => setViewDataCurrentPage((page) => Math.max(1, page - 1))} disabled={viewDataCurrentPage === 1} className="rounded-lg border border-gray-200 px-3 py-1.5 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-600 dark:hover:bg-slate-700">Previous</button>
+                {Array.from({ length: viewDataTotalPages }, (_, index) => index + 1).map((page) => <button type="button" key={page} onClick={() => setViewDataCurrentPage(page)} aria-current={viewDataCurrentPage === page ? 'page' : undefined} className={`rounded-lg border px-3 py-1.5 font-medium transition ${viewDataCurrentPage === page ? 'border-blue-600 bg-blue-600 text-white' : 'border-gray-200 text-gray-700 hover:bg-gray-50 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-700'}`}>{page}</button>)}
+                <button type="button" onClick={() => setViewDataCurrentPage((page) => Math.min(viewDataTotalPages, page + 1))} disabled={viewDataCurrentPage === viewDataTotalPages} className="rounded-lg border border-gray-200 px-3 py-1.5 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-600 dark:hover:bg-slate-700">Next</button>
+              </div>
+            </div>
           </div>
         );
       case 'assignments':
@@ -1186,42 +1881,97 @@ const DeptHeadDashboard = () => {
                 <p className="mt-3 text-3xl font-semibold text-slate-900">{courses.length}</p>
               </div>
             </div>
-            {assignments.length ? (
+            {departmentAssignments.length ? (
               <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm">
                 <h3 className="mb-4 text-lg font-semibold text-gray-800">Assigned course log</h3>
+                <div className="mb-5 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-800"><Filter className="h-4 w-4 text-blue-600" /> Filter assignments</div>
+                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                    <select aria-label="Filter by staff type" value={assignmentFilters.staffType} onChange={(event) => setAssignmentFilters((current) => ({ ...current, staffType: event.target.value }))} className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-blue-500"><option value="ALL">All Staff</option><option value="instructor">Instructor</option><option value="lab_assistant">Lab Assistant</option></select>
+                    <select aria-label="Filter by academic year level" value={assignmentFilters.year} onChange={(event) => setAssignmentFilters((current) => ({ ...current, year: event.target.value }))} className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-blue-500"><option value="ALL">All Year Levels</option>{assignmentYearOptions.map((year) => <option key={year} value={year}>{year}</option>)}</select>
+                    <select aria-label="Filter by semester" value={assignmentFilters.semester} onChange={(event) => setAssignmentFilters((current) => ({ ...current, semester: event.target.value }))} className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-blue-500"><option value="ALL">All Semesters</option><option value="I">Semester I</option><option value="II">Semester II</option></select>
+                    <select aria-label="Filter by section" value={assignmentFilters.section} onChange={(event) => setAssignmentFilters((current) => ({ ...current, section: event.target.value }))} className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-blue-500"><option value="ALL">All Sections</option>{assignmentSectionOptions.map((section) => <option key={section} value={section}>{/^section\s/i.test(section) ? section : `Section ${section}`}</option>)}</select>
+                    <label className="relative"><Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-400" /><input aria-label="Search assignments" value={assignmentFilters.search} onChange={(event) => setAssignmentFilters((current) => ({ ...current, search: event.target.value }))} placeholder="Course or staff" className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-3 text-sm outline-none focus:ring-2 focus:ring-blue-500" /></label>
+                  </div>
+                  <div className="mt-3 flex items-center justify-between gap-3"><p className="text-xs text-slate-500">{assignmentTotalItems} matching assignment{assignmentTotalItems === 1 ? '' : 's'}</p><button type="button" onClick={() => setAssignmentFilters({ staffType: 'ALL', year: 'ALL', semester: 'ALL', section: 'ALL', search: '' })} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100"><RotateCcw className="h-3.5 w-3.5" /> Clear filters</button></div>
+                </div>
                 <div className="overflow-x-auto">
                   <table className="min-w-full text-left text-sm">
                     <thead>
                       <tr className="border-b border-gray-100 text-gray-500">
-                        <th className="py-2">Course</th>
-                        <th className="py-2">Instructor</th>
-                        <th className="py-2">Section</th>
-                        <th className="py-2">Semester</th>
-                        <th className="py-2">Status</th>
-                        <th className="py-2">Action</th>
+                        <th className="py-3 pr-5">Course Name &amp; Code</th>
+                        <th className="py-3 pr-5">Instructor / Lab Assistant</th>
+                        <th className="py-3 pr-5">Year Level</th>
+                        <th className="py-3 pr-5">Semester</th>
+                        <th className="py-3 pr-5">Academic Year</th>
+                        <th className="py-3 pr-5">Section</th>
+                        <th className="py-3 pr-5">Program Type</th>
+                        <th className="py-3">Actions</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {assignments.map((assignment) => {
-                        const course = courses.find((c) => String(c.id) === String(assignment.course_id));
-                        const user = users.find((u) => String(u.id) === String(assignment.instructor_id));
-                        return (
-                          <tr key={assignment.id} className="border-b border-gray-50">
-                            <td className="py-2">{course ? `${course.code || course.name} · ${course.name}` : assignment.course_id}</td>
-                            <td className="py-2">{user?.fullName || assignment.instructor_name || assignment.instructor_id}</td>
-                            <td className="py-2">{assignment.section}</td>
-                            <td className="py-2">{assignment.semester}</td>
-                            <td className="py-2"><span className="rounded-full bg-green-100 px-3 py-1 text-xs font-semibold text-green-700">{assignment.status}</span></td>
-                            <td className="py-2"><button type="button" onClick={() => handleDeleteAssignment(assignment.id)} className="rounded-lg border border-red-200 px-3 py-1 text-xs font-semibold text-red-700 hover:bg-red-50">Delete</button></td>
-                          </tr>
-                        );
-                      })}
+                      {paginatedAssignments.length ? paginatedAssignments.map((assignment) => {
+                        const staffRole = String(assignment.staff_role || assignment.assigned_role || 'instructor').toLowerCase();
+                        const staffName = assignment.staff_name || assignment.instructor_name || 'Not Assigned';
+                        const semesterLabel = String(assignment.semester || '').replace(/^semester\s*/i, '');
+                        const sectionLabel = String(assignment.section || '').replace(/^section\s*/i, '');
+                        return <tr key={assignment.assignment_id || assignment.id} className="border-b border-gray-50 align-top">
+                          <td className="py-3 pr-5"><div className="font-medium text-gray-900">{assignment.course_name || 'Unknown course'}</div><div className="mt-1 text-xs text-gray-500">{assignment.course_code || '-'}</div></td>
+                          <td className="py-3 pr-5"><div className="font-medium text-gray-900">{staffName}</div><div className="mt-1 text-xs capitalize text-gray-500">{staffRole.replace('_', ' ')}</div></td>
+                          <td className="py-3 pr-5">{assignment.year_level || '-'}</td>
+                          <td className="py-3 pr-5">{semesterLabel ? `Semester ${semesterLabel}` : '-'}</td>
+                          <td className="py-3 pr-5">{assignment.academic_year || '-'}</td>
+                          <td className="py-3 pr-5">{sectionLabel ? `Section ${sectionLabel}` : '-'}</td>
+                          <td className="py-3 pr-5">{assignment.program_type || '-'}</td>
+                          <td className="py-3"><div className="flex gap-2"><button type="button" onClick={() => handleEditAssignment(assignment)} className="rounded-lg border border-blue-200 px-3 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50">Edit Assignment</button><button type="button" onClick={() => handleDeleteAssignment(assignment)} className="rounded-lg border border-red-200 px-3 py-1 text-xs font-semibold text-red-700 hover:bg-red-50">Remove Assignment</button></div></td>
+                        </tr>;
+                      }) : <tr><td colSpan="7" className="py-10 text-center text-sm text-gray-500">No assignments match these filters.</td></tr>}
                     </tbody>
                   </table>
+                </div>
+                <div className="mt-4 flex flex-col gap-4 border-t border-gray-100 pt-4 text-sm text-gray-600 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex flex-wrap items-center gap-4">
+                    <span>Showing <strong className="text-gray-900">{assignmentStartRecord}</strong> to <strong className="text-gray-900">{assignmentEndRecord}</strong> of <strong className="text-gray-900">{assignmentTotalItems}</strong> assignments</span>
+                    <label className="flex items-center gap-2 text-xs text-gray-500" htmlFor="assignment-page-size">
+                      Rows:
+                      <select id="assignment-page-size" value={assignmentItemsPerPage} onChange={(event) => { setAssignmentItemsPerPage(Number(event.target.value)); setAssignmentCurrentPage(1); }} className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-sm text-gray-700 outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value={5}>5</option>
+                        <option value={10}>10</option>
+                        <option value={20}>20</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="flex items-center gap-1" aria-label="Assigned course log pagination">
+                    <button type="button" onClick={() => setAssignmentCurrentPage((page) => Math.max(1, page - 1))} disabled={assignmentCurrentPage === 1} className="rounded-lg border border-gray-200 px-3 py-1.5 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40">Previous</button>
+                    {Array.from({ length: assignmentTotalPages }, (_, index) => index + 1).map((page) => (
+                      <button type="button" key={page} onClick={() => setAssignmentCurrentPage(page)} aria-current={assignmentCurrentPage === page ? 'page' : undefined} className={`rounded-lg border px-3 py-1.5 font-medium transition ${assignmentCurrentPage === page ? 'border-blue-600 bg-blue-600 text-white' : 'border-gray-200 text-gray-700 hover:bg-gray-50'}`}>{page}</button>
+                    ))}
+                    <button type="button" onClick={() => setAssignmentCurrentPage((page) => Math.min(assignmentTotalPages, page + 1))} disabled={assignmentCurrentPage === assignmentTotalPages} className="rounded-lg border border-gray-200 px-3 py-1.5 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-40">Next</button>
+                  </div>
                 </div>
               </div>
             ) : (
               <div className="rounded-3xl border border-dashed border-gray-300 bg-gray-50 p-6 text-center text-sm text-gray-600">No course assignments have been created for this department yet.</div>
+            )}
+            {editingAssignment && assignmentEditForm && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/40 p-4">
+                <form onSubmit={handleSaveAssignment} className="w-full max-w-2xl rounded-2xl bg-white p-6 shadow-xl">
+                  <div className="mb-5 flex items-start justify-between gap-4">
+                    <div><h3 className="text-lg font-semibold text-gray-900">Edit course assignment</h3><p className="mt-1 text-sm text-gray-500">{editingAssignment.course_code} · {editingAssignment.course_name}</p></div>
+                    <button type="button" onClick={() => { setEditingAssignment(null); setAssignmentEditForm(null); }} className="text-gray-500 hover:text-gray-800" aria-label="Close edit assignment">✕</button>
+                  </div>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <label className="text-sm text-gray-600"><span className="mb-1 block font-medium">Staff Type</span><select value={assignmentEditForm.staff_type} onChange={(event) => setAssignmentEditForm((form) => ({ ...form, staff_type: event.target.value, staff_id: '' }))} className="w-full rounded-lg border border-gray-200 px-3 py-2"><option value="instructor">Instructor</option><option value="lab_assistant">Lab Assistant</option></select></label>
+                    <label className="text-sm text-gray-600"><span className="mb-1 block font-medium">Staff Member</span><select required value={assignmentEditForm.staff_id} onChange={(event) => setAssignmentEditForm((form) => ({ ...form, staff_id: event.target.value }))} className="w-full rounded-lg border border-gray-200 px-3 py-2"><option value="">Select staff member</option>{assignmentEditStaff.filter((staff) => String(staff.role || '').toLowerCase() === assignmentEditForm.staff_type).map((staff) => <option key={`${staff.role}-${staff.staff_id}`} value={staff.staff_id}>{staff.full_name || staff.name || staff.email}</option>)}</select></label>
+                    <label className="text-sm text-gray-600"><span className="mb-1 block font-medium">Academic Year</span><input required value={assignmentEditForm.academic_year} onChange={(event) => setAssignmentEditForm((form) => ({ ...form, academic_year: event.target.value }))} className="w-full rounded-lg border border-gray-200 px-3 py-2" /></label>
+                    <label className="text-sm text-gray-600"><span className="mb-1 block font-medium">Year Level</span><input required value={assignmentEditForm.year_level} onChange={(event) => setAssignmentEditForm((form) => ({ ...form, year_level: event.target.value }))} className="w-full rounded-lg border border-gray-200 px-3 py-2" /></label>
+                    <label className="text-sm text-gray-600"><span className="mb-1 block font-medium">Semester</span><input required value={assignmentEditForm.semester} onChange={(event) => setAssignmentEditForm((form) => ({ ...form, semester: event.target.value }))} className="w-full rounded-lg border border-gray-200 px-3 py-2" /></label>
+                    <label className="text-sm text-gray-600"><span className="mb-1 block font-medium">Section</span><input required value={assignmentEditForm.section} onChange={(event) => setAssignmentEditForm((form) => ({ ...form, section: event.target.value }))} className="w-full rounded-lg border border-gray-200 px-3 py-2" /></label>
+                    <label className="text-sm text-gray-600 sm:col-span-2"><span className="mb-1 block font-medium">Program Type</span><input required value={assignmentEditForm.program_type} onChange={(event) => setAssignmentEditForm((form) => ({ ...form, program_type: event.target.value }))} className="w-full rounded-lg border border-gray-200 px-3 py-2" /></label>
+                  </div>
+                  <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => { setEditingAssignment(null); setAssignmentEditForm(null); }} className="rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold text-gray-700">Cancel</button><button type="submit" disabled={assignmentEditSaving} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{assignmentEditSaving ? 'Saving...' : 'Save changes'}</button></div>
+                </form>
+              </div>
             )}
           </div>
         );
@@ -1230,56 +1980,90 @@ const DeptHeadDashboard = () => {
       case 'evaluateInstructor':
         return (
           <div className="space-y-6">
-            <div className="overflow-x-auto bg-white rounded-lg shadow-sm border border-gray-100">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">INSTRUCTOR</th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">DEADLINE</th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">ACTION</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-200 bg-white">
-                  {deptEvalLoading ? (
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-700 dark:bg-slate-800">
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-2xl font-bold text-slate-900">Evaluate Staff (Instructors & Lab Assistants)</h2>
+                  <p className="mt-1 text-sm text-slate-500">Department Head evaluation contributes 30% of the overall score.</p>
+                </div>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50 dark:bg-slate-700/50">
                     <tr>
-                      <td colSpan="3" className="px-6 py-8 text-center text-sm text-gray-500">Loading instructors…</td>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-slate-400">STAFF</th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-slate-400">ROLE</th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-slate-400">DEADLINE</th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-slate-400">STATUS</th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-slate-400">ACTION</th>
                     </tr>
-                  ) : deptInstructorsList.length ? (
-                    deptInstructorsList.map((inst) => (
-                      <tr key={inst.instructor_id}>
-                        <td className="px-6 py-4 whitespace-nowrap font-bold text-gray-900">{inst.instructor_name || inst.fullName || inst.username}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-gray-600">{inst.deadline || '—'}</td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          {String((inst.evaluation_status || '').toLowerCase()) === 'submitted' ? (
-                            <div className="flex items-center gap-3">
-                              <span className="text-green-600 font-medium">✓ Evaluated ({inst.total_score}/100)</span>
-                              <button
-                                type="button"
-                                onClick={() => handleViewEvaluation(inst)}
-                                className="text-ieps-blue-600 hover:text-ieps-blue-900 font-semibold text-sm underline"
-                              >
-                                View Details
-                              </button>
-                            </div>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => handleOpenEvaluationModal(inst)}
-                              className="flex items-center gap-1.5 text-indigo-700 hover:text-indigo-900 font-semibold"
-                            >
-                              ★ Evaluate
-                            </button>
-                          )}
-                        </td>
+                  </thead>
+                  <tbody className="divide-y divide-gray-200 bg-white dark:divide-slate-700 dark:bg-slate-800">
+                    {deptEvalLoading ? (
+                      <tr>
+                        <td colSpan="5" className="px-6 py-8 text-center text-sm text-gray-500">Loading staff…</td>
                       </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td colSpan="3" className="px-6 py-8 text-center text-sm text-gray-500">No instructors found for your department.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+                    ) : deptInstructorsList.length ? (
+                      paginatedStaff.map((inst) => {
+                        const targetRole = String(inst.target_role || inst.role || 'instructor').toLowerCase();
+                        const isSubmitted = String((inst.evaluation_status || '').toLowerCase()) === 'submitted';
+                        return (
+                          <tr key={`${targetRole}-${inst.evaluatee_id || inst.instructor_id || inst.id}`}>
+                            <td className="px-6 py-4 whitespace-nowrap font-bold text-gray-900 dark:text-white">{inst.instructor_name || inst.full_name || inst.fullName || inst.username}</td>
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${targetRole === 'lab_assistant' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}`}>
+                                {targetRole === 'lab_assistant' ? 'Lab Assistant' : 'Instructor'}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-gray-600 dark:text-slate-300">{inst.deadline || '—'}</td>
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${isSubmitted ? 'bg-emerald-100 text-emerald-700' : 'bg-yellow-100 text-yellow-700'}`}>
+                                {isSubmitted ? 'Completed' : 'Pending'}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              {isSubmitted ? (
+                                <div className="flex items-center gap-3">
+                                  <span className="text-green-600 font-medium">✓ {Number(inst.total_score || 0).toFixed(2)}/30</span>
+                                  <button type="button" onClick={() => handleViewEvaluation(inst)} className="text-ieps-blue-600 hover:text-ieps-blue-900 font-semibold text-sm underline">View Details</button>
+                                  <button type="button" onClick={() => handleOpenEvaluationModal(inst)} className="text-ieps-blue-600 hover:text-ieps-blue-900 font-semibold text-sm underline">Edit</button>
+                                </div>
+                              ) : (
+                                <button type="button" onClick={() => handleOpenEvaluationModal(inst)} className="flex items-center gap-1.5 text-indigo-700 hover:text-indigo-900 font-semibold">★ Evaluate</button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    ) : (
+                      <tr>
+                        <td colSpan="5" className="px-6 py-8 text-center text-sm text-gray-500 dark:text-slate-400">No staff found for your department.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              <div className="flex flex-col gap-4 border-t border-slate-200 px-6 py-4 text-sm text-slate-600 dark:border-slate-700 dark:text-slate-300 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex flex-wrap items-center gap-4">
+                  <span>Showing <strong className="text-slate-900 dark:text-white">{staffStartRecord}</strong> to <strong className="text-slate-900 dark:text-white">{staffEndRecord}</strong> of <strong className="text-slate-900 dark:text-white">{staffTotalItems}</strong> staff members</span>
+                  <label className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400" htmlFor="staff-page-size">Rows:
+                    <select id="staff-page-size" value={staffItemsPerPage} onChange={(event) => { setStaffItemsPerPage(Number(event.target.value)); setStaffCurrentPage(1); }} className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-200">
+                      <option value={5}>5</option>
+                      <option value={10}>10</option>
+                      <option value={20}>20</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="flex items-center gap-1" aria-label="Staff evaluation pagination">
+                  <button type="button" onClick={() => setStaffCurrentPage((page) => Math.max(1, page - 1))} disabled={staffCurrentPage === 1} className="rounded-lg border border-slate-200 px-3 py-1.5 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-600 dark:hover:bg-slate-700">Previous</button>
+                  {Array.from({ length: staffTotalPages }, (_, index) => index + 1).map((page) => (
+                    <button type="button" key={page} onClick={() => setStaffCurrentPage(page)} aria-current={staffCurrentPage === page ? 'page' : undefined} className={`rounded-lg border px-3 py-1.5 font-medium transition ${staffCurrentPage === page ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-200 text-slate-700 hover:bg-slate-50 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-700'}`}>
+                      {page}
+                    </button>
+                  ))}
+                  <button type="button" onClick={() => setStaffCurrentPage((page) => Math.min(staffTotalPages, page + 1))} disabled={staffCurrentPage === staffTotalPages} className="rounded-lg border border-slate-200 px-3 py-1.5 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-600 dark:hover:bg-slate-700">Next</button>
+                </div>
+              </div>
             </div>
 
             {showDeptEvalModal && selectedDeptInstructor ? (
@@ -1289,7 +2073,8 @@ const DeptHeadDashboard = () => {
                   setShowDeptEvalModal(false);
                   setDeptEvalCriteriaScores({});
                 }}
-                instructorName={selectedDeptInstructor.instructor_name}
+                instructorName={selectedDeptInstructor.instructor_name || selectedDeptInstructor.full_name}
+                targetRole={String(selectedDeptInstructor.target_role || selectedDeptInstructor.role || 'instructor').toLowerCase()}
                 criteriaScores={deptEvalCriteriaScores}
                 setCriteriaScores={setDeptEvalCriteriaScores}
                 onSubmit={handleSubmitDeptEval}
@@ -1315,6 +2100,17 @@ const DeptHeadDashboard = () => {
           </div>
         );
       case 'tracking':
+        return <EvaluationTracking
+          targets={trackingTargets}
+          departmentId={departmentId}
+          filters={{ ...trackingFilters, search: trackingSearch }}
+          onFiltersChange={(field, value) => {
+            if (field === 'search') setTrackingSearch(value);
+            else handleTrackingFilterChange(field)(value);
+          }}
+          onResetFilters={resetTrackingFilters}
+          onEvaluateNow={handleOpenEvaluationModal}
+        />;
         return (
           <div className="space-y-6">
             <div className="flex flex-col gap-4 rounded-3xl border border-gray-200 bg-white p-5 shadow-sm md:flex-row md:items-center md:justify-between">
@@ -1323,14 +2119,43 @@ const DeptHeadDashboard = () => {
                 <p className="mt-1 text-sm text-gray-500">Monitor pending and completed evaluation forms.</p>
               </div>
               <button type="button" onClick={() => sendEvaluationReminder()} disabled={reminderSending} className="inline-flex items-center justify-center rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60">
-                {reminderSending && reminderTarget === 'all' ? 'Sending…' : '🔔 Send Reminder to All Pending'}
+                <Send className="mr-2 h-4 w-4" />
+                {reminderSending && reminderTarget === 'all' ? 'Sending…' : 'Send Reminder to All Pending'}
               </button>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              {[
+                { label: 'Total Evaluations Required', value: trackingMetrics.required, icon: Users, tone: 'blue' },
+                { label: 'Completed Submissions', value: trackingMetrics.completed, icon: CheckCircle2, tone: 'emerald' },
+                { label: 'Pending Submissions', value: trackingMetrics.pending, icon: Clock3, tone: 'amber' },
+              ].map(({ label, value, icon: Icon, tone }) => (
+                <article key={label} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">{label}</p>
+                      <p className={`mt-3 text-3xl font-bold ${tone === 'emerald' ? 'text-emerald-600' : tone === 'amber' ? 'text-amber-600' : 'text-slate-900'}`}>{value}</p>
+                    </div>
+                    <span className={`rounded-2xl p-3 ${tone === 'emerald' ? 'bg-emerald-50 text-emerald-600' : tone === 'amber' ? 'bg-amber-50 text-amber-600' : 'bg-blue-50 text-blue-600'}`}><Icon className="h-5 w-5" /></span>
+                  </div>
+                  <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${tone === 'emerald' ? 'bg-emerald-500' : tone === 'amber' ? 'bg-amber-500' : 'bg-blue-500'}`} style={{ width: `${trackingMetrics.required ? Math.min((value / trackingMetrics.required) * 100, 100) : 0}%` }} /></div>
+                </article>
+              ))}
+              <article className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <div><p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Overall Completion Rate</p><p className="mt-3 text-3xl font-bold text-indigo-600">{trackingMetrics.rate.toFixed(1)}%</p></div>
+                  <svg className="h-16 w-16 -rotate-90" viewBox="0 0 40 40" role="img" aria-label={`${trackingMetrics.rate.toFixed(1)} percent complete`}>
+                    <circle cx="20" cy="20" r="16" fill="none" stroke="currentColor" strokeWidth="4" className="text-slate-100" />
+                    <circle cx="20" cy="20" r="16" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" className="text-indigo-500" strokeDasharray={`${Math.min(trackingMetrics.rate, 100)} 100`} pathLength="100" />
+                  </svg>
+                </div>
+              </article>
             </div>
 
             <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm">
               <div className="flex flex-wrap gap-3">
-                {['student', 'peer', 'dept_head'].map((view) => {
-                  const label = view === 'student' ? 'Student' : view === 'peer' ? 'Peer' : 'Dept Head';
+                {['student', 'peer', 'dept_head', 'all'].map((view) => {
+                  const label = view === 'student' ? 'Student' : view === 'peer' ? 'Peer' : view === 'dept_head' ? 'Dept Head' : 'All Categories';
                   const isSelected = trackingView === view;
                   return (
                     <button
@@ -1369,10 +2194,12 @@ const DeptHeadDashboard = () => {
                       </select>
                     </label>
                     <label className="space-y-2 text-sm text-gray-700 md:col-span-2">
-                      <span className="font-semibold">Target Instructor</span>
-                      <select value={trackingFilters.instructor_id} onChange={(e) => handleTrackingFilterChange('instructor_id')(e.target.value)} className="w-full rounded-2xl border border-gray-200 bg-slate-50 px-4 py-3 text-sm outline-none focus:border-ieps-blue-500 focus:ring-2 focus:ring-ieps-blue-100">
-                        <option value="">Select Instructor</option>
-                        {instructors.map((ins) => <option key={ins.id} value={ins.id}>{ins.fullName}</option>)}
+                      <span className="font-semibold">Target</span>
+                      <select value={trackingFilters.evaluatee_id} onChange={(e) => handleTrackingTargetChange(e.target.value)} className="w-full rounded-2xl border border-gray-200 bg-slate-50 px-4 py-3 text-sm outline-none focus:border-ieps-blue-500 focus:ring-2 focus:ring-ieps-blue-100">
+                        <option value="">Select Instructor or Lab Assistant</option>
+                        {trackingTargets.map((target) => (
+                          <option key={`${target.role}-${target.id}`} value={target.id}>{`${target.full_name} (${getDisplayRoleTitle(target.role)})`}</option>
+                        ))}
                       </select>
                     </label>
                   </>
@@ -1380,73 +2207,89 @@ const DeptHeadDashboard = () => {
 
                 {trackingView === 'peer' && (
                   <>
-                    <label className="space-y-2 text-sm text-gray-700 md:col-span-2">
-                      <span className="font-semibold">Target Instructor</span>
-                      <select value={peerTrackingInstructor} onChange={(e) => setPeerTrackingInstructor(e.target.value)} className="w-full rounded-2xl border border-gray-200 bg-slate-50 px-4 py-3 text-sm outline-none focus:border-ieps-blue-500 focus:ring-2 focus:ring-ieps-blue-100">
-                        <option value="">Select Instructor</option>
-                        {departmentStaff.filter((staff) => String(staff.role).toLowerCase() === 'instructor').map((staff) => <option key={staff.id} value={staff.id}>{staff.fullName || staff.username}</option>)}
+                    <label className="space-y-2 text-sm text-gray-700">
+                      <span className="font-semibold">Target Role</span>
+                      <select value={peerTrackingRole} onChange={(e) => setPeerTrackingRole(e.target.value)} className="w-full rounded-2xl border border-gray-200 bg-slate-50 px-4 py-3 text-sm outline-none focus:border-ieps-blue-500 focus:ring-2 focus:ring-ieps-blue-100">
+                        <option value="instructor">Instructor</option>
+                        <option value="lab_assistant">Lab Assistant</option>
                       </select>
                     </label>
-                    <div className="md:col-span-1" />
+                    <label className="space-y-2 text-sm text-gray-700 md:col-span-1">
+                      <span className="font-semibold">Target</span>
+                      <select value={peerTrackingInstructor} onChange={(e) => setPeerTrackingInstructor(e.target.value)} className="w-full rounded-2xl border border-gray-200 bg-slate-50 px-4 py-3 text-sm outline-none focus:border-ieps-blue-500 focus:ring-2 focus:ring-ieps-blue-100">
+                        <option value="">Select Target</option>
+                        {trackingTargets.filter((target) => target.role === peerTrackingRole).map((target) => <option key={`${target.role}-${target.id}`} value={target.id}>{target.full_name}</option>)}
+                      </select>
+                    </label>
                   </>
                 )}
 
                 {trackingView === 'dept_head' && (
                   <>
-                    <label className="space-y-2 text-sm text-gray-700 md:col-span-2">
-                      <span className="font-semibold">Instructor</span>
-                      <select value={deptTrackingInstructor} onChange={(e) => setDeptTrackingInstructor(e.target.value)} className="w-full rounded-2xl border border-gray-200 bg-slate-50 px-4 py-3 text-sm outline-none focus:border-ieps-blue-500 focus:ring-2 focus:ring-ieps-blue-100">
-                        <option value="">Select Instructor</option>
-                        {instructors.map((ins) => <option key={ins.id} value={ins.id}>{ins.fullName}</option>)}
+                    <label className="space-y-2 text-sm text-gray-700">
+                      <span className="font-semibold">Role</span>
+                      <select value={deptTrackingRole} onChange={(e) => setDeptTrackingRole(e.target.value)} className="w-full rounded-2xl border border-gray-200 bg-slate-50 px-4 py-3 text-sm outline-none focus:border-ieps-blue-500 focus:ring-2 focus:ring-ieps-blue-100">
+                        <option value="instructor">Instructor</option>
+                        <option value="lab_assistant">Lab Assistant</option>
                       </select>
                     </label>
-                    <div className="md:col-span-1" />
+                    <label className="space-y-2 text-sm text-gray-700 md:col-span-1">
+                      <span className="font-semibold">Target</span>
+                      <select value={deptTrackingInstructor} onChange={(e) => setDeptTrackingInstructor(e.target.value)} className="w-full rounded-2xl border border-gray-200 bg-slate-50 px-4 py-3 text-sm outline-none focus:border-ieps-blue-500 focus:ring-2 focus:ring-ieps-blue-100">
+                        <option value="">Select Target</option>
+                        {trackingTargets.filter((target) => target.role === deptTrackingRole).map((target) => <option key={`${target.role}-${target.id}`} value={target.id}>{target.full_name}</option>)}
+                      </select>
+                    </label>
                   </>
                 )}
               </div>
 
               <div className="mt-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <p className="text-sm text-slate-500">{trackingMessage || 'Use filters and click Fetch Data to display evaluation tracking rows.'}</p>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (trackingView === 'student') fetchStudentTracking();
-                    if (trackingView === 'peer') fetchPeerTracking();
-                    if (trackingView === 'dept_head') fetchDeptHeadTracking();
-                  }}
-                  className="inline-flex items-center justify-center rounded-2xl bg-ieps-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-sm hover:bg-ieps-blue-700"
-                >
-                  {trackingLoading ? 'Fetching…' : 'Fetch Data'}
-                </button>
+                <div className="flex w-full flex-col gap-3 sm:flex-row sm:items-center md:w-auto md:flex-1">
+                  <label className="relative flex-1"><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><input value={trackingSearch} onChange={(event) => setTrackingSearch(event.target.value)} placeholder="Search by instructor name or course code" className="w-full rounded-2xl border border-slate-200 bg-slate-50 py-3 pl-10 pr-4 text-sm outline-none transition focus:border-ieps-blue-500 focus:ring-2 focus:ring-ieps-blue-100" /></label>
+                  <p className="text-sm text-slate-500">{trackingMessage || 'Use filters and fetch data to display tracking rows.'}</p>
+                </div>
+                <div className="flex gap-2">
+                  <button type="button" onClick={resetTrackingFilters} className="inline-flex items-center justify-center gap-2 rounded-2xl border border-slate-200 px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50"><RefreshCw className="h-4 w-4" /> Reset</button>
+                  <button type="button" onClick={() => { if (trackingView === 'student' || trackingView === 'all') fetchStudentTracking(); if (trackingView === 'peer') fetchPeerTracking(); if (trackingView === 'dept_head') fetchDeptHeadTracking(); }} className="inline-flex items-center justify-center gap-2 rounded-2xl bg-ieps-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-sm hover:bg-ieps-blue-700"><BarChart3 className="h-4 w-4" />{trackingLoading ? 'Fetching…' : 'Fetch Data'}</button>
+                </div>
               </div>
             </div>
 
             <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm overflow-x-auto">
-              {trackingView === 'student' && (
+              {(trackingView === 'student' || trackingView === 'all') && (
                 <table className="min-w-full divide-y divide-gray-200 text-left text-sm">
                   <thead className="bg-slate-50 text-slate-600">
                     <tr>
                       <th className="px-4 py-3 font-semibold">#</th>
-                      <th className="px-4 py-3 font-semibold">Student</th>
-                      <th className="px-4 py-3 font-semibold">Status</th>
-                      <th className="px-4 py-3 font-semibold">Action</th>
+                      <th className="px-4 py-3 font-semibold">Instructor</th>
+                      <th className="px-4 py-3 font-semibold">Completion</th>
+                      <th className="px-4 py-3 font-semibold">Student Avg.</th>
+                      <th className="px-4 py-3 font-semibold">Peer Avg.</th>
+                      <th className="px-4 py-3 font-semibold">Dept. Head Avg.</th>
+                      <th className="px-4 py-3 font-semibold">Final Score</th>
+                      <th className="px-4 py-3 font-semibold">Progress</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {studentTrackingRows.length ? studentTrackingRows.map((row, index) => (
-                      <tr key={`${row.student_db_id}-${index}`} className="hover:bg-gray-50">
+                    {visibleTrackingResultRows.length ? visibleTrackingResultRows.map((row, index) => (
+                      <tr key={`${row.instructor_id}-${index}`} className="hover:bg-gray-50">
                         <td className="px-4 py-4 text-gray-700">{index + 1}</td>
-                        <td className="px-4 py-4 text-gray-700">{row.student_name}</td>
+                        <td className="px-4 py-4 font-medium text-gray-800">{row.instructor_name}</td>
                         <td className="px-4 py-4 font-medium">
-                          <span className={['submitted', 'completed', 'evaluated'].includes(String(row.status).toLowerCase()) ? 'text-green-600' : 'text-red-600'}>
-                            {['submitted', 'completed', 'evaluated'].includes(String(row.status).toLowerCase()) ? '🟢 Completed' : '🔴 Pending'}
+                          <span className={row.status === 'Completed' ? 'badge-success' : 'badge-danger'}>
+                            {row.status} ({row.completed_evaluations}/{row.total_evaluations})
                           </span>
                         </td>
-                        <td className="px-4 py-4">{['submitted', 'completed', 'evaluated'].includes(String(row.status).toLowerCase()) ? <span className="text-xs font-semibold text-gray-400">Done</span> : <button type="button" onClick={() => sendEvaluationReminder(row.evaluator_id, 'student', row.student_name)} disabled={reminderSending} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{reminderSending && reminderTarget === String(row.evaluator_id) ? 'Sending…' : '🔔 Remind'}</button>}</td>
+                        <td className="px-4 py-4 text-slate-700">{row.student_average.toFixed(2)}%</td>
+                        <td className="px-4 py-4 text-slate-700">{row.peer_average.toFixed(2)}%</td>
+                        <td className="px-4 py-4 text-slate-700">{row.dept_head_average.toFixed(2)}%</td>
+                        <td className="px-4 py-4 font-bold text-ieps-blue-700">{row.final_score.toFixed(2)}%</td>
+                        <td className="px-4 py-4"><div className="h-2 w-28 rounded-full bg-slate-200"><div className="h-2 rounded-full bg-ieps-blue-600" style={{ width: `${Math.min(Number(row.completion_rate || 0), 100)}%` }} /></div><span className="mt-1 block text-xs text-slate-500">{Number(row.completion_rate || 0).toFixed(0)}%</span><button type="button" onClick={() => setTrackingDetails(row)} title="View evaluation details" aria-label={`View details for ${row.instructor_name || 'instructor'}`} className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-ieps-blue-700 hover:text-ieps-blue-900"><Eye className="h-3.5 w-3.5" /> Details</button></td>
                       </tr>
                     )) : (
                       <tr>
-                        <td colSpan={4} className="px-4 py-10 text-center text-gray-500">No student evaluation tracking results available.</td>
+                        <td colSpan={8} className="px-4 py-10 text-center text-gray-500">No evaluation tracking results available.</td>
                       </tr>
                     )}
                   </tbody>
@@ -1464,7 +2307,7 @@ const DeptHeadDashboard = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {peerTrackingRows.length ? peerTrackingRows.map((row, index) => (
+                    {visiblePeerTrackingRows.length ? visiblePeerTrackingRows.map((row, index) => (
                       <tr key={`${row.evaluator_name}-${index}`} className="hover:bg-gray-50">
                         <td className="px-4 py-4 text-gray-700">{index + 1}</td>
                         <td className="px-4 py-4 text-gray-700">{row.peer_instructor}</td>
@@ -1495,7 +2338,7 @@ const DeptHeadDashboard = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {deptTrackingRows.length ? deptTrackingRows.map((row, index) => (
+                    {visibleDeptTrackingRows.length ? visibleDeptTrackingRows.map((row, index) => (
                       <tr key={`${row.instructor_id}-${index}`} className="hover:bg-gray-50">
                         <td className="px-4 py-4 text-gray-700">{row.instructor_name}</td>
                         <td className="px-4 py-4 text-gray-700">{row.score ?? 0} / 100</td>
@@ -1520,9 +2363,33 @@ const DeptHeadDashboard = () => {
                 </button>
               </div>
             </div>
+
+            {trackingDetails ? (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="tracking-details-title">
+                <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl">
+                  <div className="flex items-start justify-between gap-4">
+                    <div><p className="text-xs font-semibold uppercase tracking-wider text-ieps-blue-600">Evaluation details</p><h3 id="tracking-details-title" className="mt-1 text-xl font-bold text-slate-900">{trackingDetails.instructor_name || trackingDetails.name || 'Instructor'}</h3></div>
+                    <button type="button" onClick={() => setTrackingDetails(null)} aria-label="Close details" className="rounded-xl p-2 text-slate-500 hover:bg-slate-100"><X className="h-5 w-5" /></button>
+                  </div>
+                  <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                    {[['Student submissions', `${trackingDetails.completed_evaluations ?? 0}/${trackingDetails.total_evaluations ?? 0}`], ['Completion rate', `${Number(trackingDetails.completion_rate || 0).toFixed(1)}%`], ['Student average', `${Number(trackingDetails.student_average || 0).toFixed(2)}%`], ['Peer average', `${Number(trackingDetails.peer_average || 0).toFixed(2)}%`], ['Dept. Head average', `${Number(trackingDetails.dept_head_average || 0).toFixed(2)}%`], ['Final weighted score', `${Number(trackingDetails.final_score || 0).toFixed(2)}%`]].map(([label, value]) => <div key={label} className="rounded-2xl bg-slate-50 p-4"><p className="text-xs font-semibold uppercase tracking-wider text-slate-500">{label}</p><p className="mt-2 text-lg font-bold text-slate-900">{value}</p></div>)}
+                  </div>
+                  <p className="mt-5 text-sm text-slate-500">Course and section-level records are included in the aggregate totals above for the selected filters.</p>
+                </div>
+              </div>
+            ) : null}
           </div>
         );
       case 'reports':
+        return <DepartmentResultCertificates
+          rows={departmentReportRows}
+          currentUser={currentUser}
+          academicYear={reportAcademicYear}
+          semester={reportSemester}
+          onAcademicYearChange={setReportAcademicYear}
+          onSemesterChange={setReportSemester}
+          onRefresh={() => void loadDashboardData()}
+        />;
         return (
           <div id="department-reports" className="space-y-6 print:space-y-4">
             <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start print:hidden">
@@ -1530,18 +2397,19 @@ const DeptHeadDashboard = () => {
                 <h2 className="text-2xl font-bold text-gray-900">Department Reports</h2>
                 <p className="mt-1 text-sm text-gray-500">Overview of instructor evaluation results and performance in your department.</p>
               </div>
-              <div className="flex gap-2">
-                <button type="button" onClick={printOfficialReport} className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">🖨️ Print Official Report</button>
-                <button type="button" onClick={() => window.print()} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">📥 Export to PDF</button>
-              </div>
+              {isDepartmentSummaryRole && <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={() => printOfficialReport(departmentReportRows[0])} disabled={!isPrintableReportRole(departmentReportRows[0]) || !getReportCompletion(departmentReportRows[0]).canPrint} className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50">🖨️ Print Official Report</button>
+                <button type="button" onClick={() => printOfficialReport(departmentReportRows[0])} disabled={!isPrintableReportRole(departmentReportRows[0]) || !getReportCompletion(departmentReportRows[0]).canPrint} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">📥 Export to PDF</button>
+              </div>}
             </div>
 
+            {isDepartmentSummaryRole && <>
             <div className="flex flex-col gap-4 rounded-xl border border-gray-100 bg-white p-4 shadow-sm md:flex-row md:items-end">
               <label className="flex-1 text-sm font-medium text-gray-700">Department
                 <input value={currentUser?.department_name || currentUser?.department || departmentId || ''} readOnly className="mt-1 w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-sm text-gray-700 outline-none" />
               </label>
               <label className="flex-1 text-sm font-medium text-gray-700">Academic Year
-                <select value={reportAcademicYear} onChange={(event) => setReportAcademicYear(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"><option>2025/2026</option><option>2024/2025</option><option>2026/2027</option></select>
+                <select value={reportAcademicYear} onChange={(event) => setReportAcademicYear(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"><option>{String(new Date().getFullYear())}</option><option>2025/2026</option><option>2024/2025</option><option>2026/2027</option></select>
               </label>
               <label className="flex-1 text-sm font-medium text-gray-700">Semester
                 <select value={reportSemester} onChange={(event) => setReportSemester(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"><option>Semester I</option><option>Semester II</option></select>
@@ -1549,7 +2417,7 @@ const DeptHeadDashboard = () => {
               <button type="button" onClick={() => void loadDashboardData()} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">👁️ View Report</button>
             </div>
 
-            <div className="grid grid-cols-2 gap-4 md:grid-cols-6">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {[
                 ['Total Instructors', reportSummary.total, 'In this Department', 'text-blue-600'],
                 ['Evaluations Completed', reportSummary.completed, `${reportSummary.total ? Math.round((reportSummary.completed / reportSummary.total) * 100) : 0}% Completed`, 'text-emerald-600'],
@@ -1572,18 +2440,21 @@ const DeptHeadDashboard = () => {
                 <button type="button" onClick={() => void loadDashboardData()} className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">🔄 Refresh</button>
               </div>
               <div className="overflow-x-auto">
-                <table className="min-w-[1050px] w-full text-left text-sm">
-                  <thead className="bg-gray-50 text-xs uppercase text-gray-500"><tr><th className="px-4 py-3">#</th><th className="px-4 py-3">Instructor Name</th><th className="px-4 py-3">Employee ID</th><th className="px-4 py-3">Student (50%)</th><th className="px-4 py-3">Peer (20%)</th><th className="px-4 py-3">Dept Head (30%)</th><th className="px-4 py-3">Final Score (100%)</th><th className="px-4 py-3">Performance Level</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Action</th></tr></thead>
+                <table className="min-w-[1200px] w-full text-left text-sm">
+                  <thead className="bg-gray-50 text-xs uppercase text-gray-500"><tr><th className="px-4 py-3">#</th><th className="px-4 py-3">Instructor Name</th><th className="px-4 py-3">Assigned Classes / Years</th><th className="px-4 py-3">Total Evaluators</th><th className="px-4 py-3">Student (50%)</th><th className="px-4 py-3">Peer (20%)</th><th className="px-4 py-3">Dept Head (30%)</th><th className="px-4 py-3">Final Score (100%)</th><th className="px-4 py-3">Performance Level</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Action</th></tr></thead>
                   <tbody className="divide-y divide-gray-100">
                     {departmentReportRows.length ? departmentReportRows.map((row, index) => {
                       const level = row.finalScore >= 90 ? ['Excellent', 'bg-emerald-100 text-emerald-700'] : row.finalScore >= 80 ? ['Very Good', 'bg-blue-100 text-blue-700'] : row.finalScore >= 75 ? ['Good', 'bg-yellow-100 text-yellow-700'] : ['Average', 'bg-orange-100 text-orange-700'];
-                      return <tr key={row.id} className="hover:bg-gray-50"><td className="px-4 py-4">{index + 1}</td><td className="px-4 py-4 font-medium text-gray-900">{row.instructorName}</td><td className="px-4 py-4 text-gray-600">{row.employeeId}</td><td className="px-4 py-4">{row.studentScore.toFixed(2)}</td><td className="px-4 py-4">{row.peerScore.toFixed(2)}</td><td className="px-4 py-4">{row.deptHeadScore.toFixed(2)}</td><td className="px-4 py-4 font-bold text-blue-700">{row.finalScore.toFixed(2)}</td><td className="px-4 py-4"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${level[1]}`}>{level[0]}</span></td><td className="px-4 py-4"><span className={`text-xs font-semibold ${row.status === 'Completed' ? 'text-emerald-600' : 'text-orange-600'}`}>{row.status === 'Completed' ? '✓ Completed' : '◷ Pending'}</span></td><td className="px-4 py-4"><button type="button" title={`Print report for ${row.instructorName}`} onClick={() => printOfficialReport(row)} className="rounded-lg px-2 py-1 text-lg text-gray-500 hover:bg-gray-100">🖨️</button></td></tr>;
-                    }) : <tr><td colSpan={10} className="px-4 py-10 text-center text-gray-500">No instructor evaluation results available.</td></tr>}
+                      const completion = getReportCompletion(row);
+                      const printableRole = isPrintableReportRole(row);
+                      return <tr key={row.id} className="hover:bg-gray-50"><td className="px-4 py-4">{index + 1}</td><td className="px-4 py-4 font-medium text-gray-900">{row.instructorName}</td><td className="px-4 py-4 text-gray-700">{row.assignedClasses || 'N/A'}</td><td className="px-4 py-4 text-gray-700">{row.totalEvaluators || row.total_student_evaluators || 0}</td><td className="px-4 py-4">{Number(row.studentScore || row.student_average || 0).toFixed(2)}</td><td className="px-4 py-4">{Number(row.peerScore || row.peer_average || 0).toFixed(2)}</td><td className="px-4 py-4">{Number(row.deptHeadScore || row.dept_head_score || 0).toFixed(2)}</td><td className="px-4 py-4 font-bold text-blue-700">{Number(row.finalScore || row.final_score || 0).toFixed(2)}</td><td className="px-4 py-4"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${level[1]}`}>{level[0]}</span></td><td className="px-4 py-4"><span className={`text-xs font-semibold ${row.status === 'Completed' ? 'text-emerald-600' : 'text-orange-600'}`}>{row.status === 'Completed' ? '✓ Completed' : '◷ Pending Submissions'}</span></td><td className="px-4 py-4">{printableRole ? <button type="button" title={completion.canPrint ? `Print report for ${row.instructorName}` : completion.message} onClick={() => printOfficialReport(row)} disabled={!completion.canPrint} className="rounded-lg px-2 py-1 text-lg text-gray-500 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50">🖨️</button> : <span className="text-xs text-gray-400">N/A</span>}</td></tr>;
+                    }) : <tr><td colSpan={11} className="px-4 py-10 text-center text-gray-500">No instructor evaluation results available.</td></tr>}
                   </tbody>
                 </table>
               </div>
               <div className="flex flex-col gap-3 border-t border-gray-100 p-4 text-xs text-gray-500 md:flex-row md:items-center md:justify-between"><span>Showing {departmentReportRows.length ? 1 : 0} to {departmentReportRows.length} of {departmentReportRows.length} instructors</span><span>Department Average: {reportSummary.average.toFixed(2)} | Completed: {reportSummary.completed} ({reportSummary.total ? Math.round((reportSummary.completed / reportSummary.total) * 100) : 0}%) | Pending: {reportSummary.pending} ({reportSummary.total ? Math.round((reportSummary.pending / reportSummary.total) * 100) : 0}%)</span><span>‹ 1 ›</span></div>
             </section>
+            </>}
           </div>
         );
       default:
@@ -1596,37 +2467,82 @@ const DeptHeadDashboard = () => {
   }
 
   return (
-    <div className="container-custom py-8">
-      <div className="official-report-shell">
-        <OfficialDepartmentReport
-          departmentName={currentUser?.department_name || currentUser?.department || departmentId}
-          academicYear={reportAcademicYear}
-          semester={reportSemester}
-          reportRow={officialReportRow}
-          reportDate={new Date().toLocaleDateString()}
-        />
-      </div>
+    <div className="container-custom min-w-0 py-4 sm:py-6 lg:py-8">
+      {officialReportRow && <div className="official-report-shell">
+        <div className="printable-certificate-container">
+          <OfficialDepartmentReport
+            departmentName={currentUser?.department_name || currentUser?.department || departmentId}
+            academicYear={reportAcademicYear}
+            semester={reportSemester}
+            reportRow={officialReportRow}
+            departmentHeadName={currentUser?.full_name || currentUser?.name || currentUser?.username}
+            reportDate={new Date().toLocaleDateString()}
+          />
+        </div>
+      </div>}
       <div className="mb-8 flex flex-col justify-between gap-4 md:flex-row md:items-center print:hidden">
         <div>
-          <h1 className="text-3xl font-bold text-ieps-blue-600">{strings.deptHeadDashboard.title || 'Department Head Dashboard'}</h1>
-          <p className="mt-1 text-gray-500">{strings.deptHeadDashboard.subtitle || 'Coordinate users, courses, evaluations, and assignments from one operational hub.'}</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-3 relative z-10">
-          <div className="inline-flex items-center gap-2 rounded-2xl border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 shadow-sm">
-            <FaBell />
-            <span>{urgentReminders.length} alerts</span>
-          </div>
+          <h1 className="text-3xl font-bold text-ieps-blue-600">{t('deptHeadDashboard.title')}</h1>
+          <p className="mt-1 text-gray-500">{t('deptHeadDashboard.subtitle')}</p>
         </div>
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-[240px_minmax(0,1fr)]">
-        <aside className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm print:hidden">
+      <div className="mb-6 print:hidden">
+        <IPESAISmartInsights role="DEPT_HEAD" departmentId={departmentId} userId={currentUser?.id} onActionClick={handleAiAction} onDataChange={setAiInsights} />
+      </div>
+      <PendingStudentsModal open={pendingModalOpen} students={pendingStudents} isLoading={pendingStudentsLoading} onClose={() => setPendingModalOpen(false)} onSendReminder={() => sendEvaluationReminder()} isSending={reminderSending} />
+      <AnomaliesModal open={anomaliesModalOpen} anomalies={aiInsights.anomalies || []} onClose={() => setAnomaliesModalOpen(false)} />
+      {selectedForDelete && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4" role="presentation">
+          <section className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl" role="alertdialog" aria-modal="true" aria-labelledby="remove-assignment-title" aria-describedby="remove-assignment-description">
+            <div className="mb-4 flex items-start justify-between gap-4">
+              <div>
+                <h2 id="remove-assignment-title" className="text-lg font-semibold text-gray-900">Remove course assignment?</h2>
+                <p id="remove-assignment-description" className="mt-2 text-sm leading-6 text-gray-600">
+                  This action cannot be undone. Confirm that you want to remove this assignment.
+                </p>
+              </div>
+              <button type="button" onClick={() => setSelectedForDelete(null)} disabled={deletingAssignment} className="rounded-lg p-1 text-gray-500 hover:bg-gray-100 disabled:opacity-50" aria-label="Close confirmation">
+                <X size={18} />
+              </button>
+            </div>
+            <dl className="mb-6 space-y-2 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm">
+              <div className="flex flex-wrap gap-1"><dt className="font-medium text-gray-700">Course:</dt><dd className="text-gray-900">{selectedForDelete.course_name || 'Unknown course'}{selectedForDelete.course_code ? ` (${selectedForDelete.course_code})` : ''}</dd></div>
+              <div className="flex flex-wrap gap-1"><dt className="font-medium text-gray-700">Assigned to:</dt><dd className="text-gray-900">{selectedForDelete.staff_name || selectedForDelete.instructor_name || 'Unknown staff member'}</dd></div>
+            </dl>
+            <div className="flex justify-end gap-3">
+              <button type="button" onClick={() => setSelectedForDelete(null)} disabled={deletingAssignment} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50">Cancel</button>
+              <button type="button" onClick={handleConfirmDelete} disabled={deletingAssignment} className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60">
+                <Trash2 size={15} />{deletingAssignment ? 'Removing...' : 'Yes, remove'}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      <div className="grid min-w-0 gap-6 lg:grid-cols-[240px_minmax(0,1fr)]">
+        <div className={`fixed inset-x-0 bottom-0 top-16 z-50 print:hidden lg:hidden ${isMobileMenuOpen ? '' : 'pointer-events-none invisible'}`}>
+          <button type="button" className={`absolute inset-0 bg-slate-950/45 transition-opacity ${isMobileMenuOpen ? 'opacity-100' : 'opacity-0'}`} onClick={() => setIsMobileMenuOpen(false)} aria-label="Close dashboard navigation" tabIndex={isMobileMenuOpen ? 0 : -1} />
+          <nav id="dashboard-mobile-drawer" className={`absolute inset-y-0 left-0 w-[min(18rem,85vw)] overflow-y-auto border-r border-gray-200 bg-white p-4 shadow-2xl transition-transform duration-200 ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}`} aria-label="Department head dashboard navigation" aria-hidden={!isMobileMenuOpen}>
+            <div className="mb-4 flex items-center gap-2 rounded-xl bg-ieps-blue-50 px-3 py-2">
+              <FaShieldAlt className="text-ieps-blue-600" />
+              <h3 className="text-sm font-semibold uppercase tracking-wide text-ieps-blue-700">{t('deptHeadDashboard.role')}</h3>
+            </div>
+            <div className="space-y-2">
+              {sidebarItems.map(({ key, labelKey, icon: Icon }) => {
+                const isActive = key === activeTab;
+                return <button key={key} type="button" onClick={() => { setActiveTab(key); setIsMobileMenuOpen(false); }} aria-current={isActive ? 'page' : undefined} className={`flex min-h-11 w-full items-center gap-3 rounded-xl border px-3 py-2.5 text-left text-sm font-semibold ${isActive ? 'border-ieps-blue-200 bg-ieps-blue-50 text-ieps-blue-600 shadow-sm' : 'border-transparent text-gray-600 hover:border-gray-200 hover:bg-gray-50'}`}><Icon /><span>{t(`deptHeadDashboard.${labelKey}`)}</span></button>;
+              })}
+            </div>
+          </nav>
+        </div>
+        <aside className="hidden rounded-2xl border border-gray-200 bg-white p-4 shadow-sm print:hidden lg:block">
           <div className="mb-4 flex items-center gap-2 rounded-xl bg-ieps-blue-50 px-3 py-2">
             <FaShieldAlt className="text-ieps-blue-600" />
-            <h3 className="text-sm font-semibold uppercase tracking-wide text-ieps-blue-700">Department Head</h3>
+            <h3 className="text-sm font-semibold uppercase tracking-wide text-ieps-blue-700">{t('deptHeadDashboard.role')}</h3>
           </div>
           <div className="space-y-2">
-            {sidebarItems.map(({ key, label, icon: Icon }) => {
+            {sidebarItems.map(({ key, labelKey, icon: Icon }) => {
               const isActive = key === activeTab;
               return (
                 <button
@@ -1636,34 +2552,34 @@ const DeptHeadDashboard = () => {
                   className={`flex w-full items-center gap-3 rounded-xl border px-3 py-2 text-left text-sm transition ${isActive ? 'border-ieps-blue-200 bg-ieps-blue-50 text-ieps-blue-600 shadow-sm' : 'border-transparent text-gray-600 hover:border-gray-200 hover:bg-gray-50'}`}
                 >
                   <Icon />
-                  <span>{label}</span>
+                  <span>{t(`deptHeadDashboard.${labelKey}`)}</span>
                 </button>
               );
             })}
           </div>
         </aside>
 
-        <main className="space-y-6">
+        <main className="min-w-0 space-y-6">
           {activeTab === 'overview' && (
             <div className="mb-6 rounded-2xl border border-sky-100 bg-sky-50 p-6 shadow-sm dark:border-sky-900/50 dark:bg-sky-950/40">
               <p className="mb-1 text-xs font-semibold uppercase tracking-wider text-slate-500">
                 MEKDELA AMBA UNIVERSITY
               </p>
               <h1 className="mb-3 text-2xl font-bold text-slate-900 dark:text-white sm:text-3xl">
-                Welcome, {currentUser?.first_name ? `${currentUser.first_name} ${currentUser.last_name || ''}`.trim() : currentUser?.name || currentUser?.username || 'Department Head'}
+                {t('deptHeadDashboard.welcome')}, {currentUser?.first_name ? `${currentUser.first_name} ${currentUser.last_name || ''}`.trim() : currentUser?.name || currentUser?.username || t('deptHeadDashboard.role')}
               </h1>
               <div className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3.5 py-1 text-xs font-medium text-slate-700 shadow-sm dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
-                Department: <span className="ml-1 font-semibold">{currentUser?.department_name || currentUser?.department || 'N/A'}</span>
+                {t('deptHeadDashboard.department')}: <span className="ml-1 font-semibold">{currentUser?.department_name || currentUser?.department || t('instructorDashboard.notAvailable')}</span>
               </div>
             </div>
           )}
 
-          <section className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+          <section className="min-w-0 rounded-3xl border border-gray-200 bg-white p-4 shadow-sm sm:p-6">
             <div className="flex flex-col gap-5 md:flex-row md:items-center md:justify-between">
               <div>
                 <p className="text-sm font-semibold uppercase tracking-[0.25em] text-ieps-blue-600">{tabTitleMap[activeTab] || 'Overview'}</p>
-                <h2 className="mt-3 text-2xl font-semibold text-slate-900">{tabTitleMap[activeTab] || 'Department operations center'}</h2>
-                <p className="mt-2 max-w-2xl text-sm text-slate-500">Monitor registrations, dispatch feedback forms, and keep assignments moving without losing visibility.</p>
+                <h2 className="mt-3 text-2xl font-semibold text-slate-900">{tabTitleMap[activeTab] || t('deptHeadDashboard.operationsCenter')}</h2>
+                <p className="mt-2 max-w-2xl text-sm text-slate-500">{t('deptHeadDashboard.intro')}</p>
               </div>
             </div>
 

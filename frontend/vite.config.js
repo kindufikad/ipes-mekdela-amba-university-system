@@ -15,16 +15,16 @@ export default defineConfig({
     },
     proxy: {
       '/api': {
-        target: 'http://localhost:5005',
+        target: 'http://127.0.0.1:5005',
         changeOrigin: true,
       },
       '/socket.io': {
-        target: 'http://localhost:5005',
+        target: 'http://127.0.0.1:5005',
         changeOrigin: true,
         ws: true,
       },
       '/uploads': {
-        target: 'http://localhost:5005',
+        target: 'http://127.0.0.1:5005',
         changeOrigin: true,
       }
     }

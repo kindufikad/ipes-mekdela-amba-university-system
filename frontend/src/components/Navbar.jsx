@@ -7,9 +7,10 @@ import {
 } from 'react-icons/fa';
 import LanguageSwitcher from './LanguageSwitcher';
 import { LanguageContext } from '../context/LanguageContext';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/useAuth';
 import toast from 'react-hot-toast';
 import NotificationBell from './NotificationBell';
+import useLandingContent from '../hooks/useLandingContent';
 
 const Navbar = () => {
   const { strings } = useContext(LanguageContext);
@@ -17,11 +18,15 @@ const Navbar = () => {
   const location = useLocation();
   const [isOpen, setIsOpen] = useState(false);
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const landingContent = useLandingContent();
 
   const isDashboardPath = ['/student-dashboard', '/instructor-dashboard', '/depthead-dashboard', '/admin-dashboard', '/system-admin-dashboard'].includes(location.pathname);
   const hidePublicNav = isDashboardPath || role === 'depthead';
 
-  const toggleMenu = () => setIsOpen(!isOpen);
+  const toggleMenu = () => {
+    setIsOpen((open) => !open);
+    setDropdownOpen(false);
+  };
   const toggleDropdown = () => setDropdownOpen(!dropdownOpen);
 
   const handleLogout = async () => {
@@ -36,15 +41,23 @@ const Navbar = () => {
     { path: '/about', label: strings.navbar.about, icon: FaInfoCircle },
     { path: '/contact', label: strings.navbar.contact, icon: FaEnvelope },
   ];
+  const avatarUrl = user?.profile_photo || user?.profile_picture || user?.avatar;
+  const resolvedAvatarUrl = avatarUrl
+    ? (avatarUrl.startsWith('http://') || avatarUrl.startsWith('https://') || avatarUrl.startsWith('data:')
+      ? avatarUrl
+      : typeof window !== 'undefined' && avatarUrl.startsWith('/')
+        ? `${window.location.origin}${avatarUrl}`
+        : avatarUrl)
+    : null;
 
   return (
-    <nav className="bg-gradient-to-r from-ieps-blue-600 to-ieps-blue-500 shadow-lg sticky top-0 z-50">
+    <nav className="sticky top-0 z-50 bg-gradient-to-r from-ieps-blue-600 to-ieps-blue-500 shadow-lg">
       <div className="container-custom">
         <div className="flex justify-between items-center h-16 md:h-20">
 
           {/* Logo */}
           <Link to="/" className="flex items-center gap-2 md:gap-3 group min-w-0">
-            <FaChalkboardTeacher className="text-ieps-gold-500 text-2xl md:text-3xl group-hover:rotate-12 transition-transform duration-300" />
+            <img src={landingContent.system_logo} alt="IPES system logo" className="h-10 w-10 rounded-lg object-contain" />
             <div className="min-w-0">
               <span className="text-white font-bold text-base md:text-lg tracking-wide block">(IPES)</span>
               <p className="text-white/80 text-[11px] sm:text-xs md:text-sm leading-snug max-w-[220px]">
@@ -54,13 +67,14 @@ const Navbar = () => {
           </Link>
 
           {/* Desktop Navigation */}
-          <div className="hidden md:flex items-center gap-1">
+          <div id="public-mobile-navigation" className={`${isOpen ? 'absolute left-0 right-0 top-full flex max-h-[calc(100dvh-4rem)] flex-col items-stretch gap-2 overflow-y-auto border-t border-white/10 bg-gradient-to-r from-ieps-blue-600 to-ieps-blue-500 px-4 py-4 shadow-xl' : 'hidden'} md:static md:flex md:max-h-none md:flex-row md:items-center md:gap-1 md:overflow-visible md:border-0 md:bg-transparent md:p-0 md:shadow-none`}>
             {!hidePublicNav && navLinks.map(({ path, label, icon: Icon }) => (
               <NavLink
                 key={path}
                 to={path}
+                onClick={() => setIsOpen(false)}
                 className={({ isActive }) =>
-                  `flex items-center gap-2 px-4 py-2 rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-all duration-200 ${isActive ? 'bg-white/20 text-white' : ''}`
+                  `flex items-center gap-2 rounded-lg px-4 py-3 text-white/80 transition-all duration-200 hover:bg-white/10 hover:text-white md:py-2 ${isActive ? 'bg-white/20 text-white' : ''}`
                 }
               >
                 <Icon className="text-sm" />
@@ -68,20 +82,24 @@ const Navbar = () => {
               </NavLink>
             ))}
 
-            <LanguageSwitcher />
-            {isAuthenticated && <NotificationBell />}
+            <div className="flex items-center gap-2 px-4 py-2 md:px-0 md:py-0">
+              <LanguageSwitcher />
+              {isAuthenticated && <NotificationBell />}
+            </div>
 
-            <div className="w-px h-8 bg-white/20 mx-2"></div>
+            <div className="hidden h-8 w-px bg-white/20 md:mx-2 md:block"></div>
 
             {isAuthenticated ? (
               <>
                 <div className="relative">
                   <button
                     onClick={toggleDropdown}
+                    type="button"
+                    aria-expanded={dropdownOpen}
                     className="flex items-center gap-2 px-4 py-2 rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-all duration-200"
                   >
-                    {user?.profile_picture ? (
-                      <img src={user.profile_picture} alt="" className="h-7 w-7 rounded-full border border-white/50 object-cover" />
+                    {resolvedAvatarUrl ? (
+                      <img src={resolvedAvatarUrl} alt="Profile" className="h-7 w-7 rounded-full border border-white/50 object-cover" />
                     ) : (
                       <FaUserCircle className="text-xl" />
                     )}
@@ -97,22 +115,22 @@ const Navbar = () => {
                       </div>
                       
                       {role === 'student' && (
-                        <Link to="/student-dashboard" className="flex items-center gap-3 px-4 py-2 text-gray-700 hover:bg-gray-50 transition-colors">
+                          <Link to="/student-dashboard" onClick={() => setIsOpen(false)} className="flex items-center gap-3 px-4 py-2 text-gray-700 hover:bg-gray-50 transition-colors">
                           <FaUserGraduate /> {strings.common.dashboard}
                         </Link>
                       )}
                       {role === 'instructor' && (
-                        <Link to="/instructor-dashboard" className="flex items-center gap-3 px-4 py-2 text-gray-700 hover:bg-gray-50 transition-colors">
+                          <Link to="/instructor-dashboard" onClick={() => setIsOpen(false)} className="flex items-center gap-3 px-4 py-2 text-gray-700 hover:bg-gray-50 transition-colors">
                           <FaChalkboardTeacher /> {strings.common.instructorPanel}
                         </Link>
                       )}
                       {(role === 'admin' || role === 'systemadmin') && (
-                        <Link to="/system-admin-dashboard" className="flex items-center gap-3 px-4 py-2 text-gray-700 hover:bg-gray-50 transition-colors">
+                        <Link to="/system-admin-dashboard" onClick={() => setIsOpen(false)} className="flex items-center gap-3 px-4 py-2 text-gray-700 hover:bg-gray-50 transition-colors">
                           <FaUserShield /> {strings.common.adminPanel}
                         </Link>
                       )}
                       {role === 'depthead' && (
-                        <Link to="/depthead-dashboard" className="flex items-center gap-3 px-4 py-2 text-gray-700 hover:bg-gray-50 transition-colors">
+                        <Link to="/depthead-dashboard" onClick={() => setIsOpen(false)} className="flex items-center gap-3 px-4 py-2 text-gray-700 hover:bg-gray-50 transition-colors">
                           <FaSitemap /> {strings.common.deptHeadPanel}
                         </Link>
                       )}
@@ -130,6 +148,7 @@ const Navbar = () => {
             ) : (
               <Link
                 to="/login"
+                onClick={() => setIsOpen(false)}
                 className="flex items-center justify-center gap-2 px-6 py-2 bg-ieps-gold-500 text-ieps-blue-600 rounded-full font-semibold hover:bg-ieps-gold-400 transition-all duration-300 shadow-md hover:shadow-lg"
               >
                 <FaSignInAlt className="shrink-0" />
@@ -142,71 +161,14 @@ const Navbar = () => {
           <button
             onClick={toggleMenu}
             className="md:hidden text-white text-2xl p-2 hover:bg-white/10 rounded-lg transition-colors"
+            aria-label={isOpen ? 'Close navigation menu' : 'Open navigation menu'}
+            aria-expanded={isOpen}
+            aria-controls="public-mobile-navigation"
           >
             {isOpen ? <FaTimes /> : <FaBars />}
           </button>
         </div>
 
-        {/* Mobile Navigation */}
-        <div className={`md:hidden overflow-hidden transition-all duration-300 ease-in-out ${isOpen ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'}`}>
-          <div className="py-4 border-t border-white/10 space-y-1">
-            {!hidePublicNav && navLinks.map(({ path, label, icon: Icon }) => (
-              <NavLink
-                key={path}
-                to={path}
-                onClick={() => setIsOpen(false)}
-                className={({ isActive }) =>
-                  `flex items-center gap-3 px-4 py-3 rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition-all ${isActive ? 'bg-white/20 text-white' : ''}`
-                }
-              >
-                <Icon />
-                <span>{label}</span>
-              </NavLink>
-            ))}
-
-            {isAuthenticated ? (
-              <>
-                <div className="px-4 py-2 text-white/60 text-sm border-t border-white/10 mt-2">
-                  {strings.navbar.loggedInAs} <span className="text-white font-medium">{user?.name || strings.common.user}</span>
-                </div>
-                {role === 'student' && (
-                  <Link to="/student-dashboard" onClick={() => setIsOpen(false)} className="flex items-center gap-3 px-4 py-3 text-white/80 hover:text-white hover:bg-white/10 rounded-lg">
-                    <FaUserGraduate /> Dashboard
-                  </Link>
-                )}
-                {role === 'instructor' && (
-                  <Link to="/instructor-dashboard" onClick={() => setIsOpen(false)} className="flex items-center gap-3 px-4 py-3 text-white/80 hover:text-white hover:bg-white/10 rounded-lg">
-                    <FaChalkboardTeacher /> Instructor Panel
-                  </Link>
-                )}
-                {(role === 'admin' || role === 'systemadmin') && (
-                  <Link to="/system-admin-dashboard" onClick={() => setIsOpen(false)} className="flex items-center gap-3 px-4 py-3 text-white/80 hover:text-white hover:bg-white/10 rounded-lg">
-                    <FaUserShield /> Admin Panel
-                  </Link>
-                )}
-                {role === 'depthead' && (
-                  <Link to="/depthead-dashboard" onClick={() => setIsOpen(false)} className="flex items-center gap-3 px-4 py-3 text-white/80 hover:text-white hover:bg-white/10 rounded-lg">
-                    <FaSitemap /> Dept. Head Panel
-                  </Link>
-                )}
-                <button
-                  onClick={() => { handleLogout(); setIsOpen(false); }}
-                  className="flex items-center gap-3 px-4 py-3 text-red-300 hover:text-red-200 hover:bg-red-500/20 rounded-lg w-full"
-                >
-                  <FaSignOutAlt /> Logout
-                </button>
-              </>
-            ) : (
-              <Link
-                to="/login"
-                onClick={() => setIsOpen(false)}
-                className="flex items-center justify-center gap-3 px-4 py-3 bg-ieps-gold-500 text-ieps-blue-600 rounded-lg font-semibold hover:bg-ieps-gold-400 transition-colors mt-2"
-              >
-                <FaSignInAlt className="shrink-0" /> <span className="text-center">Login</span>
-              </Link>
-            )}
-          </div>
-        </div>
       </div>
     </nav>
   );

@@ -19,11 +19,12 @@ import {
   FaEyeSlash,
 } from 'react-icons/fa';
 import toast from 'react-hot-toast';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/useAuth';
 import SuccessModal from '../components/SuccessModal';
-import mauLogo from '../assets/mau.jpg';
+import useLandingContent from '../hooks/useLandingContent';
 
 const Login = () => {
+  const landingContent = useLandingContent();
   const [formData, setFormData] = useState({
     identifier: '',
     password: '',
@@ -279,6 +280,7 @@ const Login = () => {
     if (normalizedValue === 'system_admin' || normalizedValue === 'systemadmin' || normalizedValue === 'admin') return 'systemadmin';
     if (normalizedValue === 'college_dean' || normalizedValue === 'dean') return 'college_dean';
     if (normalizedValue === 'academic_directorate' || normalizedValue === 'academic_director' || normalizedValue === 'directorate') return 'academic_directorate';
+    if (normalizedValue === 'lab_assistant') return 'lab_assistant';
     if (normalizedValue === 'student' || normalizedValue === 'instructor') return normalizedValue;
 
     return 'student';
@@ -288,6 +290,7 @@ const Login = () => {
     const normalizedRole = normalizeRole(value);
 
     if (normalizedRole === 'instructor') return '/instructor-dashboard';
+    if (normalizedRole === 'lab_assistant') return '/lab-assistant/dashboard';
     if (normalizedRole === 'depthead') return '/dept-head-dashboard';
     if (normalizedRole === 'systemadmin') return '/system-admin-dashboard';
     if (normalizedRole === 'college_dean') return '/dean/dashboard';
@@ -305,6 +308,8 @@ const Login = () => {
       navigate('/student-dashboard');
     } else if (normalizedRole === 'instructor') {
       navigate('/instructor-dashboard');
+    } else if (normalizedRole === 'lab_assistant') {
+      navigate('/lab-assistant/dashboard');
     } else if (normalizedRole === 'depthead') {
       navigate('/dept-head-dashboard');
     } else if (normalizedRole === 'systemadmin') {
@@ -367,7 +372,7 @@ const Login = () => {
         <div className="rounded-[28px] border border-gray-200 bg-white p-8 shadow-2xl shadow-ieps-blue-100/50 md:p-10">
           <div className="mb-8 text-center">
             <div className="mx-auto mb-4 flex h-24 w-24 items-center justify-center rounded-full bg-ieps-blue-100 shadow-inner shadow-ieps-blue-200/40">
-              <img src={mauLogo} alt="Mekdela Amba University logo" className="h-14 w-14" />
+              <img src={landingContent.university_logo} alt="Mekdela Amba University logo" className="h-14 w-14 object-contain" />
             </div>
 
             {!forgotPasswordMode ? (

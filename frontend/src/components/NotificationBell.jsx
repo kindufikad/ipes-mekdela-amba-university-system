@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Bell, CheckCheck, Trash2 } from 'lucide-react';
 import { notificationApi } from '../services/api';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/useAuth';
 import socket from '../services/socketClient';
 
 const NotificationBell = () => {
@@ -29,7 +29,8 @@ const NotificationBell = () => {
           })) : []);
           setUnreadCount(Number(payload?.unreadCount || 0));
         }
-      } catch {
+      } catch (error) {
+        if (error?.status >= 500) console.warn('Notification service is temporarily unavailable.');
         if (isMounted) {
           setNotifications([]);
           setUnreadCount(0);
@@ -47,7 +48,10 @@ const NotificationBell = () => {
   }, [authToken, isAuthenticated]);
 
   useEffect(() => {
-    if (!isAuthenticated || !authToken) return undefined;
+    if (!isAuthenticated || !authToken) {
+      if (socket.connected || socket.connecting) socket.disconnect();
+      return undefined;
+    }
     socket.auth = { token: authToken };
     const handleNotification = (notification) => {
       setNotifications((current) => [{ ...notification, is_read: false }, ...current].slice(0, 20));
@@ -56,12 +60,13 @@ const NotificationBell = () => {
     const joinRooms = () => socket.emit('join_rooms', { userId: user?.id ?? user?.user_id, role });
     socket.on('new_notification', handleNotification);
     socket.on('connect', joinRooms);
-    socket.connect();
+    if (!socket.connected && !socket.connecting) {
+      socket.connect();
+    }
     if (socket.connected) joinRooms();
     return () => {
       socket.off('new_notification', handleNotification);
       socket.off('connect', joinRooms);
-      socket.disconnect();
     };
   }, [authToken, isAuthenticated, role, user?.id, user?.user_id]);
 

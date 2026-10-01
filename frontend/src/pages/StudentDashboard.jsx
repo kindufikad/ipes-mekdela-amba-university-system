@@ -1,12 +1,14 @@
 ﻿import { useEffect, useMemo, useState, useContext } from 'react';
 import { FaStar, FaClipboardCheck, FaHome } from 'react-icons/fa';
 import { LanguageContext } from '../context/LanguageContext';
+import { useTranslation } from '../context/useTranslation';
 import { completeWorkflowTask, getWorkflowSnapshot } from '../services/workflowState';
 import { SUBMISSIONS_UPDATED_EVENT } from '../services/formSubmissions';
 import { criteriaApi, evaluationApi, studentApi } from '../services/api';
 import LanguageToggle from '../components/LanguageToggle';
 import StudentEvaluationModal from '../components/StudentEvaluationModal';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/useAuth';
+import IPESAISmartInsights from '../components/ai/IPESAISmartInsights';
 
 const resolveTranslationValue = (value, fallback = '', preferredLanguage = 'en') => {
   if (typeof value === 'string') return value;
@@ -91,6 +93,7 @@ const studentEvaluationSections = [
 
 const StudentDashboard = () => {
   const { strings: rawStrings, language } = useContext(LanguageContext);
+  const { t: localeT } = useTranslation();
   const { user, role, isAuthenticated, authToken } = useAuth();
   const strings = useMemo(() => normalizeTranslations(rawStrings, language), [rawStrings, language]);
   const t = (path, fallback = '') => getTranslationByPath(strings, path, fallback);
@@ -116,6 +119,12 @@ const StudentDashboard = () => {
   const [workflowSummary, setWorkflowSummary] = useState(() => getWorkflowSnapshot());
   const [dynamicStudentSections, setDynamicStudentSections] = useState([]);
   const [criteriaLanguage, setCriteriaLanguage] = useState('en');
+  useEffect(() => {
+    setCriteriaLanguage(language);
+  }, [language]);
+  const handleAiAction = (actionType) => {
+    if (actionType === 'VIEW_PENDING_EVALUATIONS') setActiveTab('my-evaluations');
+  };
   useEffect(() => {
     criteriaApi.get('student').then((rows) => {
       const grouped = (Array.isArray(rows) ? rows : []).reduce((result, criterion) => {
@@ -208,12 +217,14 @@ const StudentDashboard = () => {
     return totalItems ? (sum / totalItems) * 20 : 0;
   }, [studentResponses, totalItems]);
 
-  const pendingCount = pendingCourses.filter((course) => course.status === 'pending').length;
+  const isCompletedEvaluation = (course) => Boolean(course?.is_evaluated)
+    || ['submitted', 'completed', 'approved', 'evaluated'].includes(String(course?.submission_status || course?.status || course?.evaluation_status || '').toLowerCase());
+  const pendingCount = pendingCourses.filter((course) => !isCompletedEvaluation(course)).length;
   useEffect(() => {
     window.dispatchEvent(new CustomEvent('ipes-pending-evaluations-updated', { detail: { count: pendingCount } }));
     return () => window.dispatchEvent(new CustomEvent('ipes-pending-evaluations-updated', { detail: { count: 0 } }));
   }, [pendingCount]);
-  const completedCount = pendingCourses.filter((course) => course.status === 'submitted' || course.status === 'completed').length;
+  const completedCount = pendingCourses.filter(isCompletedEvaluation).length;
   const totalCourses = pendingCourses.length;
   const fullNameParts = [profile?.first_name, profile?.last_name].filter(Boolean);
   const getStudentFullName = () => {
@@ -260,7 +271,6 @@ const StudentDashboard = () => {
   const sidebarItems = [
     { key: 'overview', label: t('studentDashboard.overview'), icon: FaHome },
     { key: 'my-evaluations', label: t('studentDashboard.myEvaluations'), icon: FaClipboardCheck },
-    { key: 'student-evaluation', label: t('studentDashboard.studentEvaluationForm'), icon: FaClipboardCheck },
   ];
 
   const findDispatchForCourse = (course) => {
@@ -290,6 +300,12 @@ const StudentDashboard = () => {
 
   const getInstructorName = (course) => course?.instructor_name?.trim() || course?.instructor?.trim() || 'Assigned Instructor';
   const getScoreValue = (item) => Number(item?.total_score ?? item?.score ?? item?.totalScore ?? item?.overall_score ?? 0) || 0;
+  const canEditEvaluation = (evaluation) => {
+    if (!evaluation?.is_evaluated && !evaluation?.submission_id) return false;
+    if (!evaluation.editable_until) return false;
+    const editableUntil = new Date(evaluation.editable_until).getTime();
+    return Number.isFinite(editableUntil) && editableUntil > Date.now();
+  };
 
   const renderCourseAction = (course) => {
     const status = String(course?.status || course?.evaluation_status || '').toLowerCase();
@@ -297,17 +313,19 @@ const StudentDashboard = () => {
     const scoreValue = getScoreValue(course);
 
     if (isEvaluated) {
+      const editable = canEditEvaluation(course);
       return (
         <div className="flex items-center gap-2">
           <span className="flex items-center gap-1 text-sm font-semibold text-emerald-600">
-            ✓ Evaluated ({scoreValue}/100)
+            ✓ Submitted ({scoreValue}/100)
           </span>
           <button
             type="button"
-            onClick={() => openEvaluation(course, 'view', course)}
-            className="text-sm font-semibold text-blue-600 underline transition-colors hover:text-blue-800"
+            onClick={() => editable && openEvaluation(course, 'view', course)}
+            disabled={!editable}
+            className={`text-sm font-semibold underline transition-colors ${editable ? 'text-blue-600 hover:text-blue-800' : 'cursor-not-allowed text-gray-400 no-underline'}`}
           >
-            View Details
+            {editable ? 'Edit Evaluation' : 'Submitted (Locked)'}
           </button>
         </div>
       );
@@ -319,7 +337,7 @@ const StudentDashboard = () => {
         onClick={() => openEvaluation(course, 'create', null)}
         className="flex items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-sm font-bold text-indigo-600 transition-colors hover:bg-indigo-100 hover:text-indigo-700"
       >
-        <FaStar /> Evaluate
+        <FaStar /> {t('studentDashboard.evaluate')}
       </button>
     );
   };
@@ -332,8 +350,11 @@ const StudentDashboard = () => {
       await evaluationApi.submitStudentEvaluationForm(payload);
       setStudentModalSuccess('Student evaluation submitted successfully.');
       setShowStudentModal(false);
-      setPendingDispatches((current) => current.map((dispatch) => (dispatch.id === payload.dispatch_id ? { ...dispatch, status: 'submitted' } : dispatch)));
-      setPendingCourses((current) => current.map((course) => (course.id === payload.dispatch_id ? { ...course, status: 'submitted' } : course)));
+      const submittedAt = new Date();
+      const editableUntil = new Date(submittedAt.getTime() + 3 * 24 * 60 * 60 * 1000).toISOString();
+      const submittedFields = { ...payload, status: 'submitted', submission_status: 'submitted', is_evaluated: true, submitted_at: submittedAt.toISOString(), editable_until: editableUntil, total_score: payload.score };
+      setPendingDispatches((current) => current.map((dispatch) => (dispatch.id === payload.dispatch_id ? { ...dispatch, ...submittedFields } : dispatch)));
+      setPendingCourses((current) => current.map((course) => (course.id === payload.dispatch_id ? { ...course, ...submittedFields } : course)));
       setSelectedCourse(null);
       setSelectedDispatch(null);
       setSubmitted(true);
@@ -431,6 +452,10 @@ const StudentDashboard = () => {
               <div>
                 <h2 className="text-xl font-bold text-ieps-blue-600">{t('studentDashboard.myEvaluationsTitle')}</h2>
                 <p className="text-sm text-gray-500">{t('studentDashboard.myEvaluationsDesc')}</p>
+
+          <div className="mb-8">
+            <IPESAISmartInsights role="STUDENT" onActionClick={handleAiAction} />
+          </div>
               </div>
               <div className="rounded-full bg-yellow-50 px-3 py-2 text-sm font-semibold text-yellow-700">
                 {pendingCount} {t('studentDashboard.pendingLabel')}
@@ -443,6 +468,7 @@ const StudentDashboard = () => {
                     <th className="text-left py-3 text-sm font-semibold text-gray-500">{t('studentDashboard.courseCode')}</th>
                     <th className="text-left py-3 text-sm font-semibold text-gray-500">{t('studentDashboard.courseName')}</th>
                     <th className="text-left py-3 text-sm font-semibold text-gray-500">{t('studentDashboard.instructor')}</th>
+                    <th className="text-left py-3 text-sm font-semibold text-gray-500">{localeT('studentDashboard.type')}</th>
                     <th className="text-left py-3 text-sm font-semibold text-gray-500">{t('studentDashboard.deadline')}</th>
                     <th className="text-left py-3 text-sm font-semibold text-gray-500">{t('studentDashboard.action')}</th>
                   </tr>
@@ -450,7 +476,7 @@ const StudentDashboard = () => {
                 <tbody>
                   {pendingCourses.length === 0 ? (
                     <tr>
-                      <td colSpan="5" className="py-8 text-center text-sm text-gray-500">No pending evaluations.</td>
+                      <td colSpan="6" className="py-8 text-center text-sm text-gray-500">{localeT('studentDashboard.noPending')}</td>
                     </tr>
                   ) : (
                     pendingCourses.map((course, index) => (
@@ -458,6 +484,7 @@ const StudentDashboard = () => {
                         <td className="py-3 text-sm font-medium text-gray-800">{course.course_code || course.code || '-'}</td>
                         <td className="py-3 text-sm text-gray-600">{renderText(course.course_name || course.name || '-')}</td>
                         <td className="py-3 text-sm text-gray-600">{getInstructorName(course)}</td>
+                        <td className="py-3"><span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${course.target_type === 'lab_assistant' ? 'bg-violet-100 text-violet-700' : 'bg-blue-100 text-blue-700'}`}>{course.target_type === 'lab_assistant' ? localeT('studentDashboard.labAssistant') : localeT('studentDashboard.courseInstructor')}</span></td>
                         <td className="py-3 text-sm text-gray-600">{course.deadline || '2026-08-30'}</td>
                         <td className="py-3">{renderCourseAction(course)}</td>
                       </tr>
@@ -485,7 +512,7 @@ const StudentDashboard = () => {
                 <tbody>
                   {pendingCourses.length === 0 ? (
                     <tr>
-                      <td colSpan="4" className="py-8 text-center text-sm text-gray-500">No courses available.</td>
+                      <td colSpan="4" className="py-8 text-center text-sm text-gray-500">{localeT('studentDashboard.noCourses')}</td>
                     </tr>
                   ) : (
                     pendingCourses.map((course, index) => (
@@ -560,7 +587,7 @@ const StudentDashboard = () => {
                     <p className="font-semibold">{t('studentDashboard.evaluationRequest')}</p>
                     <p className="text-xs text-green-600 mt-1">{t('studentDashboard.completeEvaluationInstructions')}</p>
                   </div>
-                  <span className="text-xs font-semibold bg-green-200 text-green-800 px-2 py-1 rounded-full">Pending</span>
+                  <span className="text-xs font-semibold bg-green-200 text-green-800 px-2 py-1 rounded-full">{localeT('studentDashboard.pendingStatus')}</span>
                 </div>
               </div>
             ) : (
@@ -639,15 +666,15 @@ const StudentDashboard = () => {
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <div className="rounded-3xl border border-gray-200 bg-white p-5 text-center shadow-sm">
                 <p className="text-3xl font-bold text-ieps-blue-600">{totalCourses}</p>
-                <p className="mt-2 text-sm text-gray-500">Total Courses</p>
+                <p className="mt-2 text-sm text-gray-500">{localeT('studentDashboard.totalCourses')}</p>
               </div>
               <div className="rounded-3xl border border-gray-200 bg-white p-5 text-center shadow-sm">
                 <p className="text-3xl font-bold text-ieps-gold-600">{pendingCount}</p>
-                <p className="mt-2 text-sm text-gray-500">Pending</p>
+                <p className="mt-2 text-sm text-gray-500">{t('studentDashboard.pendingLabel')}</p>
               </div>
               <div className="rounded-3xl border border-gray-200 bg-white p-5 text-center shadow-sm">
                 <p className="text-3xl font-bold text-green-600">{completedCount}</p>
-                <p className="mt-2 text-sm text-gray-500">Completed</p>
+                <p className="mt-2 text-sm text-gray-500">{localeT('studentDashboard.completed')}</p>
               </div>
             </div>
 
@@ -657,7 +684,7 @@ const StudentDashboard = () => {
                 onClick={() => setActiveTab('my-evaluations')}
                 className="w-full max-w-lg rounded-3xl bg-ieps-blue-600 px-6 py-4 text-base font-semibold text-white shadow-sm transition hover:bg-ieps-blue-700 sm:w-auto"
               >
-                Start Pending Evaluations
+                {localeT('studentDashboard.startPending')}
               </button>
             </div>
           </div>
@@ -671,39 +698,39 @@ const StudentDashboard = () => {
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
             <p className="text-xs font-bold uppercase tracking-[0.22em] text-sky-700">Mekdela Amba University</p>
-            <h1 className="mt-1 text-2xl font-extrabold text-sky-950 md:text-3xl">Welcome, {getStudentFullName()}</h1>
+            <h1 className="mt-1 text-2xl font-extrabold text-sky-950 md:text-3xl">{localeT('studentDashboard.welcome')}, {getStudentFullName()}</h1>
           </div>
         </div>
 
         <div className="flex flex-wrap gap-2 pt-1 text-xs font-medium md:text-sm">
           <span className="rounded-full border border-sky-300/60 bg-sky-200/80 px-3 py-1 text-sky-950">
-            <strong>ID:</strong> {profile?.student_id || profile?.username || 'N/A'}
+            <strong>{localeT('studentDashboard.id')}</strong> {profile?.student_id || profile?.username || 'N/A'}
           </span>
           <span className="rounded-full border border-sky-300/60 bg-sky-200/80 px-3 py-1 text-sky-950">
-            <strong>Department:</strong> {profile?.department_name || profile?.department || 'N/A'}
+            <strong>{t('common.department')}:</strong> {profile?.department_name || profile?.department || 'N/A'}
           </span>
           <span className="rounded-full border border-sky-300/60 bg-sky-200/80 px-3 py-1 text-sky-950">
-            <strong>Program:</strong> {profile?.program_type || profile?.program || 'N/A'}
+            <strong>{localeT('studentDashboard.program')}</strong> {profile?.program_type || profile?.program || 'N/A'}
           </span>
           <span className="rounded-full border border-sky-300/60 bg-sky-200/80 px-3 py-1 text-sky-950">
-            <strong>Year Level:</strong> {profile?.year_level || 'N/A'}
+            <strong>{localeT('studentDashboard.yearLevel')}</strong> {profile?.year_level || 'N/A'}
           </span>
           <span className="rounded-full border border-sky-300/60 bg-sky-200/80 px-3 py-1 text-sky-950">
-            <strong>Section:</strong> {profile?.section ? `Section ${profile.section}` : 'N/A'}
+            <strong>{localeT('studentDashboard.section')}:</strong> {profile?.section ? `${localeT('studentDashboard.section')} ${profile.section}` : 'N/A'}
           </span>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-[240px_minmax(0,1fr)] gap-6 mb-8">
-        <aside className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+      <div className="grid grid-cols-1 lg:grid-cols-[220px_minmax(0,1fr)] gap-6 mb-8">
+        <aside className="rounded-none border-0 bg-transparent p-0 shadow-none">
           <h3 className="mb-4 text-sm font-semibold uppercase tracking-wide text-gray-500">{t('studentDashboard.menu')}</h3>
-          <div className="space-y-2">
+          <div className="space-y-1">
             {sidebarItems.map(({ key, label, icon: Icon }) => (
               <button
                 key={key}
                 type="button"
                 onClick={() => handleMenuClick(key)}
-                className={`flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-sm transition ${activeTab === key ? 'bg-ieps-blue-50 text-ieps-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}
+                className={`flex w-full items-center gap-3 rounded-none px-0 py-2 text-left text-sm transition ${activeTab === key ? 'text-ieps-blue-600 font-semibold' : 'text-gray-600 hover:text-gray-900'}`}
               >
                 <Icon />
                 {label}

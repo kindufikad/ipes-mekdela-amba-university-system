@@ -1,6 +1,42 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { FaTimes } from 'react-icons/fa';
+import { Clock3 } from 'lucide-react';
 import LanguageToggle from './LanguageToggle';
+import AIInsightsWidget from './ai/AIInsightsWidget';
+import { evaluationApi } from '../services/api';
+import { validateEvaluationFeedbackPair, VALIDATION_MESSAGE } from '../utils/validationUtility';
+import { deadlineToneClasses, getDeadlineState } from '../utils/evaluationDeadline';
+
+const analyzeFeedback = (strengths, improvements) => {
+  const feedback = `${strengths} ${improvements}`.trim();
+  const words = feedback ? feedback.split(/\s+/).filter(Boolean).length : 0;
+  const sentences = feedback ? feedback.split(/[.!?]+/).filter(Boolean).length : 0;
+  const hasSpecificDetail = /\b(lecture|example|assignment|exercise|explanation|laboratory|lab|course|chapter|question|feedback|class)\b/i.test(feedback);
+  const hasConstructiveLanguage = /\b(could|would|suggest|recommend|improve|helpful|clear|effective|appreciate|consider)\b/i.test(feedback);
+  const hasGenericPraise = /\b(good|great|nice|best|excellent|amazing)\b/i.test(feedback) && words < 12;
+  const hasHarshLanguage = /\b(stupid|lazy|worst|bad teacher|hate)\b/i.test(feedback);
+  const isDetailed = words >= 18 || (sentences >= 2 && hasSpecificDetail);
+  const positive = feedback ? (hasConstructiveLanguage || hasSpecificDetail ? 68 : 48) : 0;
+  const negative = hasHarshLanguage ? 32 : feedback ? (hasGenericPraise ? 8 : 4) : 0;
+  const neutral = feedback ? Math.max(0, 100 - positive - negative) : 0;
+  const tips = [];
+
+  if (!feedback) tips.push('Add a specific classroom observation to make your feedback useful.');
+  if (!hasSpecificDetail && feedback) tips.push('Be specific about lecture examples, assignments, or course activities.');
+  if (hasGenericPraise) tips.push('Avoid overly generic praise by explaining what worked well.');
+  if (improvements.trim() && !hasConstructiveLanguage) tips.push('Frame improvement points as respectful, actionable suggestions.');
+
+  return {
+    tone: hasHarshLanguage || (!isDetailed && Boolean(feedback)) ? 'Needs More Detail' : 'Constructive & Respectful',
+    toneClass: hasHarshLanguage || (!isDetailed && Boolean(feedback)) ? 'border-amber-300/40 bg-amber-300/15 text-amber-100' : 'border-emerald-300/40 bg-emerald-300/15 text-emerald-100',
+    summary: tips.length ? tips : ['Your feedback includes useful detail and constructive wording.'],
+    sentiment: { positive, neutral, negative },
+    recommendations: [
+      { title: 'Strengthen your feedback', description: 'Add one observable example so the instructor can act on your comment.', actionLabel: 'Insert Template', actionType: 'INSERT_TEMPLATE', target: 'strengths' },
+      { title: 'Balance the tone', description: 'Keep improvement suggestions focused on teaching practices and learner outcomes.', actionLabel: 'Insert Suggestion', actionType: 'INSERT_TEMPLATE', target: 'improvements' },
+    ],
+  };
+};
 
 export default function StudentEvaluationModal({
   open,
@@ -16,11 +52,13 @@ export default function StudentEvaluationModal({
   evaluationRecord = null,
 }) {
   const [responses, setResponses] = useState({});
-  const [feedback, setFeedback] = useState('');
+  const [strengths, setStrengths] = useState('');
+  const [improvements, setImprovements] = useState('');
   const [submitError, setSubmitError] = useState('');
   const [submitSuccess, setSubmitSuccess] = useState('');
   const [isEditMode, setIsEditMode] = useState(mode === 'edit');
   const [language, setLanguage] = useState('en');
+  const [activeDeadline, setActiveDeadline] = useState('');
 
   useEffect(() => {
     if (!open) return;
@@ -38,10 +76,15 @@ export default function StudentEvaluationModal({
     })();
 
     setResponses(nextResponses);
-    setFeedback(evaluationRecord?.feedback || evaluationRecord?.comment || '');
+    setStrengths(evaluationRecord?.strengths || '');
+    setImprovements(evaluationRecord?.improvements || '');
     setSubmitError('');
     setSubmitSuccess('');
     setIsEditMode(mode === 'edit');
+    setActiveDeadline(dispatchItem?.deadline || course?.deadline || '');
+    evaluationApi.getActiveEvaluationDeadline().then((result) => {
+      if (result?.deadlineAt) setActiveDeadline(result.deadlineAt);
+    }).catch(() => {});
   }, [open, evaluationRecord, mode]);
 
   useEffect(() => {
@@ -53,11 +96,16 @@ export default function StudentEvaluationModal({
   }, [successMessage]);
 
   const isReadOnly = mode === 'view' && !isEditMode;
+  const deadlineState = useMemo(() => getDeadlineState(activeDeadline || dispatchItem?.deadline || course?.deadline), [activeDeadline, course?.deadline, dispatchItem?.deadline]);
+  const deadlineLocked = deadlineState.expired && !isReadOnly;
+  const feedbackValidation = useMemo(() => validateEvaluationFeedbackPair(strengths, improvements), [strengths, improvements]);
+  const feedbackAnalysis = useMemo(() => analyzeFeedback(strengths, improvements), [strengths, improvements]);
   const totalItems = useMemo(() => sections.reduce((sum, section) => sum + (section.items?.length || 0), 0), [sections]);
   const totalScore = useMemo(() => {
     const sum = Object.values(responses).reduce((acc, value) => acc + Number(value || 0), 0);
     return totalItems ? (sum / totalItems) * 20 : 0;
   }, [responses, totalItems]);
+  let globalQuestionNumber = 1;
 
   const setAnswer = (id, value) => setResponses((prev) => ({ ...prev, [id]: value }));
 
@@ -76,6 +124,10 @@ export default function StudentEvaluationModal({
       setSubmitError('No pending evaluation dispatch found for this course. Please contact your administrator.');
       return;
     }
+    if (deadlineLocked) {
+      setSubmitError('Deadline Passed - Contact Dept Head');
+      return;
+    }
 
     // Validate that all criteria have been answered
     const allItemIds = sections.reduce((acc, section) => acc.concat((section.items || []).map(item => item.id)), []);
@@ -86,12 +138,20 @@ export default function StudentEvaluationModal({
       return;
     }
 
+    if (!feedbackValidation.valid) {
+      setSubmitError(feedbackValidation.errors[0] || VALIDATION_MESSAGE);
+      return;
+    }
+
     try {
       if (typeof onSubmit === 'function') {
         await onSubmit({
           dispatch_id: dispatchItem.id,
+          assignment_id: dispatchItem.assignment_id || undefined,
+          course_id: dispatchItem.course_id || course.assignment_id || course.course_id || undefined,
           score: Number(totalScore.toFixed(2)),
-          feedback,
+          strengths,
+          improvements,
           responses,
         });
         setSubmitSuccess('Evaluation submitted successfully.');
@@ -133,7 +193,7 @@ export default function StudentEvaluationModal({
             </div>
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-4 sm:grid-cols-2">
             <div className="rounded-3xl border border-gray-200 bg-gray-50 p-4">
               <p className="text-xs uppercase tracking-[0.2em] text-gray-500">Course</p>
               <p className="mt-2 font-semibold text-gray-900">{course.course_code || course.code || 'N/A'}</p>
@@ -142,9 +202,11 @@ export default function StudentEvaluationModal({
             <div className="rounded-3xl border border-gray-200 bg-gray-50 p-4">
               <p className="text-xs uppercase tracking-[0.2em] text-gray-500">Instructor</p>
               <p className="mt-2 font-semibold text-gray-900">{course.instructor_name || course.instructor || 'N/A'}</p>
-              <p className="text-sm text-gray-600">Deadline: {course.deadline || 'Not specified'}</p>
+              <span className={`mt-2 inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold ${deadlineToneClasses[deadlineState.expired ? 'danger' : deadlineState.tone]}`}>{deadlineState.tone === 'warning' ? <Clock3 size={13} /> : null}{deadlineState.expired ? 'Evaluation deadline has passed.' : deadlineState.label}</span>
             </div>
           </div>
+
+          {deadlineLocked ? <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm font-semibold text-red-700">Evaluation deadline has passed. Submissions are closed.</div> : null}
 
           {submitError ? <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{submitError}</div> : null}
           {submitSuccess ? <div className="rounded-2xl border border-green-200 bg-green-50 p-4 text-sm text-green-700">{submitSuccess}</div> : null}
@@ -154,35 +216,38 @@ export default function StudentEvaluationModal({
               <div key={section.title} className="rounded-3xl border border-gray-200 bg-gray-50 p-5">
                 <h3 className="font-semibold text-gray-900">{section.title}</h3>
                 <div className="mt-4 space-y-3">
-                  {(section.items || []).map((item) => (
-                    <div key={item.id} className="flex flex-col gap-4 rounded-2xl border border-gray-100 bg-white p-4 sm:flex-row sm:items-center sm:justify-between">
-                      <p className="flex-1 pr-4 text-sm font-medium text-gray-700">
-                        <span className="mr-3 font-mono text-gray-400">{item.id.replace(/[^0-9]/g, '') || item.id}.</span>
-                        {language === 'am' ? (item.am || item.labelAm || item.textAm || item.en || item.label || item.text) : (item.en || item.label || item.text)}
-                      </p>
+                  {(section.items || []).map((item) => {
+                    const questionNumberValue = globalQuestionNumber++;
+                    return (
+                      <div key={item.id} className="flex flex-col gap-4 rounded-2xl border border-gray-100 bg-white p-4 sm:flex-row sm:items-center sm:justify-between">
+                        <p className="flex-1 pr-4 text-sm font-medium text-gray-700">
+                          <span className="mr-3 font-mono text-gray-400">{questionNumberValue}.</span>
+                          {language === 'am' ? (item.am || item.labelAm || item.textAm || item.en || item.label || item.text) : (item.en || item.label || item.text)}
+                        </p>
 
-                      <div className="flex items-center gap-2 shrink-0">
-                        {[1, 2, 3, 4, 5].map((value) => {
-                          const selected = responses[item.id] === value;
-                          return (
-                            <button
-                              key={value}
-                              type="button"
-                              onClick={() => !isReadOnly && setAnswer(item.id, value)}
-                              disabled={isReadOnly}
-                              className={`flex h-9 w-9 items-center justify-center rounded-full text-sm font-semibold transition-all duration-150 ${
-                                selected
-                                  ? 'scale-105 bg-blue-600 text-white shadow-md shadow-blue-200 ring-2 ring-blue-300'
-                                  : 'border border-gray-200 bg-white text-gray-600 hover:border-blue-400 hover:text-blue-600'
-                              } ${isReadOnly ? 'cursor-default' : 'cursor-pointer'}`}
-                            >
-                              {value}
-                            </button>
-                          );
-                        })}
+                        <div className="flex items-center gap-2 shrink-0">
+                          {[1, 2, 3, 4, 5].map((value) => {
+                            const selected = responses[item.id] === value;
+                            return (
+                              <button
+                                key={value}
+                                type="button"
+                                onClick={() => !isReadOnly && setAnswer(item.id, value)}
+                                disabled={isReadOnly || deadlineLocked}
+                                className={`flex h-9 w-9 items-center justify-center rounded-full text-sm font-semibold transition-all duration-150 ${
+                                  selected
+                                    ? 'scale-105 bg-blue-600 text-white shadow-md shadow-blue-200 ring-2 ring-blue-300'
+                                    : 'border border-gray-200 bg-white text-gray-600 hover:border-blue-400 hover:text-blue-600'
+                                } ${isReadOnly ? 'cursor-default' : 'cursor-pointer'}`}
+                              >
+                                {value}
+                              </button>
+                            );
+                          })}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             ))}
@@ -198,16 +263,60 @@ export default function StudentEvaluationModal({
             </div>
 
             <label className="block text-sm text-gray-700">
-              <span className="mb-2 block font-medium">Additional feedback</span>
+              <span className="mb-2 block font-medium">Strengths of the Instructor (የመምህሩ ጠንካራ ጎኖች)</span>
               <textarea
                 rows={4}
-                value={feedback}
-                onChange={(event) => setFeedback(event.target.value)}
-                disabled={isReadOnly}
+                name="strengths"
+                value={strengths}
+                onChange={(event) => setStrengths(event.target.value)}
+                disabled={isReadOnly || deadlineLocked}
                 className="w-full rounded-3xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-800 disabled:cursor-default disabled:bg-gray-50"
-                placeholder="Add any additional feedback here."
+                placeholder="Describe the instructor's strengths."
+                aria-invalid={!isReadOnly && !feedbackValidation.strengths.valid}
               />
+              {!isReadOnly && !feedbackValidation.strengths.valid ? <p className="mt-2 text-sm font-medium text-red-600">{VALIDATION_MESSAGE}</p> : null}
             </label>
+
+            <label className="block text-sm text-gray-700">
+              <span className="mb-2 block font-medium">Suggested points/aspects the instructor should improve (መምህሩ ሊያሻሽላቸው የሚገቡ ነጥቦች)</span>
+              <textarea
+                rows={4}
+                name="improvements"
+                value={improvements}
+                onChange={(event) => setImprovements(event.target.value)}
+                disabled={isReadOnly || deadlineLocked}
+                className="w-full rounded-3xl border border-gray-200 bg-white px-4 py-3 text-sm text-gray-800 disabled:cursor-default disabled:bg-gray-50"
+                placeholder="Suggest areas for improvement."
+                aria-invalid={!isReadOnly && !feedbackValidation.improvements.valid}
+              />
+              {!isReadOnly && !feedbackValidation.improvements.valid ? <p className="mt-2 text-sm font-medium text-red-600">{VALIDATION_MESSAGE}</p> : null}
+            </label>
+
+            <div className="flex items-center justify-between gap-3 rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3">
+              <span className="text-sm font-medium text-gray-700">Feedback quality</span>
+              <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${feedbackValidation.quality === 'Good' ? 'border-emerald-300/40 bg-emerald-300/15 text-emerald-700' : 'border-amber-300/40 bg-amber-300/15 text-amber-700'}`}>
+                Feedback Quality: {feedbackValidation.quality}
+              </span>
+            </div>
+            {!isReadOnly && feedbackValidation.errors.length > 0 ? <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">{feedbackValidation.errors[0]}</p> : null}
+
+            <AIInsightsWidget
+              role="STUDENT"
+              data={{
+                summary: feedbackAnalysis.summary,
+                sentiment: feedbackAnalysis.sentiment,
+                recommendations: feedbackAnalysis.recommendations,
+              }}
+              isEnabled={!isReadOnly && !deadlineLocked}
+              onActionClick={(actionType, payload) => {
+                if (actionType !== 'INSERT_TEMPLATE') return;
+                const template = payload.target === 'strengths'
+                  ? 'The instructor explains concepts clearly and connects lessons to practical examples.'
+                  : 'Could provide more timely feedback on assignments and allow additional time for questions.';
+                if (payload.target === 'strengths') setStrengths((current) => current ? `${current} ${template}` : template);
+                else setImprovements((current) => current ? `${current} ${template}` : template);
+              }}
+            />
 
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
               <button type="button" onClick={onClose} className="rounded-full border border-gray-200 bg-white px-5 py-3 text-sm font-semibold text-gray-700 hover:bg-gray-50">
@@ -219,7 +328,7 @@ export default function StudentEvaluationModal({
                   Edit Evaluation
                 </button>
               ) : (
-                <button type="submit" disabled={isSubmitting || isReadOnly} className="rounded-full bg-ieps-blue-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-ieps-blue-700 disabled:cursor-not-allowed disabled:opacity-50">
+                <button type="submit" disabled={isSubmitting || isReadOnly || deadlineLocked || !feedbackValidation.valid} className="rounded-full bg-ieps-blue-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-ieps-blue-700 disabled:cursor-not-allowed disabled:opacity-50">
                   {isSubmitting ? 'Submitting...' : mode === 'view' ? 'Update Evaluation' : 'Submit Evaluation'}
                 </button>
               )}

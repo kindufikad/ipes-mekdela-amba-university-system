@@ -1,12 +1,47 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import toast from 'react-hot-toast';
-import { useAuth } from '../context/AuthContext';
+import PhoneInput from 'react-phone-input-2';
+import 'react-phone-input-2/lib/style.css';
+import { useAuth } from '../context/useAuth';
+import { adminApi } from '../services/api';
 import BackButton from '../components/BackButton';
+
+const toPhoneInputValue = (value) => {
+  let digits = String(value || '').replace(/\D/g, '');
+  if (/^0[79]\d{8}$/.test(digits)) digits = `251${digits.slice(1)}`;
+  else if (/^[79]\d{8}$/.test(digits)) digits = `251${digits}`;
+  return digits;
+};
+
+const getPhoneValidationError = (value, dialCode = '251') => {
+  const digits = String(value || '').replace(/\D/g, '');
+  if (!digits || digits === dialCode) return '';
+
+  if (dialCode === '251' || digits.startsWith('251')) {
+    const nationalNumber = digits.startsWith('251') ? digits.slice(3) : digits;
+    return /^[79]\d{8}$/.test(nationalNumber)
+      ? ''
+      : 'Ethiopian numbers must have 9 digits after +251 and start with 7 or 9. / ከ +251 በኋላ 9 አሃዞች መሆን አለባቸው።';
+  }
+
+  return /^[1-9]\d{6,14}$/.test(digits)
+    ? ''
+    : 'Enter a valid international phone number. / ትክክለኛ የአለም አቀፍ ስልክ ቁጥር ያስገቡ።';
+};
+
+const toInternationalPhone = (value, dialCode = '251') => {
+  let digits = String(value || '').replace(/\D/g, '');
+  if (!digits || digits === dialCode) return '';
+  if (/^0[79]\d{8}$/.test(digits)) digits = `251${digits.slice(1)}`;
+  else if (dialCode === '251' && /^[79]\d{8}$/.test(digits)) digits = `251${digits}`;
+  return `+${digits}`;
+};
 
 const roleLabels = {
   admin: 'System Administrator',
   systemadmin: 'System Administrator',
+  system_admin: 'System Administrator',
   dept_head: 'Department Head',
   depthead: 'Department Head',
   college_dean: 'College Dean',
@@ -20,6 +55,7 @@ const roleLabels = {
 
 const ProfilePage = () => {
   const { user, role, updateUser } = useAuth();
+  const fileInputRef = useRef(null);
   const storedUser = useMemo(() => {
     if (typeof window === 'undefined') return {};
     try {
@@ -30,13 +66,22 @@ const ProfilePage = () => {
   }, []);
   const profile = { ...storedUser, ...user };
   const normalizedRole = String(profile.role || role || '').trim().toLowerCase();
+  const isSystemAdmin = ['admin', 'systemadmin', 'system_admin'].includes(normalizedRole);
   const displayName = profile.name || profile.full_name || profile.fullName || profile.username || 'User';
   const email = profile.email || profile.username || 'Not available';
   const department = profile.department_name || profile.departmentName || profile.department || 'Not assigned';
-  const [phone, setPhone] = useState(profile.phone || profile.phone_number || '');
+  const [phone, setPhone] = useState(() => toPhoneInputValue(profile.phone || profile.phone_number || ''));
+  const [phoneDialCode, setPhoneDialCode] = useState('251');
+  const [phoneError, setPhoneError] = useState(() => getPhoneValidationError(toPhoneInputValue(profile.phone || profile.phone_number || ''), '251'));
   const [photoFile, setPhotoFile] = useState(null);
   const [photoPreview, setPhotoPreview] = useState(profile.profile_picture || '');
   const [saving, setSaving] = useState(false);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [adminDetails, setAdminDetails] = useState({
+    email: profile.email || '',
+    firstName: profile.first_name || '',
+    lastName: profile.last_name || '',
+  });
 
   useEffect(() => {
     if (!photoFile) return undefined;
@@ -45,17 +90,80 @@ const ProfilePage = () => {
     return () => URL.revokeObjectURL(previewUrl);
   }, [photoFile]);
 
+  const handleImageChange = async (event) => {
+    const selectedFile = event.target.files?.[0];
+    if (!selectedFile) return;
+
+    const previewUrl = URL.createObjectURL(selectedFile);
+    setPhotoPreview(previewUrl);
+    setPhotoFile(selectedFile);
+    setUploadingPhoto(true);
+
+    const formData = new FormData();
+    formData.append('photo', selectedFile);
+
+    try {
+      const response = await axios.post('/api/user/profile-photo', formData, {
+        withCredentials: true,
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      const nextPhoto = response.data?.user?.profile_picture || response.data?.profile_picture || response.data?.user?.profile_photo || response.data?.profile_photo || previewUrl;
+      const updatedUser = { ...profile, profile_picture: nextPhoto, profile_photo: nextPhoto, avatar: nextPhoto };
+      updateUser(updatedUser);
+      setPhotoPreview(nextPhoto);
+      setPhotoFile(null);
+      toast.success('Profile photo updated successfully!');
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Unable to update your profile photo.');
+    } finally {
+      setUploadingPhoto(false);
+      event.target.value = '';
+    }
+  };
+
   const handleSubmit = async (event) => {
     event.preventDefault();
+    if (isSystemAdmin) {
+      setSaving(true);
+      try {
+        const result = await adminApi.updateProfile(adminDetails);
+        const updatedUser = {
+          ...profile,
+          ...(result?.user || {}),
+          email: result?.user?.email || adminDetails.email.trim(),
+          first_name: result?.user?.first_name || adminDetails.firstName.trim(),
+          last_name: result?.user?.last_name || adminDetails.lastName.trim(),
+          name: result?.user?.name || `${adminDetails.firstName.trim()} ${adminDetails.lastName.trim()}`.trim(),
+        };
+        updateUser(updatedUser);
+        setAdminDetails({ email: updatedUser.email, firstName: updatedUser.first_name, lastName: updatedUser.last_name });
+        toast.success('Profile updated successfully.');
+      } catch (error) {
+        toast.error(error.response?.data?.message || error.message || 'Unable to update your profile.');
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
+
+    const nextPhoneError = getPhoneValidationError(phone, phoneDialCode);
+    if (nextPhoneError) {
+      setPhoneError(nextPhoneError);
+      toast.error(nextPhoneError);
+      return;
+    }
+    const internationalPhone = toInternationalPhone(phone, phoneDialCode);
     const formData = new FormData();
-    formData.append('phone', phone.trim());
+    formData.append('phone', internationalPhone);
     if (photoFile) formData.append('photo', photoFile);
 
     setSaving(true);
     try {
       const response = await axios.put('/api/user/profile', formData, { withCredentials: true });
-      const updatedUser = { ...profile, phone: phone.trim(), phone_number: phone.trim(), profile_picture: response.data?.user?.profile_picture || photoPreview };
+      const savedPhone = response.data?.user?.phone_number ?? internationalPhone;
+      const updatedUser = { ...profile, phone: savedPhone, phone_number: savedPhone, profile_picture: response.data?.user?.profile_picture || photoPreview };
       updateUser(updatedUser);
+      setPhone(toPhoneInputValue(savedPhone));
       setPhotoPreview(updatedUser.profile_picture);
       setPhotoFile(null);
       toast.success('Profile updated successfully!');
@@ -66,7 +174,7 @@ const ProfilePage = () => {
     }
   };
 
-  const avatarSource = photoPreview || profile.avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName)}&background=dbeafe&color=1e3a8a`;
+  const avatarSource = photoPreview || profile.profile_picture || profile.avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName)}&background=dbeafe&color=1e3a8a`;
 
   return (
     <main className="min-h-screen bg-slate-50 px-4 py-24 text-slate-900 sm:px-6">
@@ -79,20 +187,65 @@ const ProfilePage = () => {
         </div>
         <div className="mt-6 flex flex-col items-center gap-3 sm:flex-row sm:items-end">
           <img src={avatarSource} alt={`${displayName} profile`} className="h-24 w-24 rounded-full border-4 border-blue-50 object-cover" />
-          <label className="inline-flex cursor-pointer rounded-xl border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-900 hover:bg-blue-100">
-            Change Profile Photo
-            <input type="file" accept="image/*" className="sr-only" onChange={(event) => setPhotoFile(event.target.files?.[0] || null)} />
-          </label>
+          <input ref={fileInputRef} type="file" accept="image/*" onChange={handleImageChange} style={{ display: 'none' }} />
+          <button type="button" onClick={() => fileInputRef.current?.click()} disabled={uploadingPhoto} className="inline-flex rounded-xl border border-blue-200 bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-900 hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60">
+            {uploadingPhoto ? 'Uploading...' : 'Change Profile Photo'}
+          </button>
         </div>
 
         <div className="mt-8 space-y-5">
-          <label className="block text-sm font-medium text-slate-700">Full Name<input value={displayName} disabled className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-4 py-3 text-slate-500" /></label>
-          <label className="block text-sm font-medium text-slate-700">Email Address<input value={email} disabled className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-4 py-3 text-slate-500" /></label>
+          {isSystemAdmin ? <>
+            <label className="block text-sm font-medium text-slate-700">First Name<input value={adminDetails.firstName} onChange={(event) => setAdminDetails((current) => ({ ...current, firstName: event.target.value }))} autoComplete="given-name" required maxLength={128} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20" /></label>
+            <label className="block text-sm font-medium text-slate-700">Last Name<input value={adminDetails.lastName} onChange={(event) => setAdminDetails((current) => ({ ...current, lastName: event.target.value }))} autoComplete="family-name" required maxLength={128} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20" /></label>
+            <label className="block text-sm font-medium text-slate-700">Email Address<input type="email" value={adminDetails.email} onChange={(event) => setAdminDetails((current) => ({ ...current, email: event.target.value }))} autoComplete="email" required maxLength={255} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20" /></label>
+          </> : <>
+            <label className="block text-sm font-medium text-slate-700">Full Name<input value={displayName} disabled className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-4 py-3 text-slate-500" /></label>
+            <label className="block text-sm font-medium text-slate-700">Email Address<input value={email} disabled className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-4 py-3 text-slate-500" /></label>
+          </>}
           <label className="block text-sm font-medium text-slate-700">Role / Title<input value={roleLabels[normalizedRole] || normalizedRole || 'User'} disabled className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-4 py-3 text-slate-500" /></label>
           <label className="block text-sm font-medium text-slate-700">Department<input value={department} disabled className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-100 px-4 py-3 text-slate-500" /></label>
-          <label className="block text-sm font-medium text-slate-700">Phone Number<input type="tel" value={phone} onChange={(event) => setPhone(event.target.value)} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20" placeholder="Enter phone number" /></label>
+          {!isSystemAdmin && <div>
+            <label htmlFor="profile-phone" className="block text-sm font-medium text-slate-700">Phone Number / የስልክ ቁጥር</label>
+            <PhoneInput
+              country="et"
+              preferredCountries={['et']}
+              enableSearch
+              countryCodeEditable={false}
+              value={phone}
+              onChange={(value, country) => {
+                const dialCode = country?.dialCode || '251';
+                setPhone(value);
+                setPhoneDialCode(dialCode);
+                setPhoneError(getPhoneValidationError(value, dialCode));
+              }}
+              inputProps={{
+                id: 'profile-phone',
+                name: 'phone',
+                autoComplete: 'tel',
+                'aria-invalid': Boolean(phoneError),
+                'aria-describedby': phoneError ? 'profile-phone-error' : undefined,
+              }}
+              containerClass="mt-2 w-full"
+              inputStyle={{
+                width: '100%',
+                height: '48px',
+                borderRadius: '0.75rem',
+                borderColor: phoneError ? '#ef4444' : '#cbd5e1',
+                backgroundColor: '#fff',
+                color: '#0f172a',
+                fontSize: '1rem',
+              }}
+              buttonStyle={{
+                borderTopLeftRadius: '0.75rem',
+                borderBottomLeftRadius: '0.75rem',
+                borderColor: phoneError ? '#ef4444' : '#cbd5e1',
+                backgroundColor: '#fff',
+              }}
+            />
+            {phoneError ? <p id="profile-phone-error" className="mt-1 text-xs text-red-600" role="alert">{phoneError}</p> : null}
+          </div>}
         </div>
-        <button type="submit" disabled={saving} className="mt-8 rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-300">{saving ? 'Saving...' : 'Save Profile Changes'}</button>
+        <button type="submit" disabled={saving || Boolean(phoneError)} className="mt-8 rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-300">{saving ? 'Saving...' : 'Save Profile Changes'}</button>
       </form>
     </main>
   );

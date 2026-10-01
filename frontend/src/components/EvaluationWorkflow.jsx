@@ -1,7 +1,7 @@
 import { useContext, useEffect, useMemo, useState } from 'react';
 import toast from 'react-hot-toast';
 import { LanguageContext } from '../context/LanguageContext';
-import { ratings } from './EvaluationForm';
+import { ratings } from './evaluationRatings';
 import { criteriaApi, evaluationApi } from '../services/api';
 import LanguageToggle from './LanguageToggle';
 import { getQuestionText, groupCriteriaByCategory } from '../utils/evaluationCriteria';

@@ -20,6 +20,8 @@ const expectedSchema = {
     status: 'varchar(32)',
     email: 'varchar(255)',
     is_first_login: 'tinyint(1)',
+    must_change_password: 'tinyint(1)',
+    telegram_chat_id: 'bigint',
   },
   instructors: {
     user_id: 'int(10) unsigned',
@@ -46,6 +48,10 @@ const expectedSchema = {
     program_type: 'varchar(64)',
     registration_date: 'varchar(64)',
   },
+  lab_assistants: {
+    gender: 'varchar(10)',
+    phone_number: 'varchar(32)',
+  },
   departments: {
     name: 'varchar(255)',
     code: 'varchar(64)',
@@ -59,6 +65,7 @@ const expectedSchema = {
   evaluation_dispatches: {
     template_id: 'int(10) unsigned',
     student_id: 'int(10) unsigned',
+    department_id: 'int(10) unsigned',
     student_identifier: 'varchar(255)',
     course_id: 'int(10) unsigned',
     course_name: 'varchar(255)',
@@ -68,10 +75,19 @@ const expectedSchema = {
     student_group: 'varchar(255)',
     created_by: 'int(10) unsigned',
     payload: 'json',
+    evaluation_type: 'varchar(32)',
+    deadline: 'varchar(128)',
     status: "enum('pending','submitted','closed')",
+    target_type: 'varchar(32)',
+    target_user_id: 'int(10) unsigned',
+    target_first_name: 'varchar(100)',
+    target_last_name: 'varchar(100)',
+    target_employee_id: 'varchar(64)',
+    evaluation_template: 'varchar(32)',
   },
   evaluation_criteria: {
     evaluator_type: "enum('student','peer','dept_head','dean')",
+    target_role: 'varchar(50)',
     criterion_text: 'varchar(255)',
     criterion_text_am: 'varchar(255)',
     category: 'varchar(100)',
@@ -86,6 +102,37 @@ const expectedSchema = {
     feedback: 'text',
     responses: 'json',
     status: 'varchar(32)',
+    submitted_at: 'datetime',
+    editable_until: 'datetime',
+  },
+  dept_head_evaluations: {
+    dept_head_id: 'int(10) unsigned',
+    evaluator_id: 'int(10) unsigned',
+    instructor_id: 'int(10) unsigned',
+    evaluatee_id: 'int(10) unsigned',
+    target_role: 'varchar(32)',
+    department_id: 'int(10) unsigned',
+    academic_year: 'varchar(20)',
+    semester: 'varchar(20)',
+    criteria_scores: 'json',
+    responses: 'json',
+    total_score: 'decimal(5,2)',
+    feedback: 'text',
+    submitted_at: 'datetime',
+  },
+  evaluation_forms: {
+    department_id: 'int(10) unsigned',
+    academic_year: 'varchar(64)',
+    semester: 'varchar(64)',
+    form_type: 'varchar(50)',
+    target_role: 'varchar(50)',
+    published_at: 'timestamp',
+    expires_at: 'timestamp',
+    is_published: 'tinyint(1)',
+    created_by: 'int(10) unsigned',
+    published_by: 'int(10) unsigned',
+    created_at: 'timestamp',
+    updated_at: 'timestamp',
   },
   notifications: {
     user_id: 'int(10) unsigned',
@@ -137,6 +184,8 @@ const createTable = async (conn, table) => {
         role ENUM('admin','dept_head','instructor','student') NOT NULL DEFAULT 'student',
         status VARCHAR(32) NOT NULL DEFAULT 'active',
         is_first_login BOOLEAN NOT NULL DEFAULT TRUE,
+        must_change_password BOOLEAN NOT NULL DEFAULT TRUE,
+        telegram_chat_id BIGINT DEFAULT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
       break;
@@ -220,6 +269,7 @@ const createTable = async (conn, table) => {
       await conn.query(`CREATE TABLE evaluation_criteria (
         id INT AUTO_INCREMENT PRIMARY KEY,
         evaluator_type ENUM('student', 'peer', 'dept_head', 'dean') NOT NULL,
+        target_role VARCHAR(50) DEFAULT 'instructor',
         criterion_text VARCHAR(255) NOT NULL,
         criterion_text_am VARCHAR(255) DEFAULT NULL,
         category VARCHAR(100) DEFAULT 'General',
@@ -238,9 +288,56 @@ const createTable = async (conn, table) => {
         feedback TEXT DEFAULT NULL,
         responses JSON DEFAULT NULL,
         status VARCHAR(32) NOT NULL DEFAULT 'submitted',
+        submitted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        editable_until DATETIME NOT NULL DEFAULT (CURRENT_TIMESTAMP + INTERVAL 3 DAY),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         CONSTRAINT fk_student_evaluation_submissions_dispatch FOREIGN KEY (dispatch_id) REFERENCES evaluation_dispatches(id) ON DELETE CASCADE,
         CONSTRAINT fk_student_evaluation_submissions_student FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE SET NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+      break;
+    case 'dept_head_evaluations':
+      await conn.query(`CREATE TABLE dept_head_evaluations (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        dept_head_id INT UNSIGNED DEFAULT NULL,
+        evaluator_id INT UNSIGNED NOT NULL,
+        instructor_id INT UNSIGNED NOT NULL,
+        evaluatee_id INT UNSIGNED DEFAULT NULL,
+        target_role VARCHAR(32) NOT NULL DEFAULT 'instructor',
+        department_id INT UNSIGNED NOT NULL,
+        academic_year VARCHAR(20) DEFAULT '2025/2026',
+        semester VARCHAR(20) DEFAULT 'Semester II',
+        criteria_scores JSON DEFAULT NULL,
+        responses JSON DEFAULT NULL,
+        total_score DECIMAL(5,2) NOT NULL DEFAULT 0.00,
+        feedback TEXT DEFAULT NULL,
+        status VARCHAR(32) NOT NULL DEFAULT 'Pending',
+        submitted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_dept_head_eval_unique (evaluator_id, target_role, evaluatee_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+      break;
+    case 'evaluation_forms':
+      await conn.query(`CREATE TABLE evaluation_forms (
+        id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        department_id INT UNSIGNED NOT NULL,
+        academic_year VARCHAR(64) NOT NULL,
+        semester VARCHAR(64) NOT NULL,
+        form_type VARCHAR(50) NOT NULL DEFAULT 'student',
+        target_role VARCHAR(50) DEFAULT 'instructor',
+        published_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        expires_at TIMESTAMP NULL DEFAULT NULL,
+        is_published TINYINT(1) NOT NULL DEFAULT 1,
+        created_by INT UNSIGNED DEFAULT NULL,
+        published_by INT UNSIGNED DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_evaluation_forms_department FOREIGN KEY (department_id) REFERENCES departments(id) ON DELETE CASCADE,
+        CONSTRAINT fk_evaluation_forms_creator FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+        CONSTRAINT fk_evaluation_forms_publisher FOREIGN KEY (published_by) REFERENCES users(id) ON DELETE SET NULL,
+        UNIQUE KEY uk_evaluation_form_term (department_id, academic_year, semester, form_type, target_role),
+        INDEX idx_evaluation_forms_published (is_published),
+        INDEX idx_evaluation_forms_expires_at (expires_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
       break;
     case 'notifications':
@@ -288,7 +385,12 @@ const run = async () => {
       for (const [column, expectedType] of Object.entries(columns)) {
         const existing = existingColumns[column];
         if (!existing) {
-          await addMissingColumn(conn, table, column, expectedType);
+          if (table === 'users' && column === 'must_change_password') {
+            console.log('Adding missing column `must_change_password` to table `users`');
+            await conn.query('ALTER TABLE users ADD COLUMN must_change_password BOOLEAN NOT NULL DEFAULT TRUE');
+          } else {
+            await addMissingColumn(conn, table, column, expectedType);
+          }
           continue;
         }
 
@@ -299,6 +401,18 @@ const run = async () => {
       }
     }
 
+    if (await tableExists(conn, 'course_assignments')) {
+      const courseAssignmentColumns = await getColumns(conn, 'course_assignments');
+      if (!courseAssignmentColumns.lab_assistant_id) {
+        await conn.query('ALTER TABLE course_assignments ADD COLUMN lab_assistant_id INT UNSIGNED NULL AFTER instructor_id');
+      }
+      try {
+        await conn.query('ALTER TABLE course_assignments ADD CONSTRAINT fk_assign_lab_assistant FOREIGN KEY (lab_assistant_id) REFERENCES lab_assistants(id) ON DELETE SET NULL');
+      } catch (error) {
+        if (!['ER_DUP_KEY', 'ER_DUP_CONSTRAINT', 'ER_CANT_CREATE_TABLE'].includes(error?.code)) throw error;
+      }
+    }
+
     const instructorColumns = await getColumns(conn, 'instructors');
     for (const column of ['program_type', 'registration_date']) {
       if (instructorColumns[column]) {
@@ -306,17 +420,46 @@ const run = async () => {
       }
     }
 
+    // ARA peer evaluations use dispatch_id to identify lab assistant targets.
+    if (await tableExists(conn, 'peer_evaluations')) {
+      await conn.query('ALTER TABLE peer_evaluations MODIFY COLUMN evaluatee_id INT UNSIGNED DEFAULT NULL');
+    }
+
     await conn.query("UPDATE evaluation_criteria SET criterion_text_am = CONCAT('የግምገማ መስፈርት፦ ', criterion_text) WHERE criterion_text_am IS NULL OR TRIM(criterion_text_am) = ''");
+    await conn.query(`
+      INSERT INTO system_settings (setting_key, setting_value)
+      VALUES
+        ('contact_email', 'kindufikad085@gmail.com'),
+        ('contact_phone', '+251 961806188'),
+        ('contact_office_hours', 'Monday-Saturday, 2:00 - 11:00')
+      ON DUPLICATE KEY UPDATE setting_key = VALUES(setting_key)
+    `);
     const seedCriteria = [
-      ['student', 'The instructor communicates clearly and supports learning.', 'መምህሩ በግልጽ ይገልጻል እና ትምህርትን ይደግፋል።', 'Teaching'],
-      ['peer', 'The instructor demonstrates professional competence.', 'መምህሩ ሙያዊ ብቃት ያሳያል።', 'Professional Competency'],
-      ['dept_head', 'The instructor fulfills departmental responsibilities.', 'መምህሩ የዲፓርትመንቱን ኃላፊነቶች ይወጣል።', 'Departmental Responsibility'],
-      ['dean', 'The instructor contributes to college goals.', 'መምህሩ ለኮሌጁ ግቦች አስተዋጽኦ ያደርጋል።', 'College Contribution'],
+      ['student', 'instructor', 'The instructor communicates clearly and supports learning.', 'መምህሩ በግልጽ ይገልጻል እና ትምህርትን ይደግፋል።', 'Teaching'],
+      ['student', 'lab_assistant', 'Explains detailed objectives of each session', 'እያንዳንዱ ክፍለ ጊዜ ዓላማዎችን በዝርዝር ያብራራል', 'Teaching'],
+      ['student', 'lab_assistant', 'Prepares well for practical sessions', 'ለተግባራዊ ክፍለ ጊዜዎች በደንብ ያዘጋጃል', 'Teaching'],
+      ['student', 'lab_assistant', 'Teaches as per the course content', 'ኮርስ ይዘቱን በሚያስፈልገው መንገድ ያስተምራል', 'Teaching'],
+      ['student', 'lab_assistant', 'Delivers the course in such a way that the students understand', 'ኮርሱን ተማሪዎች የሚረዱበት መንገድ ያቀርባል', 'Teaching'],
+      ['student', 'lab_assistant', 'Use of additional teaching aids', 'ተጨማሪ የመማሪያ መሳሪያዎችን ይጠቀማል', 'Teaching'],
+      ['student', 'lab_assistant', 'Answers questions raised by students', 'በተማሪዎች የሚነሱ ጥያቄዎችን ይመልሳል', 'Teaching'],
+      ['student', 'lab_assistant', 'Impartiality based on ethnic, religion or gender', 'በዘር፣ በሃይማኖት ወይም በፆታ ላይ የማይወስን ፍትሃዊነት', 'Teaching'],
+      ['student', 'lab_assistant', 'Use class time appropriately for practical sessions', 'የክፍል ጊዜን ለተግባራዊ ክፍለ ጊዜዎች በተገቢው መንገድ ይጠቀማል', 'Teaching'],
+      ['peer', 'instructor', 'The instructor demonstrates professional competence.', 'መምህሩ ሙያዊ ብቃት ያሳያል።', 'Professional Competency'],
+      ['peer', 'lab_assistant', 'Continuous update of the subject matter', 'የትምህርቱን ይዘት በተከታታይ ያዘምናል', 'Professional Competency'],
+      ['peer', 'lab_assistant', 'Level of his/her subject matter knowledge and practical skill', 'የተካሄደውን ርዕሰ ጉዳይ እውቀት እና ተግባራዊ ክህሎት', 'Professional Competency'],
+      ['peer', 'lab_assistant', 'Participation in seminars/workshop/research at department/college/university level', 'በዲፓርትመንት/ኮሌጅ/ዩኒቨርሲቲ ደረጃ ላይ በሴሚናር/ስልጠና/ምርምር የሚካፈል', 'Professional Competency'],
+      ['peer', 'lab_assistant', 'Guidance and counseling role to students during practical sessions', 'በተግባራዊ ክፍለ ጊዜዎች የተማሪዎችን መመሪያ እና ምክር ሚና', 'Professional Competency'],
+      ['peer', 'lab_assistant', 'Assist faculty and students in the analysis of samples, maintenance, upkeep of instruments', 'ለመምህራን እና ተማሪዎች ናሙናዎችን በመተንተን፣ መሣሪያዎችን በጥገና እና አጠባበቅ ረገድ እገዛ ይሰጣል', 'Professional Competency'],
+      ['peer', 'lab_assistant', 'Implementation of different teaching methods in his discipline', 'በስልጠናው ውስጥ የተለያዩ የመማሪያ ዘዴዎችን ይተግብራል', 'Professional Competency'],
+      ['peer', 'lab_assistant', 'Willingness to help colleagues during laboratory work/workshop', 'በላብራቶሪ እና የስራ እንቅስቃሴ ጊዜ አቻዎችን ለመርዳት ዝግጁነት ያሳያል', 'Professional Competency'],
+      ['peer', 'lab_assistant', 'Time utilization of class sessions (laboratory, workshop)', 'የክፍል እና አውቶማቲክ ሰአቶች ጊዜ አጠቃቀም', 'Professional Competency'],
+      ['dept_head', 'instructor', 'The instructor fulfills departmental responsibilities.', 'መምህሩ የዲፓርትመንቱን ኃላፊነቶች ይወጣል።', 'Departmental Responsibility'],
+      ['dean', 'instructor', 'The instructor contributes to college goals.', 'መምህሩ ለኮሌጁ ግቦች አስተዋጽኦ ያደርጋል።', 'College Contribution'],
     ];
-    for (const [evaluatorType, englishText, amharicText, category] of seedCriteria) {
+    for (const [evaluatorType, targetRole, englishText, amharicText, category] of seedCriteria) {
       await conn.query(
-        'INSERT INTO evaluation_criteria (evaluator_type, criterion_text, criterion_text_am, category, weight, is_active) SELECT ?, ?, ?, ?, 5, 1 WHERE NOT EXISTS (SELECT 1 FROM evaluation_criteria WHERE evaluator_type = ?)',
-        [evaluatorType, englishText, amharicText, category, evaluatorType]
+        'INSERT INTO evaluation_criteria (evaluator_type, target_role, criterion_text, criterion_text_am, category, weight, is_active) SELECT ?, ?, ?, ?, ?, 5, 1 WHERE NOT EXISTS (SELECT 1 FROM evaluation_criteria WHERE evaluator_type = ? AND target_role = ? AND criterion_text = ?)',
+        [evaluatorType, targetRole, englishText, amharicText, category, evaluatorType, targetRole, englishText]
       );
     }
 

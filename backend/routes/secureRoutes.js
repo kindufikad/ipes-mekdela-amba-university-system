@@ -4,6 +4,7 @@ const multer = require('multer');
 const XLSX = require('xlsx');
 const pool = require('../config/db');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
+const { SYSTEM_ADMIN_CONFLICT_MESSAGE, getActiveSystemAdmin, isActiveSystemAdminUniqueError, isSystemAdminRole } = require('../utils/systemAdminPolicy');
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 const ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_DEFAULT_PASSWORD || 'admin@123';
@@ -16,6 +17,50 @@ const getDefaultPasswordForRole = (role) => {
 
 router.use(authenticateToken);
 router.use(authorizeRoles('admin', 'dept_head', 'department_head'));
+
+const NAME_REGEX = /^[A-Za-z]+(?:[ '-][A-Za-z]+)*$/;
+const STUDENT_ID_REGEX = /^mau\d{7}$/i;
+const EMPLOYEE_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9._-]{2,}$/;
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const validateRegistrationPayload = ({ first_name, last_name, full_name, role, student_id, employee_id, email }) => {
+  const errors = {};
+  const normalizedRole = String(role || '').trim().toLowerCase();
+  const nameParts = String(full_name || '').trim().split(/\s+/).filter(Boolean);
+  const firstName = String(first_name || nameParts[0] || '').trim();
+  const lastName = String(last_name || nameParts.slice(1).join(' ') || '').trim();
+
+  if (!firstName || !NAME_REGEX.test(firstName)) {
+    errors.first_name = 'First name is required and may contain only letters, spaces, hyphens, and apostrophes.';
+  }
+
+  if (!lastName || !NAME_REGEX.test(lastName)) {
+    errors.last_name = 'Last name is required and may contain only letters, spaces, hyphens, and apostrophes.';
+  }
+
+  if (normalizedRole === 'student') {
+    const studentId = String(student_id || '').trim();
+    if (!STUDENT_ID_REGEX.test(studentId)) {
+      errors.student_id = "Student ID must start with 'mau' followed by exactly 7 digits (e.g. mau1600756).";
+    }
+  }
+
+  if (['instructor', 'dept_head', 'lab_assistant'].includes(normalizedRole)) {
+    const employeeId = String(employee_id || '').trim();
+    if (!employeeId || !EMPLOYEE_ID_REGEX.test(employeeId)) {
+      errors.employee_id = 'Employee ID is required and must contain at least 3 valid characters.';
+    }
+  }
+
+  if (!['admin', 'systemadmin'].includes(normalizedRole)) {
+    const emailValue = String(email || '').trim();
+    if (!emailValue || !EMAIL_REGEX.test(emailValue)) {
+      errors.email = 'Please provide a valid email address.';
+    }
+  }
+
+  return errors;
+};
 
 const resolveDepartmentId = async (value) => {
   if (value == null) return null;
@@ -74,37 +119,41 @@ router.get('/users', async (req, res) => {
       params.push(normalizedRole === 'depthead' ? 'dept_head' : normalizedRole);
     }
 
-    if (req.user.role === 'dept_head') {
+    if (['dept_head', 'department_head'].includes(String(req.user.role || '').toLowerCase())) {
       const currentDepartmentId = await resolveDepartmentId(req.user.department_id || req.user.departmentId || req.user.department);
       if (!currentDepartmentId) {
         return res.status(403).json({ message: 'Your department is not defined. Contact an administrator.' });
       }
-      whereClauses.push('(i.department_id = ? OR s.department_id = ?)');
-      params.push(currentDepartmentId, currentDepartmentId);
+      whereClauses.push('(i.department_id = ? OR s.department_id = ? OR la.department_id = ?)');
+      params.push(currentDepartmentId, currentDepartmentId, currentDepartmentId);
     } else if (department_id) {
       const departmentId = Number(department_id);
       if (!Number.isInteger(departmentId) || departmentId <= 0) {
         return res.status(400).json({ message: 'department_id must be a positive integer.' });
       }
-      whereClauses.push('(i.department_id = ? OR s.department_id = ?)');
-      params.push(departmentId, departmentId);
+      whereClauses.push('(i.department_id = ? OR s.department_id = ? OR la.department_id = ?)');
+      params.push(departmentId, departmentId, departmentId);
     } else if (department) {
-      whereClauses.push('(d.name = ? OR d.code = ? OR i.department_id = ? OR s.department_id = ?)');
+      whereClauses.push('(d.name = ? OR d.code = ?)');
       const departmentValue = String(department).trim();
-      params.push(departmentValue, departmentValue, departmentValue, departmentValue);
+      params.push(departmentValue, departmentValue);
     }
 
     const resolvedYear = year_level || year;
     if (resolvedYear) {
       const yearNumber = String(resolvedYear).match(/\d+/)?.[0] || '';
-      whereClauses.push("REGEXP_REPLACE(LOWER(COALESCE(s.year_level, '')), '[^0-9]', '') = ?");
-      params.push(yearNumber);
+      if (yearNumber) {
+        whereClauses.push("REGEXP_REPLACE(LOWER(COALESCE(s.year_level, '')), '[^0-9]', '') = ?");
+        params.push(yearNumber);
+      }
     }
 
     if (section) {
       const normalizedSection = String(section).trim().replace(/^section\s*/i, '').toLowerCase();
-      whereClauses.push("LOWER(TRIM(REPLACE(REPLACE(COALESCE(s.section, ''), 'Section ', ''), 'section ', ''))) = ?");
-      params.push(normalizedSection);
+      if (normalizedSection) {
+        whereClauses.push("LOWER(TRIM(REPLACE(REPLACE(COALESCE(s.section, ''), 'Section ', ''), 'section ', ''))) = ?");
+        params.push(normalizedSection);
+      }
     }
 
     if (program_type) {
@@ -119,7 +168,7 @@ router.get('/users', async (req, res) => {
       u.role,
       u.status,
       '' AS department,
-      COALESCE(d.name, '') AS department_name,
+      COALESCE(d.name, '-') AS department_name,
       '' AS college,
       '' AS academic_year,
       COALESCE(s.semester, '') AS semester,
@@ -128,18 +177,25 @@ router.get('/users', async (req, res) => {
       '' AS specialization,
       '' AS learning_level,
       COALESCE(s.student_id, '') AS student_student_id,
-      COALESCE(i.employee_id, '') AS employee_id,
+      COALESCE(i.employee_id, la.employee_id, '-') AS employee_id,
       COALESCE(s.program_type, '') AS program_type,
       COALESCE(u.created_at, '') AS registration_date,
-      COALESCE(i.phone_number, s.phone_number, '') AS phone_number,
-      COALESCE(CONCAT(i.first_name, ' ', i.last_name), CONCAT(s.first_name, ' ', s.last_name), u.email, s.student_id) AS full_name,
-      COALESCE(i.first_name, s.first_name, '') AS first_name,
-      COALESCE(i.last_name, s.last_name, '') AS last_name,
-      COALESCE(i.department_id, s.department_id) AS department_id
+      COALESCE(i.phone_number, la.phone_number, s.phone_number, '') AS phone_number,
+      COALESCE(
+        CASE WHEN i.first_name IS NOT NULL THEN TRIM(CONCAT_WS(' ', i.first_name, i.last_name)) END,
+        CASE WHEN la.first_name IS NOT NULL THEN TRIM(CONCAT_WS(' ', la.first_name, la.last_name)) END,
+        CASE WHEN s.first_name IS NOT NULL THEN TRIM(CONCAT_WS(' ', s.first_name, s.last_name)) END,
+        u.email,
+        s.student_id
+      ) AS full_name,
+      COALESCE(i.first_name, la.first_name, s.first_name, '') AS first_name,
+      COALESCE(i.last_name, la.last_name, s.last_name, '') AS last_name,
+      COALESCE(i.department_id, la.department_id, s.department_id) AS department_id
       FROM users u
       LEFT JOIN instructors i ON u.id = i.user_id
+      LEFT JOIN lab_assistants la ON u.id = la.user_id
       LEFT JOIN students s ON u.id = s.user_id
-      LEFT JOIN departments d ON d.id = COALESCE(i.department_id, s.department_id)
+      LEFT JOIN departments d ON d.id = COALESCE(i.department_id, la.department_id, s.department_id)
       ${whereClauses.length ? ' WHERE ' + whereClauses.join(' AND ') : ''}
       ORDER BY u.id DESC`;
     const [rows] = await pool.query(query, params);
@@ -194,6 +250,11 @@ router.post('/users', async (req, res) => {
       is_first_login: 1,
       gender: typeof gender === 'string' && gender.trim() ? gender.trim() : null,
     };
+    if (isSystemAdminRole(role)) {
+      const nameParts = String(full_name).trim().split(/\s+/).filter(Boolean);
+      userFields.first_name = nameParts.shift() || '';
+      userFields.last_name = nameParts.join(' ');
+    }
     const profileFields = {
       full_name: String(full_name).trim(),
       email: typeof email === 'string' && email.trim() ? email.trim() : null,
@@ -234,6 +295,14 @@ router.post('/users', async (req, res) => {
     try {
       await conn.beginTransaction();
 
+      if (isSystemAdminRole(role)) {
+        const activeAdmin = await getActiveSystemAdmin(conn);
+        if (activeAdmin) {
+          await conn.rollback();
+          return res.status(409).json({ success: false, message: SYSTEM_ADMIN_CONFLICT_MESSAGE });
+        }
+      }
+
       const columns = Object.keys(userFields);
       const values = columns.map((column) => userFields[column]);
       const placeholders = columns.map(() => '?').join(', ');
@@ -242,7 +311,7 @@ router.post('/users', async (req, res) => {
 
       if (role === 'student') {
         // insert into students table
-        const studentInsert = `INSERT INTO students (user_id, student_id, first_name, last_name, department_id, semester, year_level, section, program_type, gender) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+        const studentInsert = `INSERT INTO students (user_id, student_id, first_name, last_name, department_id, semester, year_level, section, program_type, gender, registration_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_DATE)`;
         const studentValues = [
           newUserId,
           profileFields.student_id || null,
@@ -256,6 +325,18 @@ router.post('/users', async (req, res) => {
           profileFields.gender || null,
         ];
         await conn.query(studentInsert, studentValues);
+      } else if (role === 'lab_assistant') {
+        // Lab assistants use instructors table as single source of truth
+        const instructorInsert = `INSERT INTO instructors (user_id, employee_id, first_name, last_name, department_id, gender) VALUES (?, ?, ?, ?, ?, ?)`;
+        const instructorValues = [
+          newUserId,
+          profileFields.employee_id || null,
+          profileFields.full_name.trim().split(/\s+/)[0] || null,
+          profileFields.full_name.trim().split(/\s+/).slice(1).join(' ') || profileFields.full_name,
+          resolvedDepartmentId || null,
+          profileFields.gender || null,
+        ];
+        await conn.query(instructorInsert, instructorValues);
       } else if (role === 'instructor' || role === 'dept_head') {
         const instructorInsert = `INSERT INTO instructors (user_id, employee_id, first_name, last_name, department_id, gender) VALUES (?, ?, ?, ?, ?, ?)`;
         const instructorValues = [
@@ -273,12 +354,18 @@ router.post('/users', async (req, res) => {
       res.status(201).json({ id: newUserId, message: 'User created successfully' });
     } catch (sqlErr) {
       try { await conn.rollback(); } catch (e) {}
+      if (isActiveSystemAdminUniqueError(sqlErr)) {
+        return res.status(409).json({ success: false, message: SYSTEM_ADMIN_CONFLICT_MESSAGE });
+      }
       console.error('Secure user creation transaction failed:', sqlErr);
       return res.status(500).json({ message: 'Failed to create user', error: sqlErr.message });
     } finally {
       conn.release();
     }
   } catch (error) {
+    if (isActiveSystemAdminUniqueError(error)) {
+      return res.status(409).json({ success: false, message: SYSTEM_ADMIN_CONFLICT_MESSAGE });
+    }
     console.error('Secure user creation failed:', error);
     res.status(500).json({ message: 'Failed to create user', error: error.message, code: error.code, sql: error.sql });
   }
@@ -314,7 +401,7 @@ router.put('/users/:id', async (req, res) => {
       status,
     } = req.body;
 
-    const [existingUserRows] = await pool.query('SELECT role, department FROM users WHERE id = ? LIMIT 1', [userId]);
+    const [existingUserRows] = await pool.query('SELECT role, status, department FROM users WHERE id = ? LIMIT 1', [userId]);
     if (!existingUserRows.length) {
       return res.status(404).json({ message: 'User not found' });
     }
@@ -322,6 +409,12 @@ router.put('/users/:id', async (req, res) => {
     const currentUser = existingUserRows[0];
     const newRole = typeof role === 'string' && role.trim() ? role.trim() : currentUser.role;
     const normalizedDepartment = typeof department === 'string' && department.trim() ? department.trim() : currentUser.department;
+    const nextStatus = typeof status === 'string' && status.trim() ? status.trim() : currentUser.status;
+
+    if (isSystemAdminRole(newRole) && String(nextStatus || '').toLowerCase() === 'active') {
+      const activeAdmin = await getActiveSystemAdmin(pool, userId);
+      if (activeAdmin) return res.status(409).json({ success: false, message: SYSTEM_ADMIN_CONFLICT_MESSAGE });
+    }
 
     const errors = {};
     if (username !== undefined && !username?.trim()) errors.username = 'username is required';
@@ -382,6 +475,9 @@ router.put('/users/:id', async (req, res) => {
 
     res.json({ id: userId, message: 'User updated successfully' });
   } catch (error) {
+    if (isActiveSystemAdminUniqueError(error)) {
+      return res.status(409).json({ success: false, message: SYSTEM_ADMIN_CONFLICT_MESSAGE });
+    }
     console.error('Secure user update failed:', error);
     res.status(500).json({ message: 'Failed to update user', error: error.message });
   }
@@ -412,7 +508,7 @@ router.get('/courses', async (req, res) => {
     const whereClauses = [];
     const params = [];
 
-    if (req.user.role === 'dept_head') {
+    if (['dept_head', 'department_head'].includes(String(req.user.role || '').toLowerCase())) {
       const currentDepartmentId = await resolveDepartmentId(req.user.department_id || req.user.departmentId || req.user.department);
       if (!currentDepartmentId) {
         return res.status(403).json({ message: 'Your department is not defined. Contact an administrator.' });

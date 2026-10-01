@@ -13,69 +13,6 @@ import {
   X,
 } from 'lucide-react';
 
-const MOCK_EVENTS = [
-  {
-    id: 1,
-    title: 'Student Evaluation Launch',
-    type: 'Evaluation',
-    status: 'Scheduled',
-    date: '2026-08-20',
-    time: '09:00',
-    college: 'college-1',
-    department: 'dept-1-1',
-    role: 'Student',
-    location: 'Main Conference Hall',
-    description: 'Institution-wide teaching evaluation rollout for students.',
-    academicYear: '2025/2026',
-    semester: 'Semester I',
-  },
-  {
-    id: 2,
-    title: 'Department Head Review',
-    type: 'Review',
-    status: 'In Progress',
-    date: '2026-08-23',
-    time: '14:00',
-    college: 'college-2',
-    department: 'dept-2-3',
-    role: 'Dept Head',
-    location: 'Academic Board Room',
-    description: 'Review of academic performance and departmental compliance.',
-    academicYear: '2025/2026',
-    semester: 'Semester II',
-  },
-  {
-    id: 3,
-    title: 'Campus Quality Audit',
-    type: 'Audit',
-    status: 'Scheduled',
-    date: '2026-08-27',
-    time: '10:30',
-    college: 'college-1',
-    department: 'dept-1-2',
-    role: 'Admin',
-    location: 'Campus Quality Unit',
-    description: 'Administrative audit of evaluation quality and reporting.',
-    academicYear: '2025/2026',
-    semester: 'Kiremt',
-  },
-  {
-    id: 4,
-    title: 'Final Extension Deadline',
-    type: 'Deadline',
-    status: 'Critical',
-    date: '2026-08-31',
-    time: '17:00',
-    college: 'college-2',
-    department: 'dept-2-1',
-    role: 'Peer',
-    location: 'Evaluation Portal',
-    description: 'Last day to resolve missing submissions and approvals.',
-    academicYear: '2025/2026',
-    semester: 'Semester I',
-  },
-];
-
 const calendarTypeStyles = {
   Evaluation: {
     badge: 'bg-blue-50 text-blue-700 ring-blue-200',
@@ -204,7 +141,7 @@ const languageLabel = (department, language = 'en') => {
 };
 
 const EvaluationCalendar = ({ initialCollegeData = [], onCreateEvent }) => {
-  const [events, setEvents] = useState(MOCK_EVENTS);
+  const [events, setEvents] = useState([]);
   const [selectedDate, setSelectedDate] = useState(new Date('2026-08-20'));
   const [viewMode, setViewMode] = useState('calendar');
   const [calendarMode, setCalendarMode] = useState('G.C.');
@@ -257,10 +194,10 @@ const EvaluationCalendar = ({ initialCollegeData = [], onCreateEvent }) => {
             }))
           );
         } else {
-          setEvents(MOCK_EVENTS);
+          setEvents([]);
         }
       } catch (error) {
-        setEvents(MOCK_EVENTS);
+        setEvents([]);
       } finally {
         setLoading(false);
       }

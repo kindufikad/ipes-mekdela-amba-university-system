@@ -1,31 +1,54 @@
+require('dotenv').config();
+
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const dotenv = require('dotenv');
 const multer = require('multer');
 const session = require('express-session');
 const XLSX = require('xlsx');
 const pool = require('./config/db');
-const { initSocket } = require('./socket');
-
-dotenv.config();
+const { initSocket, emitEvaluationUpdate } = require('./socket');
 
 const authRoutes = require('./routes/authRoutes');
 const secureRoutes = require('./routes/secureRoutes');
 const departmentRoutes = require('./routes/departmentRoutes');
 const publicRoutes = require('./routes/publicRoutes');
+const contactRoutes = require('./routes/contactRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const deptHeadRoutes = require('./routes/deptHead');
+const labAssistantRoutes = require('./routes/labAssistant');
 const userRoutes = require('./routes/user');
-const deanRoutes = require('./routes/dean');
+const deanRoutes = require('./routes/deanRoutes');
 const directorateRoutes = require('./routes/directorate');
+const evaluationRoutes = require('./routes/evaluationRoutes');
 const { bulkUploadStudents, registerStudent } = require('./controllers/studentController');
 const { batchAssignMatrix } = require('./controllers/courseController');
 const { createDepartment } = require('./controllers/departmentController');
-const { getUserNotifications, markAllRead, clearAllNotifications, sendNotification, createNotifications, setRealtimeServer } = require('./controllers/notificationController');
+const { me } = require('./controllers/authController');
+const { getUserNotifications, markAllRead, clearAllNotifications, sendNotification, sendTelegramReminders, createNotifications, setRealtimeServer } = require('./controllers/notificationController');
+const { getAiInsightsSummary } = require('./controllers/aiInsightsController');
+const { sendDeptHeadEvaluationReminder } = require('./controllers/trackingController');
 const { authenticateToken: mwAuthenticateToken, authorizeRoles: mwAuthorizeRoles } = require('./middleware/auth');
+const { auditRequest } = require('./middleware/auditLogger');
+const { responseTimeMiddleware } = require('./middleware/systemHealth');
+const { SYSTEM_ADMIN_CONFLICT_MESSAGE, getActiveSystemAdmin, isActiveSystemAdminUniqueError, isSystemAdminRole } = require('./utils/systemAdminPolicy');
+const { autoExpireFormsMiddleware, initFormExpirationScheduler } = require('./middleware/formExpirationMiddleware');
+const { createEmailTransporter, verifyEmailTransporter } = require('./services/emailService');
+const { router: aiRouter } = require('./services/aiService');
+const {
+  getInstructorOverallPerformance,
+  getDeptHeadLivePerformanceMetrics,
+  calculateWeightedPerformance,
+} = require('./services/evaluationMetrics');
+const { validateEvaluationFeedbackPair } = require('./utils/validationUtility');
+const { sanitizeEvaluationFeedback } = require('./utils/validationUtility');
+const { calculateLikertPercentage, getRatedLikertValues, isValidLikertResponse } = require('./utils/likertScoring');
+const { calculateAndSaveInstructorResult } = require('./utils/evaluationCalculator');
+const { startTelegramBot } = require('./services/telegramBot');
+const { startCronService, getStudentReminderRecipients } = require('./services/cronService');
+const { sendTelegramReminder } = require('./utils/telegramBot');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -35,22 +58,46 @@ const upload = multer({
 const app = express();
 const httpServer = http.createServer(app);
 const PORT = process.env.PORT || 5005;
+const sessionStore = new session.MemoryStore();
+app.set('sessionStore', sessionStore);
 const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret';
-const ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_DEFAULT_PASSWORD || 'admin@123';
-const USER_DEFAULT_PASSWORD = process.env.USER_DEFAULT_PASSWORD || process.env.DEFAULT_PASSWORD || '12345678';
+const USER_DEFAULT_PASSWORD = '12345678';
+const isDatabaseConnectionError = (error) => ['ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'PROTOCOL_CONNECTION_LOST'].includes(error?.code);
+const databaseUnavailableMessage = 'Database connection failed. Please ensure MySQL service is running.';
 
 const io = initSocket(httpServer);
 setRealtimeServer(io);
 
-const getDefaultPasswordForRole = (role) => {
-  if (String(role || '').toLowerCase() === 'admin') return ADMIN_DEFAULT_PASSWORD;
-  return USER_DEFAULT_PASSWORD;
-};
+const getDefaultPasswordForRole = () => USER_DEFAULT_PASSWORD;
+
+const getDefaultDeptHeadPerformance = (warning = '') => ({
+  studentScore: null,
+  deptHeadScore: null,
+  peerScore: null,
+  totalWeightedScore: null,
+  totalScore: null,
+  isComplete: false,
+  statusBadge: 'Pending Complete Evaluation',
+  completion: {
+    isStudentComplete: false,
+    isDeptHeadComplete: false,
+    isPeerComplete: false,
+  },
+  hasAssignedCourse: false,
+  isStudentEvaluationRequired: false,
+  breakdown: {},
+  strengths: [],
+  weaknesses: [],
+  warning,
+});
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
+app.use(responseTimeMiddleware);
+app.use(auditRequest);
 app.use(session({
+  store: sessionStore,
   secret: process.env.SESSION_SECRET || 'ipes-session-secret',
   resave: false,
   saveUninitialized: false,
@@ -63,16 +110,234 @@ app.use(session({
 }));
 app.use('/api/auth', authRoutes);
 app.use('/api/secure', secureRoutes);
-app.use('/api/department', departmentRoutes);
+app.use('/api/contact', contactRoutes);
 app.use('/api/public', publicRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/dept-head', deptHeadRoutes);
+app.use('/api/department-head', deptHeadRoutes);
+app.use('/api/department', departmentRoutes);
+app.use('/api/lab-assistant', labAssistantRoutes);
 app.use('/api/user', userRoutes);
+app.use('/api/users', userRoutes);
 app.use('/api/dean', deanRoutes);
 app.use('/api/directorate', directorateRoutes);
+app.use('/api/evaluations', evaluationRoutes);
+app.use('/api/ai', aiRouter);
+app.use('/api/v1/ai', aiRouter);
+app.get('/api/ai-insights/summary', mwAuthenticateToken, getAiInsightsSummary);
 app.use('/uploads', express.static(require('path').join(__dirname, 'uploads')));
-app.post('/api/students/bulk-upload', upload.single('file'), bulkUploadStudents);
-app.post('/api/students/register', mwAuthenticateToken, mwAuthorizeRoles('admin'), registerStudent);
+
+app.get('/api/reports/print-efficiency/:instructorId', mwAuthenticateToken, mwAuthorizeRoles('instructor', 'dept_head', 'college_dean', 'dean', 'admin'), async (req, res) => {
+  const instructorId = Number(req.params.instructorId);
+  const academicYear = String(req.query.academic_year || '').trim();
+  const semester = String(req.query.semester || '').trim();
+  if (!Number.isInteger(instructorId) || instructorId <= 0) {
+    return res.status(400).json({ success: false, message: 'A valid instructor ID is required.' });
+  }
+
+  try {
+    const requestedTargetRole = String(req.query.target_role || '').trim().toLowerCase().replace(' ', '_');
+    const targetTable = requestedTargetRole === 'lab_assistant' ? 'lab_assistants' : 'instructors';
+    const targetIdColumn = targetTable === 'lab_assistants' ? 'la.id' : 'i.id';
+    const targetAlias = targetTable === 'lab_assistants' ? 'la' : 'i';
+    const [[target]] = await pool.query(
+      `SELECT LOWER(TRIM(COALESCE(u.role, ''))) AS target_role
+       FROM ${targetTable} ${targetAlias} INNER JOIN users u ON u.id = ${targetAlias}.user_id
+       WHERE ${targetIdColumn} = ? LIMIT 1`,
+      [instructorId]
+    );
+    let labAssistantTarget = null;
+    if (!target && targetTable !== 'lab_assistants') {
+      [[labAssistantTarget]] = await pool.query(
+        `SELECT LOWER(TRIM(COALESCE(u.role, ''))) AS target_role
+         FROM lab_assistants la INNER JOIN users u ON u.id = la.user_id
+         WHERE la.id = ? LIMIT 1`,
+        [instructorId]
+      );
+    }
+    const resolvedTarget = target || labAssistantTarget;
+    if (resolvedTarget && !['instructor', 'lab_assistant'].includes(resolvedTarget.target_role)) {
+      return res.status(403).json({ success: false, message: 'Reports can only be generated for Instructors and Lab Assistants.' });
+    }
+    if (!resolvedTarget) return res.status(404).json({ success: false, message: 'Instructor or Lab Assistant not found.' });
+
+    if (resolvedTarget.target_role === 'instructor') {
+      const metrics = await getInstructorOverallPerformance({ instructorId, academicYear, semester });
+      const studentCount = Number(metrics.student?.count || 0);
+      const peerCount = Number(metrics.peer?.count || 0);
+      return res.json({
+        success: true,
+        instructor_id: metrics.instructorId,
+        instructor_name: metrics.instructorName,
+        department_name: metrics.department,
+        college_name: metrics.college_name,
+        academic_year: metrics.academicYear,
+        semester: metrics.semester,
+        student_average: metrics.studentRaw,
+        student_raw_percentage: metrics.studentRaw,
+        student_weighted: metrics.studentWeighted,
+        dept_head_score: metrics.deptHeadRaw,
+        raw_dean_score: metrics.deptHeadRaw,
+        dean_raw: metrics.deptHeadRaw,
+        dept_head_raw_score: metrics.deptHeadRaw,
+        dept_head_raw_percentage: metrics.deptHeadRaw,
+        dept_head_average: metrics.deptHeadRaw,
+        dept_head_weighted: metrics.deptHeadWeighted,
+        peer_average: metrics.peerRaw,
+        raw_peer_score: metrics.peerRaw,
+        peer_raw: metrics.peerRaw,
+        peer_raw_percentage: metrics.peerRaw,
+        peer_weighted: metrics.peerWeighted,
+        evaluated_students_count: studentCount,
+        evaluated_peers_count: peerCount,
+        total_students_evaluated_count: studentCount,
+        total_peers_evaluated_count: peerCount,
+        hasCourseAssigned: Boolean(metrics.hasAssignedCourse),
+        has_course_assigned: Boolean(metrics.hasAssignedCourse),
+        total_score: metrics.totalScore,
+        final_score: metrics.totalScore,
+        classification: metrics.classification,
+        breakdown: {
+          student: { rawPercentage: metrics.studentRaw, weightedContribution: metrics.studentWeighted, weight: metrics.weights?.student ?? (metrics.hasAssignedCourse ? 50 : 0), isNA: !metrics.hasAssignedCourse },
+          deptHead: { rawPercentage: metrics.deptHeadRaw, weightedContribution: metrics.deptHeadWeighted, weight: metrics.weights?.deptHead ?? (metrics.hasAssignedCourse ? 30 : 60) },
+          peer: { rawPercentage: metrics.peerRaw, weightedContribution: metrics.peerWeighted, weight: metrics.weights?.peer ?? (metrics.hasAssignedCourse ? 20 : 40) },
+        },
+      });
+    }
+
+    if (resolvedTarget.target_role === 'lab_assistant') {
+      const [[profile]] = await pool.query(
+        `SELECT la.id, la.user_id, TRIM(CONCAT(COALESCE(la.first_name, ''), ' ', COALESCE(la.last_name, ''))) AS instructor_name,
+          d.name AS department_name, c.name AS college_name
+         FROM lab_assistants la LEFT JOIN departments d ON d.id = la.department_id
+         LEFT JOIN colleges c ON c.id = d.college_id
+         WHERE la.id = ? LIMIT 1`,
+        [instructorId]
+      );
+      const [[student]] = await pool.query(
+        `SELECT COALESCE(AVG(ses.score), 0) AS score, COUNT(DISTINCT ses.id) AS count
+         FROM student_evaluation_submissions ses INNER JOIN evaluation_dispatches ed ON ed.id = ses.dispatch_id
+         WHERE ed.target_type = 'lab_assistant' AND ed.target_user_id IN (?, ?)
+            AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved')` ,
+          [instructorId, profile.user_id]
+      );
+      const [[peer]] = await pool.query(
+        `SELECT COALESCE(AVG(pes.score), 0) AS score, COUNT(DISTINCT pes.id) AS count
+         FROM peer_evaluation_submissions pes INNER JOIN peer_evaluations pe ON pe.id = pes.peer_evaluation_id
+         INNER JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id
+         WHERE ed.target_type = 'lab_assistant' AND ed.target_user_id IN (?, ?)
+            AND LOWER(COALESCE(pes.status, 'submitted')) IN ('submitted', 'completed', 'approved')` ,
+          [instructorId, profile.user_id]
+      );
+      const [[deptHead]] = await pool.query(
+        `SELECT COALESCE(AVG(dhe.total_score), 0) AS score, COUNT(DISTINCT dhe.id) AS count
+         FROM dept_head_evaluations dhe
+         WHERE dhe.evaluatee_id IN (?, ?) AND LOWER(COALESCE(dhe.target_role, '')) = 'lab_assistant'
+            AND LOWER(COALESCE(dhe.status, 'pending')) IN ('submitted', 'completed', 'approved')` ,
+          [instructorId, profile.user_id]
+      );
+      const studentRaw = Number(Number(student?.score || 0).toFixed(2));
+      const peerRaw = Number(Number(peer?.score || 0).toFixed(2));
+      const deptHeadStored = Number(deptHead?.score || 0);
+      const deptHeadRaw = Number(deptHeadStored.toFixed(2));
+      const studentWeighted = Number((studentRaw * 0.5).toFixed(2));
+      const deptHeadWeighted = Number((deptHeadRaw * 0.3).toFixed(2));
+      const peerWeighted = Number((peerRaw * 0.2).toFixed(2));
+      const totalScore = Number((studentWeighted + deptHeadWeighted + peerWeighted).toFixed(2));
+      return res.json({
+        success: true,
+        instructor_id: profile.id,
+        instructor_name: profile.instructor_name,
+        department_name: profile.department_name,
+        college_name: profile.college_name,
+        target_role: 'lab_assistant',
+        academic_year: academicYear,
+        semester,
+        student_average: studentRaw,
+        student_raw_percentage: studentRaw,
+        student_weighted: studentWeighted,
+        dept_head_score: deptHeadRaw,
+        dept_head_raw_score: deptHeadStored,
+        dept_head_average: deptHeadRaw,
+        dept_head_weighted: deptHeadWeighted,
+        peer_average: peerRaw,
+        peer_raw_percentage: peerRaw,
+        peer_weighted: peerWeighted,
+        evaluated_students_count: Number(student?.count || 0),
+        evaluated_peers_count: Number(peer?.count || 0),
+        total_score: totalScore,
+        final_score: totalScore,
+        status: totalScore > 0 ? 'Completed' : 'Pending',
+        can_print: totalScore > 0,
+        breakdown: {
+          student: { rawPercentage: studentRaw, weightedContribution: studentWeighted, weight: 50 },
+          deptHead: { rawPercentage: deptHeadRaw, rawScore: deptHeadStored, weightedContribution: deptHeadWeighted, weight: 30 },
+          peer: { rawPercentage: peerRaw, weightedContribution: peerWeighted, weight: 20 },
+        },
+      });
+    }
+
+    const calculatedResult = await calculateAndSaveInstructorResult(instructorId, academicYear, semester);
+    const [[row]] = await pool.query(
+      `SELECT er.instructor_id, er.academic_year, er.semester,
+              er.student_average, er.student_score, er.peer_average, er.peer_score,
+              er.dept_head_score, er.total_score, er.final_score,
+              TRIM(CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, ''))) AS instructor_name,
+              d.name AS department_name,
+              LOWER(TRIM(COALESCE(u.role, ''))) AS target_role
+       FROM evaluation_results er
+       INNER JOIN instructors i ON i.id = er.instructor_id
+       INNER JOIN users u ON u.id = i.user_id
+       LEFT JOIN departments d ON d.id = er.department_id
+       WHERE er.instructor_id = ?
+         AND LOWER(TRIM(COALESCE(u.role, ''))) IN ('instructor', 'lab_assistant')
+         AND (? = '' OR er.academic_year = ?)
+         AND (? = '' OR er.semester = ?)
+       ORDER BY er.id DESC LIMIT 1`,
+      [instructorId, academicYear, academicYear, semester, semester]
+    );
+    if (!row) {
+      return res.status(404).json({ success: false, message: 'Evaluation result not found.' });
+    }
+
+    const student = Number(row.student_average || row.student_score || 0);
+    const peer = Number(row.peer_average || row.peer_score || 0);
+    const deptHeadRaw = Number(row.dept_head_score || 0);
+    const deptHead = deptHeadRaw > 0 && deptHeadRaw <= 30 ? (deptHeadRaw / 30) * 100 : deptHeadRaw;
+    const breakdown = {
+      student: { rawPercentage: Number(student.toFixed(2)), weight: 50, weightedContribution: Number((student * 0.5).toFixed(2)) },
+      deptHead: { rawScore: Number(deptHeadRaw.toFixed(2)), rawPercentage: Number(deptHead.toFixed(2)), weight: 30, weightedContribution: Number((deptHead * 0.3).toFixed(2)) },
+      peer: { rawPercentage: Number(peer.toFixed(2)), weight: 20, weightedContribution: Number((peer * 0.2).toFixed(2)) },
+    };
+    const totalScore = Number((breakdown.student.weightedContribution + breakdown.deptHead.weightedContribution + breakdown.peer.weightedContribution).toFixed(2));
+    return res.json({
+      success: true,
+      instructor_id: row.instructor_id,
+      instructor_name: row.instructor_name,
+      department_name: row.department_name,
+      academic_year: row.academic_year,
+      semester: row.semester,
+      student_average: breakdown.student.rawPercentage,
+      dept_head_score: breakdown.deptHead.rawPercentage,
+      dept_head_raw_score: breakdown.deptHead.rawScore,
+      dept_head_average: breakdown.deptHead.rawPercentage,
+      peer_average: breakdown.peer.rawPercentage,
+      student_weighted: breakdown.student.weightedContribution,
+      dept_head_weighted: breakdown.deptHead.weightedContribution,
+      peer_weighted: breakdown.peer.weightedContribution,
+      total_students_evaluated_count: Number(calculatedResult?.total_students_evaluated_count || 0),
+      total_peers_evaluated_count: Number(calculatedResult?.total_peers_evaluated_count || 0),
+      total_score: totalScore,
+      final_score: totalScore,
+      breakdown,
+    });
+  } catch (error) {
+    console.error('Print efficiency report query failed:', error);
+    return res.status(500).json({ success: false, message: 'Unable to load efficiency report.' });
+  }
+});
+app.post('/api/students/bulk-upload', mwAuthenticateToken, mwAuthorizeRoles('admin', 'systemadmin'), upload.single('file'), bulkUploadStudents);
+app.post('/api/students/register', mwAuthenticateToken, mwAuthorizeRoles('admin', 'systemadmin'), registerStudent);
 app.get('/api/colleges', mwAuthenticateToken, mwAuthorizeRoles('admin', 'systemadmin'), async (req, res) => {
   try {
     const [rows] = await pool.query('SELECT id, name, code FROM colleges ORDER BY name ASC');
@@ -83,7 +348,11 @@ app.get('/api/colleges', mwAuthenticateToken, mwAuthorizeRoles('admin', 'systema
   }
 });
 app.post('/api/departments', mwAuthenticateToken, mwAuthorizeRoles('admin', 'systemadmin'), createDepartment);
+app.get('/api/notifications', mwAuthenticateToken, getUserNotifications);
 app.get('/api/notifications/unread-count', mwAuthenticateToken, getUserNotifications);
+app.put('/api/notifications/mark-all-read/:userId', mwAuthenticateToken, markAllRead);
+app.delete('/api/notifications/clear-all/:userId', mwAuthenticateToken, clearAllNotifications);
+app.post('/api/notifications/send', mwAuthenticateToken, mwAuthorizeRoles('admin', 'systemadmin'), sendNotification);
 
 const sendResponse = (res, statusCode, messageEn, messageAm, data = null) => {
   res.status(statusCode).json({
@@ -93,27 +362,229 @@ const sendResponse = (res, statusCode, messageEn, messageAm, data = null) => {
   });
 };
 
-const authenticate = (req, res, next) => {
-  const token = req.headers.authorization?.split(' ')[1] || null;
+const normalizeRole = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['department_head', 'depthead'].includes(normalized) ? 'dept_head' : normalized;
+};
 
-  if (!token) {
+const normalizeGenderValue = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return 'male';
+  if (normalized === 'male' || normalized === 'm') return 'male';
+  if (normalized === 'female' || normalized === 'f') return 'female';
+  return 'male';
+};
+
+const NAME_REGEX = /^[A-Za-z]+(?:[ '-][A-Za-z]+)*$/;
+const STUDENT_ID_REGEX = /^mau\d{7}$/i;
+const EMPLOYEE_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9._-]{2,}$/;
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const validateRegistrationPayload = ({ first_name, last_name, full_name, role, student_id, employee_id, email, gender }) => {
+  const errors = {};
+  const normalizedRole = normalizeRole(role);
+  const normalizedGender = normalizeGenderValue(gender);
+  const nameParts = String(full_name || '').trim().split(/\s+/).filter(Boolean);
+  const firstName = String(first_name || nameParts[0] || '').trim();
+  const lastName = String(last_name || nameParts.slice(1).join(' ') || '').trim();
+
+  if (!firstName || !NAME_REGEX.test(firstName)) {
+    errors.first_name = 'First name is required and may contain only letters, spaces, hyphens, and apostrophes.';
+  }
+
+  if (!lastName || !NAME_REGEX.test(lastName)) {
+    errors.last_name = 'Last name is required and may contain only letters, spaces, hyphens, and apostrophes.';
+  }
+
+  if (normalizedRole === 'student') {
+    const studentId = String(student_id || '').trim();
+    if (!STUDENT_ID_REGEX.test(studentId)) {
+      errors.student_id = "Student ID must start with 'mau' followed by exactly 7 digits (e.g. mau1600756).";
+    }
+  }
+
+  if (['instructor', 'dept_head', 'lab_assistant'].includes(normalizedRole)) {
+    const employeeId = String(employee_id || '').trim();
+    if (!employeeId || !EMPLOYEE_ID_REGEX.test(employeeId)) {
+      errors.employee_id = 'Employee ID is required and must contain at least 3 valid characters.';
+    }
+  }
+
+  if (!['admin', 'systemadmin'].includes(normalizedRole) && !['male', 'female'].includes(normalizedGender)) {
+    errors.gender = 'Gender is required and must be Male or Female.';
+  }
+
+  if (!['admin', 'systemadmin'].includes(normalizedRole)) {
+    const emailValue = String(email || '').trim();
+    if (!emailValue || !EMAIL_REGEX.test(emailValue)) {
+      errors.email = 'Please provide a valid email address.';
+    }
+  }
+
+  return errors;
+};
+
+const calculateProportionalScore = (scores, weights = { student: 0.5, peer: 0.2, deptHead: 0.3 }) => {
+  const available = Object.entries(weights).filter(([key]) => scores?.[key] !== null && scores?.[key] !== undefined && scores?.[key] !== '' && Number.isFinite(Number(scores[key])));
+  if (!available.length) return { total: 0, categories: {} };
+
+  const categories = Object.fromEntries(available.map(([key, weight]) => {
+    const score = Number(scores[key]);
+    const contribution = Number((score * weight).toFixed(2));
+    return [key, {
+      score,
+      originalWeight: weight,
+      normalizedWeight: weight,
+      contribution,
+    }];
+  }));
+
+  return {
+    total: Number(Object.values(categories).reduce((total, category) => total + category.contribution, 0).toFixed(2)),
+    categories,
+  };
+};
+
+const normalizePercentage = (rawScore, maxScore = 100) => {
+  const score = Number(rawScore || 0);
+  if (!Number.isFinite(score)) return 0;
+  if (maxScore && maxScore > 0) {
+    return Number(Math.min(Math.max((score / maxScore) * 100, 0), 100).toFixed(2));
+  }
+  return Number(Math.min(Math.max(score, 0), 100).toFixed(2));
+};
+
+const normalizeDeptHeadScore = (deptHeadScore) => {
+  const value = Number(deptHeadScore || 0);
+  if (!Number.isFinite(value)) return 0;
+  if (value > 0 && value <= 30) return Number(((value / 30) * 100).toFixed(2));
+  return Number(Math.min(value, 100).toFixed(2));
+};
+
+const INSTRUCTOR_WEIGHTED_SCORE_SQL = `ROUND(
+  (COALESCE(AVG(student_score), 0) * 0.50) +
+  (COALESCE(AVG(dept_head_score), 0) * 0.30) +
+  (COALESCE(AVG(peer_score), 0) * 0.20), 2
+)`;
+
+const calculateInstructorWeightedScore = calculateWeightedPerformance;
+
+const upsertEvaluationResult = async (instructorId, departmentId, academicYear = '', semester = '') => {
+  let resolvedAcademicYear = String(academicYear || '').trim();
+  let resolvedSemester = String(semester || '').trim();
+  if (!resolvedAcademicYear || !resolvedSemester) {
+    const [[term]] = await pool.query(
+      'SELECT academic_year, semester FROM course_assignments WHERE instructor_id = ? ORDER BY created_at DESC LIMIT 1',
+      [instructorId]
+    );
+    resolvedAcademicYear = resolvedAcademicYear || String(term?.academic_year || new Date().getFullYear());
+    resolvedSemester = resolvedSemester || String(term?.semester || '');
+  }
+
+  const [[studentResult]] = await pool.query(
+    `SELECT AVG(ses.score) AS score
+     FROM student_evaluation_submissions ses
+     INNER JOIN evaluation_dispatches ed ON ed.id = ses.dispatch_id
+     INNER JOIN course_assignments ca ON ca.id = ed.assignment_id
+     WHERE ca.instructor_id = ?
+       AND LOWER(COALESCE(ed.target_type, 'instructor')) = 'instructor'
+       AND LOWER(TRIM(ses.status)) IN ('submitted', 'completed', 'approved')
+       AND (ed.academic_year = ? OR ed.academic_year IS NULL)
+       AND (ed.semester = ? OR ed.semester IS NULL)`,
+    [instructorId, resolvedAcademicYear, resolvedSemester]
+  );
+  const [[peerResult]] = await pool.query(
+    `SELECT AVG(pes.score) AS score
+     FROM peer_evaluation_submissions pes
+     WHERE pes.evaluatee_id = ?
+       AND LOWER(TRIM(pes.status)) IN ('submitted', 'completed', 'approved')`,
+    [instructorId]
+  );
+  const [[deptHeadResult]] = await pool.query(
+    `SELECT AVG(dhe.total_score) AS score
+     FROM dept_head_evaluations dhe
+     WHERE dhe.instructor_id = ?
+       AND LOWER(TRIM(dhe.status)) IN ('submitted', 'completed', 'approved')`,
+    [instructorId]
+  );
+
+  const [[courseAssignment]] = await pool.query(
+    `SELECT COUNT(*) AS total
+     FROM course_assignments
+     WHERE instructor_id = ?
+       AND (? = '' OR academic_year = ?)
+       AND (? = '' OR semester = ?)
+     LIMIT 1`,
+    [instructorId, resolvedAcademicYear, resolvedAcademicYear, resolvedSemester, resolvedSemester]
+  );
+
+  const rawStudentAverage = studentResult?.score == null ? 0 : Number(studentResult.score);
+  const rawPeerAverage = peerResult?.score == null ? 0 : Number(peerResult.score);
+  const rawDeptHeadAverage = deptHeadResult?.score == null ? 0 : Number(deptHeadResult.score);
+  const deptHeadPercentage = normalizeDeptHeadScore(rawDeptHeadAverage);
+  const hasCourseAssigned = Number(courseAssignment?.total || 0) > 0 || rawStudentAverage > 0;
+
+  const scores = {
+    student: rawStudentAverage,
+    peer: rawPeerAverage,
+    deptHead: rawDeptHeadAverage,
+  };
+
+  let totalScore = 0;
+  if (hasCourseAssigned) {
+    totalScore = Number(((rawStudentAverage * 0.5) + (rawPeerAverage * 0.2) + (deptHeadPercentage * 0.3)).toFixed(2));
+  } else {
+    totalScore = Number(((deptHeadPercentage * 0.6) + (rawPeerAverage * 0.4)).toFixed(2));
+  }
+
+  await pool.query(
+    `INSERT INTO evaluation_results
+      (instructor_id, department_id, academic_year, semester, student_average, student_score, peer_average, peer_score, dept_head_score, total_score, final_score)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       department_id = VALUES(department_id), student_average = VALUES(student_average), student_score = VALUES(student_score),
+       peer_average = VALUES(peer_average), peer_score = VALUES(peer_score), dept_head_score = VALUES(dept_head_score),
+       total_score = VALUES(total_score), final_score = VALUES(final_score), published_at = CURRENT_TIMESTAMP`,
+    [instructorId, departmentId, resolvedAcademicYear, resolvedSemester, rawStudentAverage, rawStudentAverage, rawPeerAverage, rawPeerAverage, rawDeptHeadAverage, totalScore, totalScore]
+  );
+
+  return {
+    academicYear: resolvedAcademicYear,
+    semester: resolvedSemester,
+    studentScore: rawStudentAverage,
+    deptHeadScore: rawDeptHeadAverage,
+    peerScore: rawPeerAverage,
+    deptHeadPercentage,
+    hasCourseAssigned,
+    totalScore: Number(totalScore.toFixed(2)),
+    finalScore: Number(totalScore.toFixed(2)),
+  };
+};
+
+const authenticate = (req, res, next) => {
+  const authorization = typeof req.headers.authorization === 'string'
+    ? req.headers.authorization.trim()
+    : '';
+  const tokenMatch = authorization.match(/^Bearer\s+([^\s]+)$/i);
+
+  if (!tokenMatch) {
     return sendResponse(res, 401, 'Authentication required.', 'ማረጋገጫ ያስፈልጋል።');
   }
 
+  const token = tokenMatch[1];
   jwt.verify(token, JWT_SECRET, (err, decoded) => {
-    if (err) {
+    if (err || !decoded || typeof decoded !== 'object') {
       return sendResponse(res, 401, 'Invalid or expired token.', 'ልክ ያልሆነ ወይም ጊዜ ያለፈ ቶከን ነው።');
     }
-    req.user = decoded;
+    req.user = {
+      ...decoded,
+      role: normalizeRole(decoded.role || decoded.user_role),
+    };
     next();
   });
 };
 
 const authorizeRoles = (...roles) => (req, res, next) => {
-  const normalizeRole = (value) => {
-    const normalized = String(value || '').trim().toLowerCase();
-    return normalized === 'department_head' ? 'dept_head' : normalized;
-  };
   const allowedRoles = roles.map(normalizeRole);
   if (!req.user || !allowedRoles.includes(normalizeRole(req.user.role || req.user.user_role))) {
     return sendResponse(res, 403, 'You do not have permission to perform this action.', 'ይህን እርምጃ ለማከናወን ፈቃድ የለህም።');
@@ -155,6 +626,43 @@ const notifyDepartmentHead = async ({ departmentId, title, message, type = 'eval
   });
 };
 
+const autoCloseStudentEvaluation = async (dispatch) => {
+  if (!dispatch?.assignment_id) return false;
+
+  const [[progress]] = await pool.query(
+    `SELECT COUNT(*) AS total_dispatches,
+            COUNT(CASE WHEN LOWER(COALESCE(ed.status, '')) = 'submitted'
+              AND EXISTS (
+                SELECT 1 FROM student_evaluation_submissions ses
+                WHERE ses.dispatch_id = ed.id
+                  AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved')
+              ) THEN 1 END) AS completed_dispatches
+     FROM evaluation_dispatches ed
+     WHERE ed.assignment_id = ? AND ed.evaluation_type = 'student'`,
+    [dispatch.assignment_id]
+  );
+
+  const totalDispatches = Number(progress?.total_dispatches || 0);
+  const completedDispatches = Number(progress?.completed_dispatches || 0);
+  if (!totalDispatches || completedDispatches !== totalDispatches) return false;
+
+  const [result] = await pool.query(
+    `UPDATE evaluation_dispatches
+     SET status = 'closed'
+     WHERE assignment_id = ? AND evaluation_type = 'student' AND status <> 'closed'`,
+    [dispatch.assignment_id]
+  );
+  if (!result.affectedRows) return false;
+
+  await notifyDepartmentHead({
+    departmentId: dispatch.department_id,
+    title: 'Student evaluation batch completed',
+    message: `All student evaluations for ${dispatch.course_name || 'the assigned course'} are complete. You can now review or publish the report.`,
+    type: 'evaluation_batch_completed',
+  });
+  return true;
+};
+
 const notifyStudentCohort = async ({ departmentId, programType, yearLevel, semester, section, title, message, type }) => {
   try {
     const [students] = await pool.query(
@@ -162,7 +670,6 @@ const notifyStudentCohort = async ({ departmentId, programType, yearLevel, semes
        FROM students s
        WHERE s.department_id = ?
          AND (? IS NULL OR LOWER(TRIM(s.program_type)) = LOWER(TRIM(?)))
-         AND (? IS NULL OR LOWER(TRIM(s.year_level)) = LOWER(TRIM(?)))
          AND (? IS NULL OR LOWER(TRIM(s.semester)) = LOWER(TRIM(?)))
          AND (? IS NULL OR LOWER(TRIM(REPLACE(s.section, 'Section ', ''))) = LOWER(TRIM(REPLACE(?, 'Section ', ''))))`,
       [departmentId, programType ?? null, programType ?? null, yearLevel ?? null, yearLevel ?? null, semester ?? null, semester ?? null, section ?? null, section ?? null]
@@ -174,6 +681,19 @@ const notifyStudentCohort = async ({ departmentId, programType, yearLevel, semes
 };
 
 const initializeSchema = async () => {
+  await pool.query(`CREATE TABLE IF NOT EXISTS evaluation_periods (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    academic_year VARCHAR(64) NOT NULL,
+    semester VARCHAR(64) NOT NULL,
+    deadline DATETIME NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'active',
+    updated_by INT UNSIGNED NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_evaluation_period_term (academic_year, semester),
+    INDEX idx_evaluation_period_status (status, deadline)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
   // Helper to check for column existence
   const columnExists = async (table, column) => {
     const [rows] = await pool.query(
@@ -231,10 +751,13 @@ const initializeSchema = async () => {
     await pool.query(`CREATE TABLE IF NOT EXISTS users (
       id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
       email VARCHAR(255) NULL UNIQUE,
+        first_name VARCHAR(128) NULL,
+        last_name VARCHAR(128) NULL,
       password_hash VARCHAR(255) NOT NULL,
-      role ENUM('admin','dept_head','instructor','student') NOT NULL DEFAULT 'student',
+      role ENUM('admin','student','instructor','dept_head','department_head','college_dean','dean','academic_directorate','academic_director','directorate','lab_assistant') NOT NULL DEFAULT 'student',
       status VARCHAR(32) NOT NULL DEFAULT 'active',
       is_first_login BOOLEAN NOT NULL DEFAULT TRUE,
+      must_change_password BOOLEAN NOT NULL DEFAULT TRUE,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
 
@@ -242,11 +765,65 @@ const initializeSchema = async () => {
     await pool.query('ALTER TABLE users ADD COLUMN email VARCHAR(255) NULL UNIQUE AFTER id');
   }
 
+  if (!(await columnExists('users', 'first_name'))) {
+    await pool.query('ALTER TABLE users ADD COLUMN first_name VARCHAR(128) NULL AFTER email');
+  }
+
+  if (!(await columnExists('users', 'last_name'))) {
+    await pool.query('ALTER TABLE users ADD COLUMN last_name VARCHAR(128) NULL AFTER first_name');
+  }
+
   if (!(await columnExists('users', 'is_first_login'))) {
     await pool.query('ALTER TABLE users ADD COLUMN is_first_login BOOLEAN NOT NULL DEFAULT TRUE');
   }
 
-  await pool.query("ALTER TABLE users MODIFY COLUMN role ENUM('admin','dept_head','instructor','student','college_dean','academic_directorate') NOT NULL DEFAULT 'student'");
+  if (!(await columnExists('users', 'must_change_password'))) {
+    await pool.query('ALTER TABLE users ADD COLUMN must_change_password BOOLEAN NOT NULL DEFAULT TRUE');
+  }
+
+  if (!(await columnExists('users', 'telegram_chat_id'))) {
+    await pool.query('ALTER TABLE users ADD COLUMN telegram_chat_id BIGINT NULL');
+  }
+
+  if (!(await columnExists('users', 'phone_number'))) {
+    await pool.query('ALTER TABLE users ADD COLUMN phone_number VARCHAR(32) NULL');
+  }
+
+  if (!(await columnExists('users', 'profile_picture'))) {
+    await pool.query('ALTER TABLE users ADD COLUMN profile_picture VARCHAR(255) NULL');
+  }
+
+  if (!(await columnExists('users', 'language'))) {
+    await pool.query("ALTER TABLE users ADD COLUMN language ENUM('en', 'am') NOT NULL DEFAULT 'am'");
+  }
+
+  await pool.query("ALTER TABLE users MODIFY COLUMN role ENUM('admin','student','instructor','dept_head','department_head','college_dean','dean','academic_directorate','academic_director','directorate','lab_assistant') NOT NULL DEFAULT 'student'");
+
+  if (!(await columnExists('users', 'active_system_admin_slot'))) {
+    await pool.query(`ALTER TABLE users ADD COLUMN active_system_admin_slot TINYINT
+      GENERATED ALWAYS AS (
+        CASE WHEN LOWER(role) IN ('admin', 'systemadmin', 'system_admin')
+          AND LOWER(COALESCE(status, 'active')) = 'active' THEN 1 ELSE NULL END
+      ) STORED`);
+  }
+
+  const [systemAdminIndexRows] = await pool.query(
+    `SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'
+       AND INDEX_NAME = 'uq_users_single_active_system_admin' LIMIT 1`
+  );
+  if (!systemAdminIndexRows.length) {
+    const [[activeSystemAdmins]] = await pool.query(
+      `SELECT COUNT(*) AS total FROM users
+       WHERE LOWER(role) IN ('admin', 'systemadmin', 'system_admin')
+         AND LOWER(COALESCE(status, 'active')) = 'active'`
+    );
+    if (Number(activeSystemAdmins.total || 0) <= 1) {
+      await pool.query('ALTER TABLE users ADD UNIQUE KEY uq_users_single_active_system_admin (active_system_admin_slot)');
+    } else {
+      console.error('Multiple active System Admin accounts exist. Deactivate all but one to enable the database uniqueness constraint.');
+    }
+  }
 
   // Instructors table
   await pool.query(`CREATE TABLE IF NOT EXISTS instructors (
@@ -264,6 +841,59 @@ const initializeSchema = async () => {
     CONSTRAINT fk_instructors_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     CONSTRAINT fk_instructors_department FOREIGN KEY (department_id) REFERENCES departments(id) ON DELETE SET NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS instructor_goals (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    instructor_user_id INT UNSIGNED NOT NULL,
+    focus_area VARCHAR(100) NOT NULL,
+    goal TEXT NOT NULL,
+    term VARCHAR(100) NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_instructor_goals_user (instructor_user_id),
+    CONSTRAINT fk_instructor_goals_user FOREIGN KEY (instructor_user_id) REFERENCES users(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS lab_assistants (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id INT UNSIGNED NOT NULL,
+    employee_id VARCHAR(64) DEFAULT NULL,
+    first_name VARCHAR(100) DEFAULT NULL,
+    last_name VARCHAR(100) DEFAULT NULL,
+    email VARCHAR(255) DEFAULT NULL,
+    department_id INT UNSIGNED DEFAULT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_lab_assistant_user (user_id),
+    CONSTRAINT fk_lab_assistants_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_lab_assistants_department FOREIGN KEY (department_id) REFERENCES departments(id) ON DELETE SET NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  const [labAssistantColumns] = await pool.query('SHOW COLUMNS FROM lab_assistants');
+  const labAssistantColumnNames = new Set(labAssistantColumns.map((column) => column.Field));
+  if (!labAssistantColumnNames.has('first_name')) {
+    await pool.query('ALTER TABLE lab_assistants ADD COLUMN first_name VARCHAR(100) NULL AFTER employee_id');
+  }
+  if (!labAssistantColumnNames.has('last_name')) {
+    await pool.query('ALTER TABLE lab_assistants ADD COLUMN last_name VARCHAR(100) NULL AFTER first_name');
+  }
+  if (!labAssistantColumnNames.has('gender')) {
+    await pool.query('ALTER TABLE lab_assistants ADD COLUMN gender VARCHAR(10) NULL AFTER department_id');
+  }
+  if (!labAssistantColumnNames.has('phone_number')) {
+    await pool.query('ALTER TABLE lab_assistants ADD COLUMN phone_number VARCHAR(32) NULL AFTER gender');
+  }
+  if (!labAssistantColumnNames.has('profile_picture')) {
+    await pool.query('ALTER TABLE lab_assistants ADD COLUMN profile_picture VARCHAR(255) NULL AFTER phone_number');
+  }
+  if (labAssistantColumnNames.has('full_name')) {
+    await pool.query(`
+      UPDATE lab_assistants
+      SET first_name = COALESCE(NULLIF(first_name, ''), SUBSTRING_INDEX(TRIM(full_name), ' ', 1)),
+          last_name = COALESCE(NULLIF(last_name, ''), NULLIF(SUBSTRING(TRIM(full_name), LOCATE(' ', TRIM(full_name)) + 1), ''))
+      WHERE full_name IS NOT NULL
+    `);
+  }
 
   // Students table
   await pool.query(`CREATE TABLE IF NOT EXISTS students (
@@ -286,6 +916,14 @@ const initializeSchema = async () => {
     CONSTRAINT fk_students_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     CONSTRAINT fk_students_department FOREIGN KEY (department_id) REFERENCES departments(id) ON DELETE SET NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  if (!(await columnExists('students', 'registration_date'))) {
+    await pool.query('ALTER TABLE students ADD COLUMN registration_date VARCHAR(64) DEFAULT NULL');
+  }
+  await pool.query(`
+    UPDATE students
+    SET registration_date = COALESCE(DATE_FORMAT(created_at, '%Y-%m-%d'), CURRENT_DATE)
+    WHERE registration_date IS NULL OR TRIM(registration_date) = ''
+  `);
 
   // Courses
   await pool.query(`CREATE TABLE IF NOT EXISTS courses (
@@ -310,9 +948,26 @@ const initializeSchema = async () => {
     description TEXT,
     performed_by VARCHAR(255),
     ip_address VARCHAR(64),
+    actor_user_id INT UNSIGNED DEFAULT NULL,
+    actor_email VARCHAR(255) DEFAULT NULL,
+    actor_role VARCHAR(64) DEFAULT NULL,
+    category VARCHAR(64) DEFAULT NULL,
+    target_details TEXT,
+    route_path VARCHAR(512) DEFAULT NULL,
+    http_method VARCHAR(12) DEFAULT NULL,
+    status_code SMALLINT UNSIGNED DEFAULT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_audit_logs_created_at (created_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query(`ALTER TABLE audit_logs
+    ADD COLUMN IF NOT EXISTS actor_user_id INT UNSIGNED DEFAULT NULL,
+    ADD COLUMN IF NOT EXISTS actor_email VARCHAR(255) DEFAULT NULL,
+    ADD COLUMN IF NOT EXISTS actor_role VARCHAR(64) DEFAULT NULL,
+    ADD COLUMN IF NOT EXISTS category VARCHAR(64) DEFAULT NULL,
+    ADD COLUMN IF NOT EXISTS target_details TEXT,
+    ADD COLUMN IF NOT EXISTS route_path VARCHAR(512) DEFAULT NULL,
+    ADD COLUMN IF NOT EXISTS http_method VARCHAR(12) DEFAULT NULL,
+    ADD COLUMN IF NOT EXISTS status_code SMALLINT UNSIGNED DEFAULT NULL`);
 
   await pool.query(`CREATE TABLE IF NOT EXISTS system_settings (
     setting_key VARCHAR(128) PRIMARY KEY,
@@ -326,6 +981,8 @@ const initializeSchema = async () => {
     course_id INT UNSIGNED NOT NULL,
     department_id INT UNSIGNED DEFAULT NULL,
     instructor_id INT UNSIGNED DEFAULT NULL,
+    staff_id INT UNSIGNED DEFAULT NULL,
+    assigned_role VARCHAR(32) NOT NULL DEFAULT 'instructor',
     student_id INT UNSIGNED DEFAULT NULL,
     program_type VARCHAR(32) DEFAULT NULL,
     year_level VARCHAR(32) DEFAULT NULL,
@@ -344,6 +1001,9 @@ const initializeSchema = async () => {
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
 
   await pool.query(`ALTER TABLE course_assignments
+    ADD COLUMN IF NOT EXISTS staff_id INT UNSIGNED DEFAULT NULL,
+    ADD COLUMN IF NOT EXISTS lab_assistant_id INT UNSIGNED DEFAULT NULL AFTER instructor_id,
+    ADD COLUMN IF NOT EXISTS assigned_role VARCHAR(32) NOT NULL DEFAULT 'instructor',
     ADD COLUMN IF NOT EXISTS student_id INT UNSIGNED DEFAULT NULL,
     ADD COLUMN IF NOT EXISTS program_type VARCHAR(32) DEFAULT NULL,
     ADD COLUMN IF NOT EXISTS year_level VARCHAR(32) DEFAULT NULL,
@@ -354,6 +1014,12 @@ const initializeSchema = async () => {
     ADD COLUMN IF NOT EXISTS is_peer_published TINYINT(1) DEFAULT 0,
     ADD COLUMN IF NOT EXISTS academic_year VARCHAR(32) DEFAULT NULL,
     ADD COLUMN IF NOT EXISTS status VARCHAR(32) DEFAULT NULL`);
+  try {
+    await pool.query('ALTER TABLE course_assignments ADD CONSTRAINT fk_assign_lab_assistant FOREIGN KEY (lab_assistant_id) REFERENCES lab_assistants(id) ON DELETE SET NULL');
+  } catch (error) {
+    if (!['ER_DUP_KEY', 'ER_DUP_CONSTRAINT', 'ER_CANT_CREATE_TABLE'].includes(error?.code)) throw error;
+  }
+  await pool.query('ALTER TABLE course_assignments MODIFY COLUMN instructor_id INT UNSIGNED NULL');
 
   // Evaluation templates
   await pool.query(`CREATE TABLE IF NOT EXISTS evaluation_templates (
@@ -367,7 +1033,7 @@ const initializeSchema = async () => {
 
   await pool.query(`CREATE TABLE IF NOT EXISTS evaluation_criteria (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    evaluator_type ENUM('student', 'peer', 'dept_head', 'dean') NOT NULL,
+    evaluator_type ENUM('student', 'peer', 'dept_head', 'dean', 'dean_evaluates_dept_head') NOT NULL,
     criterion_text VARCHAR(255) NOT NULL,
     criterion_text_am VARCHAR(255) DEFAULT NULL,
     category VARCHAR(100) DEFAULT 'General',
@@ -375,6 +1041,8 @@ const initializeSchema = async () => {
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  await pool.query("ALTER TABLE evaluation_criteria MODIFY COLUMN evaluator_type ENUM('student', 'peer', 'dept_head', 'dean', 'dean_evaluates_dept_head') NOT NULL");
 
   await pool.query('ALTER TABLE evaluation_criteria ADD COLUMN IF NOT EXISTS criterion_text_am VARCHAR(255) DEFAULT NULL AFTER criterion_text');
   await pool.query("UPDATE evaluation_criteria SET criterion_text_am = CONCAT('የግምገማ መስፈርት፦ ', criterion_text) WHERE criterion_text_am IS NULL OR TRIM(criterion_text_am) = ''");
@@ -396,7 +1064,9 @@ const initializeSchema = async () => {
     student_identifier_text VARCHAR(255) DEFAULT NULL,
     created_by INT UNSIGNED DEFAULT NULL,
     payload JSON DEFAULT NULL,
-    status ENUM('pending','submitted','closed') NOT NULL DEFAULT 'pending',
+    evaluation_type VARCHAR(32) NOT NULL DEFAULT 'student',
+    deadline VARCHAR(128) DEFAULT NULL,
+    status ENUM('pending','active','submitted','closed') NOT NULL DEFAULT 'pending',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_evaluation_dispatches_template FOREIGN KEY (template_id) REFERENCES evaluation_templates(id) ON DELETE SET NULL,
     CONSTRAINT fk_evaluation_dispatches_student FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE SET NULL,
@@ -408,37 +1078,44 @@ const initializeSchema = async () => {
   await pool.query('ALTER TABLE evaluation_dispatches ADD COLUMN IF NOT EXISTS course_code VARCHAR(64) DEFAULT NULL');
   await pool.query('ALTER TABLE evaluation_dispatches ADD COLUMN IF NOT EXISTS student_identifier_text VARCHAR(255) DEFAULT NULL');
   await pool.query('ALTER TABLE evaluation_dispatches ADD COLUMN IF NOT EXISTS department_id INT UNSIGNED DEFAULT NULL');
+  await pool.query('ALTER TABLE evaluation_dispatches ADD COLUMN IF NOT EXISTS evaluation_type VARCHAR(32) NOT NULL DEFAULT \'student\'');
+  await pool.query('ALTER TABLE evaluation_dispatches ADD COLUMN IF NOT EXISTS deadline VARCHAR(128) DEFAULT NULL');
+  await pool.query("ALTER TABLE evaluation_dispatches MODIFY COLUMN status ENUM('pending','active','submitted','closed') NOT NULL DEFAULT 'pending'");
   await pool.query('ALTER TABLE evaluation_dispatches ADD COLUMN IF NOT EXISTS program_type VARCHAR(64) DEFAULT NULL');
   await pool.query('ALTER TABLE evaluation_dispatches ADD COLUMN IF NOT EXISTS is_student_published TINYINT(1) DEFAULT 0');
-
-  try {
-    await pool.query('DROP TABLE IF EXISTS peer_evaluation_submissions');
-  } catch (error) {
-    console.warn('Unable to drop stale peer_evaluation_submissions:', error?.message || error);
-  }
-
-  try {
-    await pool.query('DROP TABLE IF EXISTS peer_evaluations');
-  } catch (error) {
-    console.warn('Unable to drop stale peer_evaluations:', error?.message || error);
-  }
+  await pool.query('ALTER TABLE evaluation_dispatches ADD COLUMN IF NOT EXISTS target_type VARCHAR(32) DEFAULT NULL');
+  await pool.query('ALTER TABLE evaluation_dispatches ADD COLUMN IF NOT EXISTS target_user_id INT UNSIGNED DEFAULT NULL');
+  await pool.query('ALTER TABLE evaluation_dispatches ADD COLUMN IF NOT EXISTS target_first_name VARCHAR(100) DEFAULT NULL');
+  await pool.query('ALTER TABLE evaluation_dispatches ADD COLUMN IF NOT EXISTS target_last_name VARCHAR(100) DEFAULT NULL');
+  await pool.query('ALTER TABLE evaluation_dispatches ADD COLUMN IF NOT EXISTS target_employee_id VARCHAR(50) DEFAULT NULL');
+  await pool.query('ALTER TABLE evaluation_dispatches ADD COLUMN IF NOT EXISTS evaluation_template VARCHAR(64) DEFAULT NULL');
 
   // Peer evaluations must exist before peer evaluation submissions reference them.
   await pool.query(`CREATE TABLE IF NOT EXISTS peer_evaluations (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     evaluator_id INT UNSIGNED NOT NULL,
-    evaluatee_id INT UNSIGNED NOT NULL,
+    evaluatee_id INT UNSIGNED DEFAULT NULL,
     course_id INT UNSIGNED DEFAULT NULL,
     deadline VARCHAR(64) DEFAULT '2026-08-17',
-    status ENUM('pending', 'submitted') DEFAULT 'pending',
+    status ENUM('pending', 'active', 'submitted') DEFAULT 'pending',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_evaluator_id (evaluator_id),
     INDEX idx_evaluatee_id (evaluatee_id),
-    UNIQUE KEY uk_peer_eval (evaluator_id, evaluatee_id, course_id),
-    CONSTRAINT fk_peer_evaluations_evaluator FOREIGN KEY (evaluator_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE KEY unique_evaluator_evaluatee_pair (evaluator_id, evaluatee_id),
+    CONSTRAINT fk_peer_evaluations_evaluator FOREIGN KEY (evaluator_id) REFERENCES instructors(id) ON DELETE CASCADE,
     CONSTRAINT fk_peer_evaluations_evaluatee FOREIGN KEY (evaluatee_id) REFERENCES instructors(id) ON DELETE CASCADE,
     CONSTRAINT fk_peer_evaluations_course FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE SET NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  await pool.query('ALTER TABLE peer_evaluations ADD COLUMN IF NOT EXISTS dispatch_id INT DEFAULT NULL');
+  await pool.query('ALTER TABLE peer_evaluations MODIFY COLUMN evaluator_id INT UNSIGNED NULL');
+  await pool.query('ALTER TABLE peer_evaluations ADD COLUMN IF NOT EXISTS evaluator_user_id INT UNSIGNED NULL AFTER evaluator_id');
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_peer_evaluations_evaluator_user ON peer_evaluations(evaluator_user_id)');
+  try {
+    await pool.query('ALTER TABLE peer_evaluations ADD CONSTRAINT fk_peer_evaluations_evaluator_user FOREIGN KEY (evaluator_user_id) REFERENCES users(id) ON DELETE CASCADE');
+  } catch (error) {
+    if (!['ER_DUP_KEY', 'ER_DUP_CONSTRAINT', 'ER_CANT_CREATE_TABLE'].includes(error?.code)) throw error;
+  }
 
   // Student evaluation submissions
   await pool.query(`CREATE TABLE IF NOT EXISTS student_evaluation_submissions (
@@ -448,12 +1125,21 @@ const initializeSchema = async () => {
     student_name VARCHAR(255) DEFAULT NULL,
     score DECIMAL(5,2) NOT NULL DEFAULT 0.00,
     feedback TEXT DEFAULT NULL,
+    strengths TEXT DEFAULT NULL,
+    improvements TEXT DEFAULT NULL,
     responses JSON DEFAULT NULL,
     status VARCHAR(32) NOT NULL DEFAULT 'submitted',
+    submitted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    editable_until DATETIME NOT NULL DEFAULT (CURRENT_TIMESTAMP + INTERVAL 3 DAY),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_student_evaluation_submissions_dispatch FOREIGN KEY (dispatch_id) REFERENCES evaluation_dispatches(id) ON DELETE CASCADE,
     CONSTRAINT fk_student_evaluation_submissions_student FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE SET NULL
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query('ALTER TABLE student_evaluation_submissions ADD COLUMN IF NOT EXISTS strengths TEXT DEFAULT NULL');
+  await pool.query('ALTER TABLE student_evaluation_submissions ADD COLUMN IF NOT EXISTS improvements TEXT DEFAULT NULL');
+  await pool.query('ALTER TABLE student_evaluation_submissions ADD COLUMN IF NOT EXISTS submitted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP');
+  await pool.query('ALTER TABLE student_evaluation_submissions ADD COLUMN IF NOT EXISTS editable_until DATETIME NOT NULL DEFAULT (CURRENT_TIMESTAMP + INTERVAL 3 DAY)');
+  await pool.query('UPDATE student_evaluation_submissions SET editable_until = DATE_ADD(submitted_at, INTERVAL 3 DAY) WHERE submitted_at IS NOT NULL AND editable_until > DATE_ADD(submitted_at, INTERVAL 3 DAY)');
 
   await pool.query(`CREATE TABLE IF NOT EXISTS notifications (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -466,6 +1152,11 @@ const initializeSchema = async () => {
     CONSTRAINT fk_notifications_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     INDEX idx_notifications_user_read (user_id, is_read, created_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query('ALTER TABLE notifications ADD COLUMN IF NOT EXISTS title VARCHAR(255) NOT NULL');
+  await pool.query('ALTER TABLE notifications ADD COLUMN IF NOT EXISTS message TEXT NOT NULL');
+  await pool.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS type VARCHAR(50) NOT NULL DEFAULT 'reminder'");
+  await pool.query('ALTER TABLE notifications ADD COLUMN IF NOT EXISTS is_read TINYINT(1) NOT NULL DEFAULT 0');
+  await pool.query('ALTER TABLE notifications ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
 
   await pool.query(`CREATE TABLE IF NOT EXISTS password_resets (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -476,6 +1167,23 @@ const initializeSchema = async () => {
     CONSTRAINT fk_password_resets_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     INDEX idx_password_resets_user (user_id, expires_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS peer_evaluation_publications (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    department_id INT UNSIGNED NOT NULL,
+    academic_year VARCHAR(64) NOT NULL,
+    semester VARCHAR(64) NOT NULL,
+    status ENUM('published', 'unpublished') NOT NULL DEFAULT 'unpublished',
+    started_at DATETIME NULL,
+    created_by INT UNSIGNED NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_peer_publication_term (department_id, academic_year, semester),
+    CONSTRAINT fk_peer_publication_department FOREIGN KEY (department_id) REFERENCES departments(id) ON DELETE CASCADE,
+    CONSTRAINT fk_peer_publication_creator FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query('ALTER TABLE peer_evaluation_publications ADD COLUMN IF NOT EXISTS published_by INT UNSIGNED NULL AFTER created_by');
+  await pool.query('ALTER TABLE peer_evaluation_publications ADD COLUMN IF NOT EXISTS started_at DATETIME NULL AFTER status');
 
   // Peer evaluation submissions
   await pool.query(`CREATE TABLE IF NOT EXISTS peer_evaluation_submissions (
@@ -503,24 +1211,42 @@ const initializeSchema = async () => {
     score DECIMAL(5,2) NOT NULL DEFAULT 0.00,
     feedback TEXT DEFAULT NULL,
     status VARCHAR(32) NOT NULL DEFAULT 'submitted',
+    submitted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    editable_until DATETIME NOT NULL DEFAULT (CURRENT_TIMESTAMP + INTERVAL 3 DAY),
+    is_updated BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_evaluations_assignment FOREIGN KEY (assignment_id) REFERENCES course_assignments(id) ON DELETE CASCADE,
     CONSTRAINT fk_evaluations_evaluator FOREIGN KEY (evaluator_id) REFERENCES users(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query('ALTER TABLE evaluations ADD COLUMN IF NOT EXISTS submitted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP');
+  await pool.query('ALTER TABLE evaluations ADD COLUMN IF NOT EXISTS editable_until DATETIME NOT NULL DEFAULT (CURRENT_TIMESTAMP + INTERVAL 3 DAY)');
+  await pool.query('ALTER TABLE evaluations ADD COLUMN IF NOT EXISTS is_updated BOOLEAN NOT NULL DEFAULT FALSE');
 
   await pool.query(`CREATE TABLE IF NOT EXISTS evaluation_results (
     id INT AUTO_INCREMENT PRIMARY KEY,
     instructor_id INT UNSIGNED NOT NULL,
     department_id INT UNSIGNED DEFAULT NULL,
+    academic_year VARCHAR(64) NOT NULL DEFAULT '',
+    semester VARCHAR(64) NOT NULL DEFAULT '',
     student_average DECIMAL(5,2) NOT NULL DEFAULT 0.00,
     peer_average DECIMAL(5,2) NOT NULL DEFAULT 0.00,
     dept_head_score DECIMAL(5,2) NOT NULL DEFAULT 0.00,
     total_score DECIMAL(5,2) NOT NULL DEFAULT 0.00,
+    student_score DECIMAL(5,2) NOT NULL DEFAULT 0.00,
+    peer_score DECIMAL(5,2) NOT NULL DEFAULT 0.00,
+    final_score DECIMAL(5,2) NOT NULL DEFAULT 0.00,
     published_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_evaluation_results_instructor FOREIGN KEY (instructor_id) REFERENCES instructors(id) ON DELETE CASCADE,
     CONSTRAINT fk_evaluation_results_department FOREIGN KEY (department_id) REFERENCES departments(id) ON DELETE SET NULL,
-    UNIQUE KEY uk_evaluation_results_instructor (instructor_id)
+    UNIQUE KEY uk_evaluation_results_instructor_term (instructor_id, academic_year, semester)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query('ALTER TABLE evaluation_results ADD COLUMN IF NOT EXISTS academic_year VARCHAR(64) NOT NULL DEFAULT \'\'');
+  await pool.query('ALTER TABLE evaluation_results ADD COLUMN IF NOT EXISTS semester VARCHAR(64) NOT NULL DEFAULT \'\'');
+  await pool.query('ALTER TABLE evaluation_results ADD COLUMN IF NOT EXISTS student_score DECIMAL(5,2) NOT NULL DEFAULT 0.00');
+  await pool.query('ALTER TABLE evaluation_results ADD COLUMN IF NOT EXISTS peer_score DECIMAL(5,2) NOT NULL DEFAULT 0.00');
+  await pool.query('ALTER TABLE evaluation_results ADD COLUMN IF NOT EXISTS final_score DECIMAL(5,2) NOT NULL DEFAULT 0.00');
+  try { await pool.query('ALTER TABLE evaluation_results DROP INDEX uk_evaluation_results_instructor'); } catch (error) { }
+  try { await pool.query('ALTER TABLE evaluation_results ADD UNIQUE KEY uk_evaluation_results_instructor_term (instructor_id, academic_year, semester)'); } catch (error) { }
 
   await pool.query(`CREATE TABLE IF NOT EXISTS evaluation_summaries (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -545,23 +1271,61 @@ const initializeSchema = async () => {
   await pool.query(`CREATE TABLE IF NOT EXISTS dept_head_evaluations (
     id INT AUTO_INCREMENT PRIMARY KEY,
     evaluator_id INT UNSIGNED NOT NULL,
+    dept_head_id INT UNSIGNED DEFAULT NULL,
     instructor_id INT UNSIGNED NOT NULL,
+    evaluatee_id INT UNSIGNED DEFAULT NULL,
+    target_role VARCHAR(32) NOT NULL DEFAULT 'instructor',
     department_id INT UNSIGNED DEFAULT NULL,
     criteria_scores JSON DEFAULT NULL,
+    responses JSON DEFAULT NULL,
+    feedback TEXT DEFAULT NULL,
     total_score DECIMAL(5,2) NOT NULL DEFAULT 0.00,
     status VARCHAR(32) NOT NULL DEFAULT 'Pending',
+    submitted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_dept_head_eval_evaluator FOREIGN KEY (evaluator_id) REFERENCES users(id) ON DELETE CASCADE,
-    CONSTRAINT fk_dept_head_eval_instructor FOREIGN KEY (instructor_id) REFERENCES instructors(id) ON DELETE CASCADE,
     CONSTRAINT fk_dept_head_eval_department FOREIGN KEY (department_id) REFERENCES departments(id) ON DELETE SET NULL,
-    UNIQUE KEY uk_dept_head_eval_unique (evaluator_id, instructor_id)
+    UNIQUE KEY uk_dept_head_eval_unique (evaluator_id, target_role, evaluatee_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  if (!(await columnExists('dept_head_evaluations', 'evaluatee_id'))) {
+    await pool.query('ALTER TABLE dept_head_evaluations ADD COLUMN evaluatee_id INT UNSIGNED NULL AFTER instructor_id');
+  }
+  if (!(await columnExists('dept_head_evaluations', 'dept_head_id'))) {
+    await pool.query('ALTER TABLE dept_head_evaluations ADD COLUMN dept_head_id INT UNSIGNED NULL AFTER evaluator_id');
+  }
+  await pool.query('UPDATE dept_head_evaluations SET dept_head_id = evaluator_id WHERE dept_head_id IS NULL');
+  if (!(await columnExists('dept_head_evaluations', 'responses'))) {
+    await pool.query('ALTER TABLE dept_head_evaluations ADD COLUMN responses JSON NULL AFTER criteria_scores');
+  }
+  if (!(await columnExists('dept_head_evaluations', 'academic_year'))) {
+    await pool.query("ALTER TABLE dept_head_evaluations ADD COLUMN academic_year VARCHAR(20) DEFAULT '2025/2026' AFTER department_id");
+  }
+  if (!(await columnExists('dept_head_evaluations', 'semester'))) {
+    await pool.query("ALTER TABLE dept_head_evaluations ADD COLUMN semester VARCHAR(20) DEFAULT 'Semester II' AFTER academic_year");
+  }
+  if (!(await columnExists('dept_head_evaluations', 'feedback'))) {
+    await pool.query('ALTER TABLE dept_head_evaluations ADD COLUMN feedback TEXT NULL AFTER responses');
+  }
+  if (!(await columnExists('dept_head_evaluations', 'submitted_at'))) {
+    await pool.query('ALTER TABLE dept_head_evaluations ADD COLUMN submitted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER status');
+  }
+  if (!(await columnExists('dept_head_evaluations', 'target_role'))) {
+    await pool.query("ALTER TABLE dept_head_evaluations ADD COLUMN target_role VARCHAR(32) NOT NULL DEFAULT 'instructor' AFTER evaluatee_id");
+  }
   if (!(await columnExists('dept_head_evaluations', 'strengths'))) {
     await pool.query('ALTER TABLE dept_head_evaluations ADD COLUMN strengths TEXT NULL AFTER criteria_scores');
   }
   if (!(await columnExists('dept_head_evaluations', 'weaknesses'))) {
     await pool.query('ALTER TABLE dept_head_evaluations ADD COLUMN weaknesses TEXT NULL AFTER strengths');
+  }
+  if (!(await columnExists('dept_head_evaluations', 'deadline'))) {
+    await pool.query("ALTER TABLE dept_head_evaluations ADD COLUMN deadline VARCHAR(64) DEFAULT NULL AFTER total_score");
+  }
+  try {
+    await pool.query('ALTER TABLE dept_head_evaluations DROP FOREIGN KEY fk_dept_head_eval_instructor');
+  } catch (error) {
+    // ignore if no foreign key exists
   }
   await pool.query(`CREATE TABLE IF NOT EXISTS directorate_evaluations (
     id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -583,8 +1347,8 @@ const initializeSchema = async () => {
   if (!adminRows.length) {
     const adminPasswordHash = await bcrypt.hash(getDefaultPasswordForRole('admin'), 12);
     await pool.query(
-      'INSERT INTO users (email, password_hash, role, status, is_first_login) VALUES (?, ?, ?, ?, ?)',
-      ['admin.k@system.local', adminPasswordHash, 'admin', 'active', true]
+      'INSERT INTO users (email, password_hash, role, status, is_first_login, must_change_password) VALUES (?, ?, ?, ?, ?, ?)',
+      ['admin.k@system.local', adminPasswordHash, 'admin', 'active', true, true]
     );
   }
 };
@@ -638,9 +1402,12 @@ app.get('/api/dept-head/courses', authenticate, authorizeRoles('dept_head'), asy
         c.id,
         c.code AS course_code,
         c.name AS course_name,
+        c.year_level,
+        c.semester,
         ${creditsExpression} AS credits,
         c.department_id,
-        ${departmentNameColumn} AS department_name
+        ${departmentNameColumn} AS department_name,
+        'Active' AS status
       FROM courses c
       LEFT JOIN departments d ON c.department_id = d.id
       WHERE c.department_id = ?
@@ -655,7 +1422,7 @@ app.get('/api/dept-head/courses', authenticate, authorizeRoles('dept_head'), asy
   }
 });
 
-app.get('/api/dept-head/tracking/students', authenticate, authorizeRoles('dept_head'), async (req, res) => {
+app.get(['/api/dept-head/tracking/students', '/api/tracking/students', '/api/tracking/student-evaluations'], authenticate, authorizeRoles('dept_head'), async (req, res) => {
   try {
     const departmentId = Number(req.user.department_id ?? req.user.department ?? req.query.department_id);
     if (!Number.isInteger(departmentId) || departmentId <= 0) {
@@ -667,39 +1434,102 @@ app.get('/api/dept-head/tracking/students', authenticate, authorizeRoles('dept_h
       const normalized = normalizeValue(value);
       return !normalized || allValues.includes(normalized.toLowerCase()) ? null : normalized;
     };
-    const programType = normalizeFilter(req.query.program_type || req.query.program, ['all', 'all programs']);
-    const yearLevel = normalizeFilter(req.query.year_level || req.query.year, ['all', 'all years']);
+    const programType = normalizeFilter(req.query.program_type || req.query.programType || req.query.program, ['all', 'all programs']);
+    const yearLevel = normalizeFilter(req.query.year_level || req.query.yearLevel || req.query.year, ['all', 'all years']);
     const section = normalizeFilter(req.query.section, ['all', 'all sections']);
-        const instructorId = Number(req.query.instructor_id || 0) || null;
-        const normalizedSection = section?.replace(/^section\s*/i, '').trim() || null;
+    const requestedTargetId = Number(req.query.instructor_id || req.query.instructorId || req.query.evaluatee_id || req.query.evaluateeId || 0) || null;
+    const targetRole = String(req.query.target_role || req.query.role || 'instructor').trim().toLowerCase() === 'lab_assistant'
+      ? 'lab_assistant'
+      : 'instructor';
+    if (!requestedTargetId) {
+      return sendResponse(res, 400, 'instructor_id is required.', 'የአስተማሪ መለያ ያስፈልጋል።', []);
+    }
+    const targetTable = targetRole === 'lab_assistant' ? 'lab_assistants' : 'instructors';
+    const [[target]] = await pool.query(
+      `SELECT id FROM ${targetTable} WHERE user_id = ? OR id = ? ORDER BY (user_id = ?) DESC LIMIT 1`,
+      [requestedTargetId, requestedTargetId, requestedTargetId]
+    );
+    const targetId = Number(target?.id || 0);
+    if (!targetId) {
+      return sendResponse(res, 404, 'Selected instructor was not found.', 'የተመረጠው አስተማሪ አልተገኘም።', []);
+    }
+    const romanToNumber = { i: '1', ii: '2', iii: '3', iv: '4', v: '5', vi: '6', vii: '7' };
+    const yearToken = yearLevel
+      ?.replace(/\b(st|nd|rd|th)\s+year\b/gi, '')
+      .replace(/\byear\b/gi, '')
+      .trim()
+      .toLowerCase() || null;
+    const numericYear = yearToken && (romanToNumber[yearToken] || yearToken.match(/\d+/)?.[0]);
+    const romanYear = numericYear
+      ? Object.entries(romanToNumber).find(([, value]) => value === numericYear)?.[0] || numericYear
+      : yearToken;
+    const normalizedSection = section?.replace(/^section\s*/i, '').trim() || null;
+    const semester = normalizeValue(req.query.semester);
+    const academicYear = String(req.query.academic_year || '').trim();
+    const filterConditions = [
+      'ca.department_id = ?',
+      `${targetRole === 'lab_assistant' ? 'ca.lab_assistant_id' : 'ca.instructor_id'} = ?`,
+      'ca.is_student_published = 1',
+      "LOWER(COALESCE(ed.evaluation_type, 'student')) = 'student'",
+      'ed.student_id IS NOT NULL',
+    ];
+    const filterParams = [departmentId, targetId];
+    if (academicYear) {
+      filterConditions.splice(2, 0, 'ca.academic_year = ?');
+      filterParams.push(academicYear);
+    }
+    if (programType) {
+      filterConditions.push('LOWER(TRIM(ca.program_type)) = LOWER(TRIM(?))');
+      filterParams.push(programType);
+    }
+    if (yearToken) {
+      filterConditions.push('LOWER(TRIM(ca.year_level)) LIKE CONCAT(\'%\', ?, \'%\')');
+      filterParams.push(numericYear || yearToken);
+    }
+    if (semester) {
+      filterConditions.push('LOWER(TRIM(ca.semester)) = LOWER(TRIM(?))');
+      filterParams.push(req.query.semester.trim());
+    }
+    if (normalizedSection) {
+      filterConditions.push("LOWER(TRIM(REPLACE(REPLACE(ca.section, 'Section ', ''), 'section ', ''))) = LOWER(TRIM(?))");
+      filterParams.push(normalizedSection.toLowerCase());
+    }
     const query = `SELECT
       s.id AS student_db_id,
+      s.id AS student_id,
       u.id AS evaluator_id,
+      s.student_id AS student_code,
+      ca.id AS assignment_id,
+      ca.course_id,
+      c.code AS course_code,
+      c.name AS course_name,
+      ca.year_level,
+      ca.section,
+      ca.program_type,
       TRIM(CONCAT(COALESCE(s.first_name, ''), ' ', COALESCE(s.last_name, ''))) AS student_name,
-      CASE WHEN MAX(se.id) IS NOT NULL THEN 'Submitted' ELSE 'Pending' END AS status
-    FROM students s
-        INNER JOIN users u ON u.id = s.user_id
-        LEFT JOIN course_assignments ca
-           ON ca.department_id = s.department_id
-          AND (? IS NULL OR ca.instructor_id = ?)
-        LEFT JOIN evaluation_dispatches ed
-           ON ed.student_id = s.id
-          AND (ed.assignment_id = ca.id OR ed.course_id = ca.course_id)
-        LEFT JOIN student_evaluation_submissions se
-           ON se.student_id = s.id
-          AND se.dispatch_id = ed.id
-    WHERE s.department_id = ?
-      AND (? IS NULL OR LOWER(TRIM(s.program_type)) = LOWER(TRIM(?)))
-      AND (? IS NULL OR LOWER(TRIM(s.year_level)) = LOWER(TRIM(?)))
-      AND (? IS NULL OR REPLACE(LOWER(s.section), 'section ', '') = LOWER(?))
-    GROUP BY s.id, u.id, s.first_name, s.last_name
+      CASE
+        WHEN EXISTS (
+          SELECT 1
+          FROM student_evaluation_submissions ses
+          WHERE ses.student_id = s.id
+            AND ses.dispatch_id = ed.id
+            AND LOWER(COALESCE(ses.status, 'pending')) IN ('submitted', 'completed', 'approved')
+        ) THEN 'Completed'
+        ELSE 'Pending'
+      END AS status
+    FROM course_assignments ca
+    INNER JOIN students s ON s.id = ca.student_id
+    INNER JOIN users u ON u.id = s.user_id
+    LEFT JOIN courses c ON c.id = ca.course_id
+    LEFT JOIN evaluation_dispatches ed
+      ON ed.assignment_id = ca.id
+     AND ed.student_id = s.id
+     AND ed.department_id = ca.department_id
+     AND LOWER(COALESCE(ed.evaluation_type, 'student')) = 'student'
+    WHERE ${filterConditions.join('\n      AND ')}
+    GROUP BY s.id, u.id, s.student_id, ca.id, ca.course_id, c.code, c.name, s.first_name, s.last_name, ca.year_level, ca.section, ca.program_type
     ORDER BY status DESC, student_name ASC`;
-    const params = [
-      instructorId, instructorId, departmentId,
-      programType, programType,
-      yearLevel, yearLevel,
-      normalizedSection, normalizedSection,
-    ];
+    const params = filterParams;
 
     console.log('[DEBUG] Executing Tracking Query:', query);
     console.log('[DEBUG] Query Parameters:', params);
@@ -720,8 +1550,12 @@ app.get('/api/dept-head/tracking/students', authenticate, authorizeRoles('dept_h
     const normalized = rows.map((row) => ({
       student_db_id: row.student_db_id,
       evaluator_id: row.evaluator_id,
+      student_id: row.student_id,
+      year_level: row.year_level || 'Unknown Year',
+      section: row.section || 'Unknown Section',
+      program_type: row.program_type || '',
       student_name: row.student_name || 'Unknown',
-      status: String(row.status || 'Pending'),
+      status: String(row.Status || row.status || 'Pending'),
     }));
 
     return sendResponse(res, 200, 'Student tracking retrieved.', 'የተማሪ ተከታታይ መረጃ ተመለሰ።', normalized);
@@ -736,29 +1570,41 @@ app.post('/api/evaluations/send-reminder', authenticate, authorizeRoles('dept_he
     const departmentId = Number(req.user.department_id ?? req.user.department ?? req.body.department_id);
     if (!Number.isInteger(departmentId) || departmentId <= 0) return res.status(403).json({ message: 'Your department is not defined.' });
 
-    const { evaluator_id, target_id, evaluation_type, send_to_all_pending } = req.body || {};
+    const { evaluator_id, target_id, evaluation_type, send_to_all_pending, target_name, instructor_name } = req.body || {};
     const targetId = evaluator_id ?? target_id;
     const recipients = new Map();
     const addRecipients = (rows, type) => rows.forEach((row) => {
-      if (row.evaluator_id) recipients.set(`${type}:${row.evaluator_id}`, { ...row, evaluation_type: type });
+      if (row.evaluator_id) recipients.set(`${type}:${row.evaluator_id}`, { ...row, evaluation_type: type, instructor_name: row.instructor_name || instructor_name || target_name });
     });
 
     if (send_to_all_pending) {
-      const [students] = await pool.query(`SELECT u.id AS evaluator_id, COALESCE(NULLIF(TRIM(CONCAT(s.first_name, ' ', s.last_name)), ''), u.email) AS name
+      const [students] = await pool.query(`SELECT DISTINCT u.id AS evaluator_id, u.email, COALESCE(NULLIF(TRIM(CONCAT(s.first_name, ' ', s.last_name)), ''), u.email) AS name,
+        COALESCE(NULLIF(TRIM(CONCAT(i.first_name, ' ', i.last_name)), ''), NULLIF(TRIM(CONCAT(la.first_name, ' ', la.last_name)), ''), 'the assigned instructor') AS instructor_name
         FROM students s JOIN users u ON u.id = s.user_id JOIN evaluation_dispatches ed ON ed.student_id = s.id
+        LEFT JOIN course_assignments ca ON ca.id = ed.assignment_id
+        LEFT JOIN instructors i ON i.id = ca.instructor_id
+        LEFT JOIN lab_assistants la ON la.id = ca.lab_assistant_id
         LEFT JOIN student_evaluation_submissions sub ON sub.dispatch_id = ed.id
-        WHERE s.department_id = ? AND ed.status = 'pending' AND sub.id IS NULL`, [departmentId]);
-      const [peers] = await pool.query(`SELECT DISTINCT u.id AS evaluator_id, COALESCE(NULLIF(TRIM(CONCAT(i.first_name, ' ', i.last_name)), ''), u.email) AS name
-        FROM peer_evaluations pe JOIN users u ON u.id = pe.evaluator_id JOIN instructors target ON target.id = pe.evaluatee_id
+        WHERE s.department_id = ? AND LOWER(COALESCE(ed.status, 'pending')) IN ('pending', 'active', 'published') AND sub.id IS NULL`, [departmentId]);
+      const [peers] = await pool.query(`SELECT DISTINCT u.id AS evaluator_id, u.email, COALESCE(NULLIF(TRIM(CONCAT(i.first_name, ' ', i.last_name)), ''), NULLIF(TRIM(CONCAT(la.first_name, ' ', la.last_name)), ''), u.email) AS name,
+        COALESCE(NULLIF(TRIM(CONCAT(target.first_name, ' ', target.last_name)), ''), NULLIF(TRIM(CONCAT(lab_target.first_name, ' ', lab_target.last_name)), ''), 'the assigned instructor') AS instructor_name
+        FROM peer_evaluations pe
+        JOIN instructors evaluator ON evaluator.id = pe.evaluator_id
+        JOIN users u ON u.id = evaluator.user_id
+        LEFT JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id
+        LEFT JOIN instructors target ON target.id = pe.evaluatee_id
+        LEFT JOIN lab_assistants lab_target ON lab_target.id = ed.target_user_id AND LOWER(COALESCE(ed.target_type, '')) = 'lab_assistant'
         LEFT JOIN peer_evaluation_submissions pes ON pes.peer_evaluation_id = pe.id
         LEFT JOIN instructors i ON i.user_id = u.id
-        WHERE target.department_id = ? AND pe.status = 'pending' AND pes.id IS NULL`, [departmentId]);
+        LEFT JOIN lab_assistants la ON la.user_id = u.id
+        WHERE COALESCE(target.department_id, lab_target.department_id) = ?
+          AND LOWER(COALESCE(pe.status, 'pending')) IN ('pending', 'active') AND pes.id IS NULL`, [departmentId]);
       addRecipients(students, 'student');
       addRecipients(peers, 'peer');
     } else if (targetId !== undefined && targetId !== null && String(targetId).trim() !== '') {
       const userId = Number(targetId);
       if (!Number.isInteger(userId) || userId <= 0) return res.status(400).json({ success: false, message: 'A valid target_id is required.' });
-      const [rows] = await pool.query(`SELECT u.id AS evaluator_id,
+      const [rows] = await pool.query(`SELECT u.id AS evaluator_id, u.email,
         COALESCE(NULLIF(TRIM(CONCAT(i.first_name, ' ', i.last_name)), ''), NULLIF(TRIM(CONCAT(s.first_name, ' ', s.last_name)), ''), u.email, s.student_id) AS name
         FROM users u
         LEFT JOIN instructors i ON i.user_id = u.id
@@ -770,9 +1616,31 @@ app.post('/api/evaluations/send-reminder', authenticate, authorizeRoles('dept_he
       return res.status(400).json({ success: false, message: 'target_id or send_to_all_pending is required.' });
     }
 
+    const reminderUserIds = send_to_all_pending ? null : [Number(targetId)];
+    const urgentStudentRecipients = await getStudentReminderRecipients({
+      departmentId,
+      userIds: reminderUserIds,
+    });
+    let telegramSent = 0;
+    let telegramFailed = 0;
+    for (const recipient of urgentStudentRecipients) {
+      const delivered = await sendTelegramReminder(
+        recipient.telegram_chat_id,
+        recipient.name,
+        recipient.pending_count,
+        recipient.pending_courses
+      );
+      if (delivered) telegramSent += 1;
+      else telegramFailed += 1;
+    }
+
     const deadline = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     for (const recipient of recipients.values()) {
-      const description = `Dear ${recipient.name || 'Evaluator'}, Please complete your pending instructor evaluation before ${deadline}.`;
+      const isStudentReminder = recipient.evaluation_type === 'student';
+      const recipientMessage = isStudentReminder
+        ? `URGENT WARNING: You have pending instructor evaluations for ${recipient.instructor_name || 'your assigned instructor'}. You will NOT be permitted to sit for final exams or view results until all instructor evaluations are completed. Please submit now!`
+        : `REMINDER: Please complete the Peer Evaluation for ${recipient.instructor_name || 'the assigned instructor'} before the upcoming deadline.`;
+      const description = `Dear ${recipient.name || 'Evaluator'}, ${recipientMessage}`;
       try {
         await pool.query('INSERT INTO audit_logs (action_title, description, performed_by) VALUES (?, ?, ?)', ['Evaluation reminder sent', description, req.user.id]);
       } catch (auditError) {
@@ -782,51 +1650,109 @@ app.post('/api/evaluations/send-reminder', authenticate, authorizeRoles('dept_he
     if (!recipients.size) {
       return res.status(400).json({ success: false, message: 'No pending evaluators were found for the reminder.' });
     }
-    await createNotifications({
-      userIds: [...recipients.values()].map((recipient) => recipient.evaluator_id),
-      title: 'Pending Evaluation Reminder / የግምገማ ማሳሰቢያ',
-      message: 'You have pending instructor performance evaluations. Please complete them. / የመማር ማስተማር ግምገማ ቅጽ አልሞሉምና እባክዎ ይሙሉ፡፡',
-      type: 'evaluation_reminder',
+    const recipientsByType = [...recipients.values()].reduce((groups, recipient) => {
+      const type = recipient.evaluation_type || 'peer';
+      groups[type] = groups[type] || [];
+      groups[type].push(recipient);
+      return groups;
+    }, {});
+    for (const [type, typedRecipients] of Object.entries(recipientsByType)) {
+      await createNotifications({
+        userIds: typedRecipients.map((recipient) => recipient.evaluator_id),
+        title: 'Pending Evaluation Reminder / የግምገማ ማሳሰቢያ',
+        message: type === 'student'
+          ? 'URGENT WARNING: You have pending instructor evaluations. You will NOT be permitted to sit for final exams or view results until all instructor evaluations are completed. Please submit now!'
+          : 'REMINDER: Please complete the Peer Evaluation before the upcoming deadline.',
+        type: 'evaluation_reminder',
+      });
+    }
+    try {
+      const emailTransport = createEmailTransporter();
+      await verifyEmailTransporter(emailTransport.transporter);
+      for (const recipient of recipients.values()) {
+        if (!recipient.email) continue;
+        const recipientMessage = recipient.evaluation_type === 'student'
+          ? `URGENT WARNING: You have pending instructor evaluations for ${recipient.instructor_name || 'your assigned instructor'}. You will NOT be permitted to sit for final exams or view results until all instructor evaluations are completed. Please submit now!`
+          : `REMINDER: Please complete the Peer Evaluation for ${recipient.instructor_name || 'the assigned instructor'} before the upcoming deadline.`;
+        await emailTransport.transporter.sendMail({ from: emailTransport.config.from, to: recipient.email, subject: 'IPES Evaluation Reminder', text: recipientMessage });
+      }
+      emailTransport.transporter.close();
+    } catch (emailError) {
+      console.error('Evaluation reminder email delivery failed:', { code: emailError?.code, message: emailError?.message });
+    }
+    return res.json({
+      success: true,
+      sent: recipients.size,
+      telegramSent,
+      telegramFailed,
+      telegramSkipped: recipients.size - urgentStudentRecipients.length,
+      message: `Reminders sent to ${recipients.size} pending evaluators. Telegram urgent reminders sent to ${telegramSent} students.`,
     });
-    return res.json({ success: true, sent: recipients.size, message: `Reminders sent to ${recipients.size} pending evaluators.` });
   } catch (error) {
     console.error('Send evaluation reminder failed:', error);
     return res.status(500).json({ success: false, message: 'Unable to send evaluation reminders.', error: error.message });
   }
 });
 
-app.get('/api/notifications', mwAuthenticateToken, getUserNotifications);
 app.put('/api/notifications/read', mwAuthenticateToken, markAllRead);
 app.put('/api/notifications/mark-all-read/:userId', mwAuthenticateToken, markAllRead);
 app.delete('/api/notifications/clear-all/:userId', mwAuthenticateToken, clearAllNotifications);
+app.post('/api/notifications/send-telegram-reminders', mwAuthenticateToken, mwAuthorizeRoles('dept_head'), sendTelegramReminders);
+app.post('/api/notifications/send-reminders', mwAuthenticateToken, mwAuthorizeRoles('dept_head'), (req, res) => {
+  req.body = { ...(req.body || {}), send_to_all_pending: true };
+  return sendDeptHeadEvaluationReminder(req, res);
+});
 app.post('/api/notifications/send', mwAuthenticateToken, mwAuthorizeRoles('admin', 'systemadmin'), sendNotification);
 
-app.get('/api/dept-head/tracking/peers', authenticate, authorizeRoles('dept_head'), async (req, res) => {
+app.get(['/api/dept-head/tracking/peers', '/api/tracking/peers'], authenticate, authorizeRoles('dept_head'), async (req, res) => {
   try {
     const departmentId = Number(req.user.department_id ?? req.user.department ?? req.query.department_id);
     if (!Number.isInteger(departmentId) || departmentId <= 0) {
       return sendResponse(res, 403, 'Your department is not defined. Contact an administrator.', 'የክፍልዎ መለያ አልተገኘም። እባክዎ ከአስተዳደሩ ጋር ይገናኙ።');
     }
 
-    const targetInstructorId = Number(req.query.target_instructor_id || req.query.instructor_id || 0);
-    if (!targetInstructorId) return sendResponse(res, 400, 'target_instructor_id is required.', 'የታለመ አስተማሪ መለያ ያስፈልጋል።', []);
+    const targetEvaluateeId = Number(req.query.target_instructor_id || req.query.target_evaluatee_id || req.query.evaluatee_id || req.query.instructor_id || 0);
+    const requestedRole = String(req.query.target_role || req.query.role || 'instructor').trim().toLowerCase();
+    const targetRole = ['instructor', 'lab_assistant'].includes(requestedRole) ? requestedRole : 'instructor';
 
-    const query = `SELECT
-      pe.id AS peer_id,
-      pe.evaluator_id,
-      TRIM(CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, u.email))) AS peer_instructor,
-      CASE WHEN MAX(pes.id) IS NOT NULL THEN 'Submitted' ELSE 'Pending' END AS status
-    FROM peer_evaluations pe
-    JOIN instructors target ON pe.evaluatee_id = target.id
-    JOIN users u ON pe.evaluator_id = u.id
-    JOIN instructors i ON i.user_id = u.id
-    LEFT JOIN peer_evaluation_submissions pes ON pes.peer_evaluation_id = pe.id
-    WHERE target.department_id = ?
-      AND (target.id = ? OR target.user_id = ?)
-      AND u.role = 'instructor'
-    GROUP BY pe.id, pe.evaluator_id, i.first_name, i.last_name, u.email
-    ORDER BY status DESC, peer_instructor ASC`;
-    const params = [departmentId, targetInstructorId, targetInstructorId];
+    if (!targetEvaluateeId) return sendResponse(res, 400, 'evaluatee_id is required.', 'የታለመ ዒላማ መለያ ያስፈልጋል።', []);
+
+    const query = targetRole === 'lab_assistant'
+      ? `SELECT
+          pe.id AS peer_id,
+          pe.evaluator_id,
+          la.employee_id AS staff_id,
+          TRIM(CONCAT(COALESCE(la.first_name, ''), ' ', COALESCE(la.last_name, ''))) AS peer_instructor,
+          CASE WHEN MAX(pes.id) IS NOT NULL THEN 'Submitted' ELSE 'Pending' END AS status
+        FROM peer_evaluations pe
+        JOIN lab_assistants target ON pe.evaluatee_id = target.id
+        JOIN instructors evaluator ON evaluator.id = pe.evaluator_id
+        JOIN users u ON evaluator.user_id = u.id
+        JOIN lab_assistants la ON la.user_id = u.id
+        LEFT JOIN peer_evaluation_submissions pes ON pes.peer_evaluation_id = pe.id
+        WHERE target.department_id = ?
+          AND (target.id = ? OR target.user_id = ?)
+          AND u.role = 'lab_assistant'
+        GROUP BY pe.id, pe.evaluator_id, la.first_name, la.last_name, la.employee_id
+        ORDER BY status DESC, peer_instructor ASC`
+      : `SELECT
+          pe.id AS peer_id,
+          pe.evaluator_id,
+          i.employee_id AS staff_id,
+          TRIM(CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, u.email))) AS peer_instructor,
+          CASE WHEN MAX(pes.id) IS NOT NULL THEN 'Submitted' ELSE 'Pending' END AS status
+        FROM peer_evaluations pe
+        JOIN instructors target ON pe.evaluatee_id = target.id
+        JOIN instructors evaluator ON evaluator.id = pe.evaluator_id
+        JOIN users u ON evaluator.user_id = u.id
+        JOIN instructors i ON i.id = evaluator.id
+        LEFT JOIN peer_evaluation_submissions pes ON pes.peer_evaluation_id = pe.id
+        WHERE target.department_id = ?
+          AND (target.id = ? OR target.user_id = ?)
+          AND u.role = 'instructor'
+        GROUP BY pe.id, pe.evaluator_id, i.first_name, i.last_name, i.employee_id, u.email
+        ORDER BY status DESC, peer_instructor ASC`;
+    const params = [departmentId, targetEvaluateeId, targetEvaluateeId];
 
     let rows = [];
     try {
@@ -843,6 +1769,7 @@ app.get('/api/dept-head/tracking/peers', authenticate, authorizeRoles('dept_head
     const normalized = rows.map((row) => ({
       peer_id: row.peer_id,
       evaluator_id: row.evaluator_id,
+      staff_id: row.staff_id || '',
       peer_instructor: (row.peer_instructor || '').trim() || 'Unknown Peer',
       status: String(row.status || 'Pending'),
     }));
@@ -854,59 +1781,187 @@ app.get('/api/dept-head/tracking/peers', authenticate, authorizeRoles('dept_head
   }
 });
 
-app.post('/api/evaluations/peer/publish-department', authenticate, authorizeRoles('dept_head'), async (req, res) => {
+app.get('/api/evaluations/peer-publish-status', authenticate, authorizeRoles('dept_head', 'college_dean', 'dean', 'academic_directorate', 'academic_director', 'directorate', 'admin'), async (req, res) => {
+  try {
+    const departmentId = Number(req.query.department_id || req.user?.department_id || req.user?.department || 0);
+    const academicYear = String(req.query.academic_year || new Date().getFullYear());
+    const semester = String(req.query.semester || 'Semester I');
+    if (!departmentId || !await canManagePublishedDepartment(req, departmentId)) return res.status(403).json({ message: 'You cannot view this peer publication status.' });
+    const [[publication]] = await pool.query(
+      `SELECT p.status, p.started_at,
+        (SELECT COUNT(DISTINCT pe.id) FROM peer_evaluations pe INNER JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id WHERE ed.department_id = p.department_id AND ed.academic_year = p.academic_year AND ed.semester = p.semester) AS total_assignments,
+        (SELECT COUNT(DISTINCT pe.id) FROM peer_evaluations pe INNER JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id INNER JOIN peer_evaluation_submissions pes ON pes.peer_evaluation_id = pe.id WHERE ed.department_id = p.department_id AND ed.academic_year = p.academic_year AND ed.semester = p.semester AND LOWER(COALESCE(pes.status, 'submitted')) IN ('submitted', 'completed', 'approved')) AS completed_assignments
+       FROM peer_evaluation_publications p
+       WHERE p.department_id = ? AND p.academic_year = ? AND p.semester = ? LIMIT 1`,
+      [departmentId, academicYear, semester]
+    );
+    const [[legacySubmission]] = await pool.query(
+      `SELECT COUNT(*) AS submission_count
+       FROM peer_evaluation_submissions pes
+       INNER JOIN peer_evaluations pe ON pe.id = pes.peer_evaluation_id
+       INNER JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id
+       WHERE ed.department_id = ? AND ed.academic_year = ? AND ed.semester = ?`,
+      [departmentId, academicYear, semester]
+    );
+    const submissionCount = Number(legacySubmission?.submission_count || 0);
+    const totalAssignments = Number(publication?.total_assignments || 0);
+    const completedAssignments = Number(publication?.completed_assignments || 0);
+    const hasStarted = Boolean(publication?.started_at || completedAssignments || submissionCount);
+    const fullyCompleted = totalAssignments > 0 && completedAssignments === totalAssignments;
+    const isPublished = Boolean(publication?.status === 'published' && totalAssignments > 0);
+    return res.json({ isPublished, hasStarted, fullyCompleted, hasSubmissions: submissionCount > 0, status: isPublished ? 'published' : 'unpublished' });
+  } catch (error) {
+    console.error('Peer publish status query failed:', error);
+    return res.status(500).json({ success: false, message: 'Unable to load peer evaluation publish status.' });
+  }
+});
+
+app.post(['/api/evaluations/peer/publish-department', '/api/evaluations/publish-peer'], authenticate, authorizeRoles('dept_head'), async (req, res) => {
   const connection = await pool.getConnection();
   try {
-    const departmentId = Number(req.user.department_id ?? req.user.department);
+    const departmentId = Number(req.body.department_id ?? req.user.department_id ?? req.user.department);
     if (!Number.isInteger(departmentId) || departmentId <= 0) {
       return res.status(403).json({ message: 'Your department is not defined. Contact an administrator.' });
     }
+    if (!await canManagePublishedDepartment(req, departmentId)) return res.status(403).json({ message: 'You cannot publish peer evaluations for this department.' });
 
     const academicYear = String(req.body.academic_year || new Date().getFullYear());
     const semester = String(req.body.semester || 'Semester I');
     const sessionDeadline = `${academicYear} ${semester}`;
-    const [[existingSession]] = await connection.query(
-      'SELECT COUNT(*) AS total FROM peer_evaluations pe INNER JOIN instructors target ON target.id = pe.evaluatee_id WHERE target.department_id = ? AND pe.course_id IS NULL AND pe.deadline = ?',
-      [departmentId, sessionDeadline]
-    );
-    if (Number(existingSession?.total || 0) > 0) {
-      return res.status(400).json({ success: false, isAlreadyPublished: true, message: 'Peer evaluations have already been published for this department.' });
-    }
-    const [staff] = await connection.query(
-      `SELECT i.id AS instructor_id, i.user_id
+    const peerDeadline = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+    const peerDeadlineSql = peerDeadline.toISOString().slice(0, 19).replace('T', ' ');
+    const [departmentStaff] = await connection.query(
+      `SELECT i.id AS instructor_id, i.user_id, LOWER(u.role) AS role
        FROM instructors i
        INNER JOIN users u ON u.id = i.user_id
        WHERE i.department_id = ?
          AND LOWER(COALESCE(u.status, 'active')) = 'active'
-         AND LOWER(u.role) IN ('instructor', 'dept_head', 'college_dean', 'academic_directorate')`,
-      [departmentId]
+         AND LOWER(u.role) IN ('instructor', 'dept_head', 'department_head', 'college_dean', 'academic_directorate', 'academic_director', 'directorate')
+       UNION ALL
+       SELECT la.id AS instructor_id, la.user_id, LOWER(u.role) AS role
+       FROM lab_assistants la
+       INNER JOIN users u ON u.id = la.user_id
+       WHERE la.department_id = ?
+         AND LOWER(COALESCE(u.status, 'active')) = 'active'
+         AND LOWER(u.role) = 'lab_assistant'
+       ORDER BY instructor_id ASC`,
+      [departmentId, departmentId]
     );
-    if (staff.length < 2) return res.status(400).json({ message: 'At least two active academic staff are required.' });
+    const instructors = departmentStaff.filter((staff) => ['instructor', 'lab_assistant'].includes(staff.role));
+    const departmentHead = departmentStaff.find((staff) => ['dept_head', 'department_head'].includes(staff.role));
+    const collegeDean = departmentStaff.find((staff) => staff.role === 'college_dean');
+    const directorateParticipants = departmentStaff
+      .filter((staff) => ['academic_directorate', 'academic_director', 'directorate'].includes(staff.role))
+      .map((staff) => ({ ...staff, role: 'academic_directorate' }));
+    if (!instructors.length) return res.status(400).json({ message: 'At least one active instructor is required.' });
 
     await connection.beginTransaction();
+    const [[publication]] = await connection.query(
+      'SELECT status, started_at FROM peer_evaluation_publications WHERE department_id = ? AND academic_year = ? AND semester = ? FOR UPDATE',
+      [departmentId, academicYear, semester]
+    );
+    if (publication?.started_at) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, hasStarted: true, message: 'Peer evaluations cannot be republished after evaluation has started.' });
+    }
+    await connection.query(
+      `INSERT INTO peer_evaluation_publications (department_id, academic_year, semester, status, created_by)
+       VALUES (?, ?, ?, 'published', ?)
+       ON DUPLICATE KEY UPDATE status = 'published', created_by = VALUES(created_by), updated_at = CURRENT_TIMESTAMP`,
+      [departmentId, academicYear, semester, req.user.id]
+    );
+    await connection.query(
+      `INSERT INTO system_settings (setting_key, setting_value)
+       VALUES ('peer_evaluation_published', 'true')
+       ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_at = CURRENT_TIMESTAMP`
+    );
+     await connection.query("UPDATE system_settings SET setting_value = 'published', updated_at = CURRENT_TIMESTAMP WHERE setting_key = 'peer_evaluation_status'");
+    const [dispatchRows] = await connection.query(
+      `SELECT id FROM evaluation_dispatches
+       WHERE department_id = ? AND evaluation_type = 'peer'
+         AND academic_year = ? AND semester = ?
+       ORDER BY id DESC LIMIT 1`,
+      [departmentId, academicYear, semester]
+    );
+    let peerDispatchId;
+    if (dispatchRows.length) {
+      peerDispatchId = dispatchRows[0].id;
+      await connection.query(
+        `UPDATE evaluation_dispatches
+         SET status = 'active', year_level = 'ALL', student_group = 'ALL', deadline = ?, created_by = ?
+         WHERE id = ?`,
+        [peerDeadlineSql, req.user.id, dispatchRows[0].id]
+      );
+    } else {
+      const [dispatchResult] = await connection.query(
+        `INSERT INTO evaluation_dispatches
+          (department_id, academic_year, semester, year_level, student_group, evaluation_type, deadline, created_by, status, payload)
+         VALUES (?, ?, ?, 'ALL', 'ALL', 'peer', ?, ?, 'active', ?)` ,
+        [departmentId, academicYear, semester, peerDeadlineSql, req.user.id, JSON.stringify({ source: 'peer_publish' })]
+      );
+      peerDispatchId = dispatchResult.insertId;
+    }
+    const instructorParticipants = instructors.map((participant) => ({ ...participant, role: 'instructor' }));
+    const departmentHeadParticipant = { ...departmentHead, role: 'dept_head' };
+    const collegeDeanParticipant = { ...collegeDean, role: 'college_dean' };
+    const leadershipTargets = [departmentHeadParticipant, collegeDeanParticipant, ...directorateParticipants]
+      .filter((participant) => participant?.instructor_id);
+    const assignments = [];
+    for (const evaluator of instructorParticipants) {
+      for (const target of instructorParticipants) {
+        if (evaluator.instructor_id !== target.instructor_id) assignments.push([evaluator, target]);
+      }
+      for (const target of leadershipTargets) {
+        if (evaluator.instructor_id !== target.instructor_id) assignments.push([evaluator, target]);
+      }
+    }
+    if (departmentHead) {
+      for (const instructor of instructorParticipants) assignments.push([departmentHeadParticipant, instructor]);
+    }
+    if (collegeDean) {
+      for (const instructor of instructorParticipants) assignments.push([collegeDeanParticipant, instructor]);
+      if (departmentHead) assignments.push([collegeDeanParticipant, departmentHeadParticipant]);
+    }
+    for (const directorate of directorateParticipants) {
+      for (const instructor of instructorParticipants) assignments.push([directorate, instructor]);
+      if (collegeDean) assignments.push([directorate, collegeDeanParticipant]);
+    }
+
     let createdCount = 0;
-    for (const evaluator of staff) {
-      for (const target of staff) {
-        if (evaluator.instructor_id === target.instructor_id) continue;
+    for (const [evaluator, target] of assignments) {
+      if (!evaluator?.instructor_id || !target?.instructor_id) continue;
         const [existing] = await connection.query(
-          'SELECT id FROM peer_evaluations WHERE evaluator_id = ? AND evaluatee_id = ? AND course_id IS NULL LIMIT 1',
-          [evaluator.user_id, target.instructor_id]
+          `SELECT pe.id
+           FROM peer_evaluations pe
+           INNER JOIN instructors target_instructor ON target_instructor.id = pe.evaluatee_id
+           WHERE pe.evaluator_id = ? AND pe.evaluatee_id = ? AND pe.course_id IS NULL
+             AND target_instructor.department_id = ?
+           LIMIT 1`,
+          [evaluator.instructor_id, target.instructor_id, departmentId]
         );
         if (existing.length) {
-          await connection.query('UPDATE peer_evaluations SET status = \'pending\' WHERE id = ? AND status <> \'submitted\'', [existing[0].id]);
+          await connection.query('UPDATE peer_evaluations SET status = \'pending\', deadline = ?, dispatch_id = ? WHERE id = ?', [peerDeadlineSql, peerDispatchId, existing[0].id]);
         } else {
           await connection.query(
-            'INSERT INTO peer_evaluations (evaluator_id, evaluatee_id, course_id, deadline, status) VALUES (?, ?, NULL, ?, \'pending\')',
-            [evaluator.user_id, target.instructor_id, sessionDeadline]
+            'INSERT INTO peer_evaluations (evaluator_id, evaluatee_id, course_id, dispatch_id, deadline, status) VALUES (?, ?, NULL, ?, ?, \'pending\')',
+            [evaluator.instructor_id, target.instructor_id, peerDispatchId, peerDeadlineSql]
           );
           createdCount += 1;
         }
-      }
     }
+    await connection.query(
+      `UPDATE course_assignments
+       SET is_peer_published = 1,
+           is_published = 1,
+           publish_target = CASE WHEN is_student_published = 1 THEN 'both' ELSE 'instructor' END
+       WHERE department_id = ?`,
+      [departmentId]
+    );
     await connection.commit();
+    emitEvaluationUpdate({ type: 'peer-publication', departmentId, academicYear, semester });
     try {
       await createNotifications({
-        userIds: staff.map((member) => member.user_id),
+        userIds: [...new Set(assignments.map(([evaluator]) => evaluator.user_id).filter(Boolean))],
         title: 'Peer Evaluation Published',
         message: `New peer evaluations are available for the ${academicYear} ${semester} session. Please complete your assigned evaluations.`,
         type: 'peer_evaluation',
@@ -914,7 +1969,7 @@ app.post('/api/evaluations/peer/publish-department', authenticate, authorizeRole
     } catch (notificationError) {
       console.error('Peer evaluation publication notification failed:', notificationError);
     }
-    return res.status(201).json({ success: true, staffCount: staff.length, createdCount, message: `Peer evaluations published for ${staff.length} academic staff members.` });
+    return res.status(201).json({ success: true, staffCount: instructors.length, participantCount: new Set(assignments.flatMap(([evaluator, target]) => [evaluator.user_id, target.user_id])).size, createdCount, message: `Peer evaluations published for ${instructors.length} instructors and the department leadership hierarchy.` });
   } catch (error) {
     try { await connection.rollback(); } catch (rollbackError) { console.error('Peer publish rollback failed:', rollbackError); }
     console.error('Department peer publishing failed:', error);
@@ -924,28 +1979,81 @@ app.post('/api/evaluations/peer/publish-department', authenticate, authorizeRole
   }
 });
 
-app.post('/api/evaluations/peer/unpublish-department', authenticate, authorizeRoles('dept_head'), async (req, res) => {
+app.post(['/api/evaluations/peer/unpublish-department', '/api/evaluations/unpublish-peer'], authenticate, authorizeRoles('dept_head'), async (req, res) => {
   const connection = await pool.getConnection();
   try {
-    const departmentId = Number(req.user.department_id ?? req.user.department);
-    const sessionDeadline = `${String(req.body.academic_year || new Date().getFullYear())} ${String(req.body.semester || 'Semester I')}`;
+    const departmentId = Number(req.body.department_id ?? req.user.department_id ?? req.user.department);
+    const academicYear = String(req.body.academic_year || new Date().getFullYear());
+    const semester = String(req.body.semester || 'Semester I');
     if (!Number.isInteger(departmentId) || departmentId <= 0) return res.status(403).json({ message: 'Your department is not defined. Contact an administrator.' });
+    if (!await canManagePublishedDepartment(req, departmentId)) return res.status(403).json({ message: 'You cannot unpublish peer evaluations for this department.' });
 
-    const [submitted] = await connection.query(
-      `SELECT pes.id FROM peer_evaluation_submissions pes
-       INNER JOIN peer_evaluations pe ON pe.id = pes.peer_evaluation_id
+    const [[peerProgress]] = await connection.query(
+      `SELECT COUNT(DISTINCT pe.id) AS total_assignments,
+              COUNT(DISTINCT pes.id) AS submission_count,
+              COUNT(DISTINCT CASE WHEN pes.id IS NOT NULL AND LOWER(COALESCE(pes.status, 'submitted')) IN ('submitted', 'completed', 'approved') THEN pe.id END) AS completed_assignments
+       FROM peer_evaluations pe
        INNER JOIN instructors target ON target.id = pe.evaluatee_id
-       WHERE target.department_id = ? AND pe.course_id IS NULL AND pe.deadline = ? LIMIT 1`,
-      [departmentId, sessionDeadline]
+       INNER JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id
+       LEFT JOIN peer_evaluation_submissions pes ON pes.peer_evaluation_id = pe.id
+       WHERE target.department_id = ? AND pe.course_id IS NULL
+         AND ed.department_id = ? AND ed.evaluation_type = 'peer'
+         AND ed.academic_year = ? AND ed.semester = ?`,
+      [departmentId, departmentId, academicYear, semester]
     );
-    if (submitted.length) return res.status(400).json({ success: false, message: 'Cannot unpublish because peer evaluations have already been submitted.' });
+    const peerHasSubmissions = Number(peerProgress?.submission_count || 0) > 0;
+    if (peerHasSubmissions) {
+      return res.status(409).json({ success: false, hasSubmissions: true, message: 'Cannot unpublish because peer evaluation submissions already exist.' });
+    }
+    const peerHasStarted = Number(peerProgress?.completed_assignments || 0) > 0;
+    const peerFullyCompleted = Number(peerProgress?.total_assignments || 0) > 0
+      && Number(peerProgress.completed_assignments) === Number(peerProgress.total_assignments);
+    if (peerHasStarted && !peerFullyCompleted) {
+      return res.status(400).json({ success: false, hasStarted: true, fullyCompleted: false, message: 'Cannot unpublish because peer evaluations are in progress. Wait until all peer evaluations are completed.' });
+    }
 
     await connection.beginTransaction();
     await connection.query(
+      `UPDATE peer_evaluation_publications
+       SET status = 'unpublished'
+      WHERE department_id = ? AND academic_year = ? AND semester = ?`,
+      [departmentId, academicYear, semester]
+    );
+    await connection.query(
+      `INSERT INTO system_settings (setting_key, setting_value)
+       VALUES ('peer_evaluation_published', 'false')
+       ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_at = CURRENT_TIMESTAMP`
+    );
+     await connection.query("UPDATE system_settings SET setting_value = 'unpublished', updated_at = CURRENT_TIMESTAMP WHERE setting_key = 'peer_evaluation_status'");
+    await connection.query(
+      `UPDATE evaluation_dispatches
+       SET status = 'closed'
+       WHERE department_id = ? AND evaluation_type = 'peer'
+         AND academic_year = ? AND semester = ?`,
+      [departmentId, academicYear, semester]
+    );
+    await connection.query(
       `DELETE pe FROM peer_evaluations pe
        INNER JOIN instructors target ON target.id = pe.evaluatee_id
-       WHERE target.department_id = ? AND pe.course_id IS NULL AND pe.deadline = ?`,
-      [departmentId, sessionDeadline]
+       WHERE target.department_id = ? AND pe.course_id IS NULL
+         AND pe.dispatch_id IN (
+           SELECT id FROM evaluation_dispatches
+           WHERE department_id = ? AND evaluation_type = 'peer'
+             AND academic_year = ? AND semester = ?
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM peer_evaluation_submissions pes
+           WHERE pes.peer_evaluation_id = pe.id
+         )`,
+      [departmentId, departmentId, academicYear, semester]
+    );
+    await connection.query(
+      `UPDATE course_assignments
+       SET is_peer_published = 0,
+           is_published = IF(is_student_published = 1, 1, 0),
+           publish_target = IF(is_student_published = 1, 'student', '')
+       WHERE department_id = ?`,
+      [departmentId]
     );
     await connection.commit();
     return res.json({ success: true, message: 'Peer evaluations unpublished successfully.' });
@@ -962,29 +2070,41 @@ app.get('/api/dept-head/tracking/dept-head', authenticate, authorizeRoles('dept_
       return sendResponse(res, 403, 'Your department is not defined. Contact an administrator.', 'የክፍልዎ መለያ አልተገኘም። እባክዎ ከአስተዳደሩ ጋር ይገናኙ።');
     }
 
-    const instructorId = Number(req.query.instructor_id || 0);
-    const whereClauses = ['i.department_id = ?'];
-    const params = [departmentId];
+    const evaluateeId = Number(req.query.evaluatee_id || req.query.instructor_id || req.query.target_id || 0);
+    const requestedRole = String(req.query.target_role || req.query.role || 'instructor').trim().toLowerCase();
+    const targetRole = ['instructor', 'lab_assistant'].includes(requestedRole) ? requestedRole : 'instructor';
 
-    if (instructorId > 0) {
-      whereClauses.push('(i.id = ? OR i.user_id = ?)');
-      params.push(instructorId, instructorId);
-    }
+    if (!evaluateeId) return sendResponse(res, 400, 'evaluatee_id is required.', 'የታለመ ዒላማ መለያ ያስፈልጋል።', []);
 
-    const query = `SELECT
-      i.id AS instructor_id,
-      CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, '')) AS instructor_name,
-      COALESCE(dhe.total_score, 0) AS score,
-      COALESCE(dhe.status, 'Pending') AS status,
-      dhe.updated_at AS submitted_at,
-      dhe.id AS evaluation_id
-    FROM instructors i
-    LEFT JOIN dept_head_evaluations dhe ON (dhe.instructor_id = i.id OR dhe.instructor_id = i.user_id)
-    WHERE ${whereClauses.join(' AND ')}
-    GROUP BY i.id, dhe.id
-    ORDER BY i.id ASC, dhe.updated_at DESC`;
+    const query = targetRole === 'lab_assistant'
+      ? `SELECT
+          la.id AS instructor_id,
+          CONCAT(COALESCE(la.first_name, ''), ' ', COALESCE(la.last_name, '')) AS instructor_name,
+          COALESCE(dhe.total_score, 0) AS score,
+          COALESCE(dhe.status, 'Pending') AS status,
+          dhe.updated_at AS submitted_at,
+          dhe.id AS evaluation_id
+        FROM lab_assistants la
+        LEFT JOIN dept_head_evaluations dhe ON dhe.instructor_id = la.id
+        WHERE la.department_id = ?
+          AND (la.id = ? OR la.user_id = ?)
+        GROUP BY la.id, dhe.id
+        ORDER BY la.id ASC, dhe.updated_at DESC`
+      : `SELECT
+          i.id AS instructor_id,
+          CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, '')) AS instructor_name,
+          COALESCE(dhe.total_score, 0) AS score,
+          COALESCE(dhe.status, 'Pending') AS status,
+          dhe.updated_at AS submitted_at,
+          dhe.id AS evaluation_id
+        FROM instructors i
+        LEFT JOIN dept_head_evaluations dhe ON (dhe.instructor_id = i.id OR dhe.instructor_id = i.user_id)
+        WHERE i.department_id = ?
+          AND (i.id = ? OR i.user_id = ?)
+        GROUP BY i.id, dhe.id
+        ORDER BY i.id ASC, dhe.updated_at DESC`;
 
-    const [rows] = await pool.query(query, params);
+    const [rows] = await pool.query(query, [departmentId, evaluateeId, evaluateeId]);
     const normalized = rows.map((row) => ({
       id: row.evaluation_id ?? row.instructor_id,
       instructor_id: row.instructor_id,
@@ -1002,7 +2122,7 @@ app.get('/api/dept-head/tracking/dept-head', authenticate, authorizeRoles('dept_
 });
 
 // Fetch instructors for department head evaluation view
-app.get('/api/dept-head/instructors', authenticate, authorizeRoles('dept_head'), async (req, res) => {
+app.get(['/api/dept-head/instructors', '/api/dept-head/instructors-to-evaluate'], authenticate, authorizeRoles('dept_head'), async (req, res) => {
   try {
     const departmentValue = req.query.department ?? req.query.department_id ?? req.user.department_id ?? req.user.department;
     const departmentId = await resolveDepartmentId(departmentValue);
@@ -1013,123 +2133,163 @@ app.get('/api/dept-head/instructors', authenticate, authorizeRoles('dept_head'),
     const evaluatorId = Number(req.user.id || req.user.user_id || 0);
 
     const query = `
-      SELECT 
-        i.id AS instructor_id,
+      SELECT
+        i.id AS evaluatee_id,
         i.user_id,
         i.employee_id,
         i.department_id,
-        CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, '')) AS instructor_name,
+        CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, '')) AS evaluatee_name,
         COALESCE(u.email, '') AS username,
-        u.role,
-        CASE WHEN dhe.id IS NOT NULL THEN 'Submitted' ELSE 'Pending' END AS evaluation_status,
-        dhe.total_score
+        'instructor' AS target_role,
+        COALESCE(DATE_FORMAT(dhe.deadline, '%Y-%m-%d'), DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 7 DAY), '%Y-%m-%d')) AS deadline,
+        CASE WHEN dhe.id IS NOT NULL AND LOWER(dhe.status) IN ('submitted', 'completed', 'approved') THEN 'Submitted' ELSE 'Pending' END AS evaluation_status,
+        dhe.id AS evaluation_id,
+        dhe.criteria_scores,
+        dhe.strengths,
+        dhe.weaknesses,
+        dhe.total_score,
+        dhe.evaluatee_id AS resolved_evaluatee_id
       FROM instructors i
       JOIN users u ON i.user_id = u.id
-      LEFT JOIN dept_head_evaluations dhe ON dhe.instructor_id = i.id AND dhe.evaluator_id = ?
-      WHERE i.department_id = ? 
-        AND LOWER(u.role) = 'instructor'
-      GROUP BY i.id
-    `;
+      LEFT JOIN dept_head_evaluations dhe ON dhe.evaluatee_id = i.id AND dhe.target_role = 'instructor' AND dhe.evaluator_id = ?
+      WHERE i.department_id = ?
+        AND i.user_id <> ?
+        AND LOWER(COALESCE(u.status, 'active')) = 'active'
 
-    const [rows] = await pool.query(query, [evaluatorId, departmentId]);
+      UNION ALL
 
-    const formattedData = rows.map(row => ({
-      id: row.instructor_id,
-      instructor_id: row.instructor_id,
-      instructor_name: (row.instructor_name || '').trim() || row.username,
+      SELECT
+        la.id AS evaluatee_id,
+        la.user_id,
+        la.employee_id,
+        la.department_id,
+        CONCAT(COALESCE(la.first_name, ''), ' ', COALESCE(la.last_name, '')) AS evaluatee_name,
+        COALESCE(la.email, u.email, '') AS username,
+        'lab_assistant' AS target_role,
+        COALESCE(DATE_FORMAT(dhe.deadline, '%Y-%m-%d'), DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 7 DAY), '%Y-%m-%d')) AS deadline,
+        CASE WHEN dhe.id IS NOT NULL AND LOWER(dhe.status) IN ('submitted', 'completed', 'approved') THEN 'Submitted' ELSE 'Pending' END AS evaluation_status,
+        dhe.id AS evaluation_id,
+        dhe.criteria_scores,
+        dhe.strengths,
+        dhe.weaknesses,
+        dhe.total_score,
+        dhe.evaluatee_id AS resolved_evaluatee_id
+      FROM lab_assistants la
+      JOIN users u ON la.user_id = u.id
+      LEFT JOIN dept_head_evaluations dhe ON dhe.evaluatee_id = la.id AND dhe.target_role = 'lab_assistant' AND dhe.evaluator_id = ?
+      WHERE la.department_id = ?
+        AND la.user_id <> ?
+        AND LOWER(COALESCE(u.status, 'active')) = 'active'
+      ORDER BY evaluatee_name ASC`;
+
+    const [rows] = await pool.query(query, [evaluatorId, departmentId, evaluatorId, evaluatorId, departmentId, evaluatorId]);
+
+    const formattedData = rows.map((row) => ({
+      id: row.evaluatee_id,
+      instructor_id: row.evaluatee_id,
+      evaluatee_id: row.evaluatee_id,
+      target_role: row.target_role || 'instructor',
+      instructor_name: (row.evaluatee_name || '').trim() || row.username || 'Unknown staff',
+      full_name: (row.evaluatee_name || '').trim() || row.username || 'Unknown staff',
       employee_id: row.employee_id,
       department_id: row.department_id,
-      deadline: '2026-08-17',
+      deadline: row.deadline,
       evaluation_status: row.evaluation_status,
-      total_score: row.total_score ? Number(row.total_score) : null
+      evaluation_id: row.evaluation_id,
+      criteria_scores: typeof row.criteria_scores === 'string' ? (() => { try { return JSON.parse(row.criteria_scores); } catch { return {}; } })() : (row.criteria_scores || {}),
+      strengths: row.strengths || '',
+      weaknesses: row.weaknesses || '',
+      total_score: row.total_score ? Number(row.total_score) : null,
     }));
 
-    return sendResponse(res, 200, 'Department instructors fetched.', 'የዲፓርትመንት አስተማሪዎች ተመልሰዋል።', formattedData);
+    return sendResponse(res, 200, 'Department staff fetched.', 'የዲፓርትመንት ሰራተኞች ተመልሰዋል።', formattedData);
   } catch (err) {
-    console.error("Dept Head Instructors DB Error:", err);
-    return res.status(500).json({ success: false, message: "Database query failed", error: err.message });
+    console.error('Dept Head Instructors DB Error:', err);
+    return res.status(500).json({ success: false, message: 'Database query failed', error: err.message });
   }
 });
 
 const getDeptHeadPerformance = async (req, res) => {
   try {
+    const userId = Number(req.user?.id || 0);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return res.json(getDefaultDeptHeadPerformance('Department Head user information is unavailable.'));
+    }
     const [instructorRows] = await pool.query(
       'SELECT id, department_id FROM instructors WHERE user_id = ? LIMIT 1',
-      [req.user.id]
+      [userId]
     );
-    if (!instructorRows.length) return res.status(404).json({ message: 'Department Head profile not found.' });
+    if (!instructorRows.length) {
+      return res.json(getDefaultDeptHeadPerformance('Department Head profile is not available yet.'));
+    }
 
     const instructorId = instructorRows[0].id;
-    const [[assignmentCount]] = await pool.query(
-      `SELECT COUNT(*) AS total FROM course_assignments
-       WHERE instructor_id = ?
-         AND (is_published = 1 OR is_student_published = 1 OR is_peer_published = 1)
-         AND (semester IS NULL OR semester <> '')
-         AND (academic_year IS NULL OR academic_year <> '')`,
-      [instructorId]
-    );
-    const isTeaching = Number(assignmentCount?.total || 0) > 0;
-    const [deanRows] = await pool.query(
-      `SELECT dhe.total_score AS score, COALESCE(AVG(dhe.total_score) OVER (), 0) AS average_score, dhe.criteria_scores, dhe.strengths, dhe.weaknesses
-       FROM dept_head_evaluations dhe
-      WHERE dhe.instructor_id = ? AND LOWER(dhe.status) IN ('submitted', 'completed', 'approved')
-      ORDER BY dhe.updated_at DESC`,
-      [instructorId]
-    );
-    const [studentRows] = await pool.query(
-      `SELECT COALESCE(ses.score, 0) AS score, COALESCE(AVG(ses.score) OVER (), 0) AS average_score, ses.feedback
-       FROM student_evaluation_submissions ses
-       INNER JOIN evaluation_dispatches ed ON ed.id = ses.dispatch_id
-       INNER JOIN course_assignments ca ON ca.id = ed.assignment_id
-       WHERE ca.instructor_id = ? AND ca.department_id = ?
-         AND ses.status = 'submitted'`,
-      [instructorId, instructorRows[0].department_id]
-    );
-    const [peerRows] = await pool.query(
-      `SELECT COALESCE(pes.score, 0) AS score, COALESCE(AVG(pes.score) OVER (), 0) AS average_score, pes.strengths, pes.suggestions
-       FROM peer_evaluation_submissions pes
-       INNER JOIN peer_evaluations pe ON pe.id = pes.peer_evaluation_id
-       WHERE pe.evaluatee_id = ?`,
-      [instructorId]
-    );
-
-    const average = (rows) => rows.length ? rows.reduce((sum, row) => sum + Number(row.score || 0), 0) / rows.length : 0;
-    const studentAvg = Number(studentRows[0]?.average_score || 0);
-    const peerAvg = Number(peerRows[0]?.average_score || 0);
-    const deanScore = Number(deanRows[0]?.average_score || 0);
-    const totalScore = (studentAvg * 0.5) + (deanScore * 0.3) + (peerAvg * 0.2);
+    const performance = await getDeptHeadLivePerformanceMetrics({
+      instructorId,
+      departmentId: instructorRows[0].department_id,
+    });
+    const {
+      studentRows,
+      deanRows,
+      peerRows,
+      hasAssignedCourse,
+      isTeaching,
+      weighted: weightedSummary,
+      deptHeadAverage: deanRawScore,
+      periodEnded,
+      incomingPeerCount,
+      completion,
+      isComplete,
+    } = performance;
+    const totalScore = isComplete ? weightedSummary.totalWeightedScore : null;
     const strengths = [];
     const improvements = [];
     const addFeedback = (list, value) => {
       const text = String(value || '').trim();
       if (text && !list.includes(text)) list.push(text);
     };
+
+    const parseCriteriaData = (value) => {
+      if (!value) return {};
+      if (typeof value === 'object') return value;
+      try {
+        return JSON.parse(value);
+      } catch {
+        return {};
+      }
+    };
+
     studentRows.forEach((row) => addFeedback(Number(row.score || 0) >= 70 ? strengths : improvements, row.feedback));
     peerRows.forEach((row) => { addFeedback(strengths, row.strengths); addFeedback(improvements, row.suggestions); });
     deanRows.forEach((row) => {
       addFeedback(strengths, row.strengths);
       addFeedback(improvements, row.weaknesses);
-      const deanCriteria = row.criteria_scores;
-      if (deanCriteria) {
-        const criteriaData = typeof deanCriteria === 'string' ? JSON.parse(deanCriteria) : deanCriteria;
-        addFeedback(deanScore >= 70 ? strengths : improvements, criteriaData?.remarks || criteriaData?.feedback);
+      const deanCriteria = parseCriteriaData(row.criteria_scores);
+      const remarkText = deanCriteria?.remarks || deanCriteria?.feedback;
+      if (remarkText) {
+        addFeedback(deanRawScore >= 70 ? strengths : improvements, remarkText);
       }
     });
 
     return res.json({
-      totalWeightedScore: Number(totalScore.toFixed(2)),
+      totalWeightedScore: totalScore === null ? null : Number(totalScore.toFixed(2)),
+      totalScore: totalScore === null ? null : Number(totalScore.toFixed(2)),
+      isComplete,
+      statusBadge: isComplete ? 'Completed' : 'Pending Complete Evaluation',
+      completion,
+      isStudentEvaluationRequired: hasAssignedCourse,
+      incomingPeerCount,
+      periodEnded,
+      hasAssignedCourse: Boolean(weightedSummary.hasAssignedCourse),
       isTeaching,
-      breakdown: {
-        student: { rawPercentage: Number(studentAvg.toFixed(2)), weightedContribution: Number((studentAvg * 0.5).toFixed(2)), weight: 50 },
-        deanHead: { rawPercentage: Number(deanScore.toFixed(2)), weightedContribution: Number((deanScore * 0.3).toFixed(2)), weight: 30 },
-        peer: { rawPercentage: Number(peerAvg.toFixed(2)), weightedContribution: Number((peerAvg * 0.2).toFixed(2)), weight: 20 },
-      },
+      warning: weightedSummary.warning,
+      breakdown: weightedSummary.breakdown,
       strengths,
       weaknesses: improvements,
     });
   } catch (error) {
     console.error('Department Head performance error:', error);
-    return res.status(500).json({ message: 'Unable to load Department Head performance.', error: error.message });
+    return res.json(getDefaultDeptHeadPerformance('Performance data is temporarily unavailable.'));
   }
 };
 
@@ -1190,7 +2350,7 @@ app.get('/api/dept-head/students', authenticate, authorizeRoles('dept_head'), as
 app.get('/api/department-data/:type', authenticate, authorizeRoles('dept_head', 'admin'), async (req, res) => {
   try {
     const { type } = req.params;
-    if (!['instructors', 'students', 'courses'].includes(type)) {
+    if (!['instructors', 'students', 'courses', 'lab_assistants'].includes(type)) {
       return res.status(400).json({ message: 'Unsupported department data type.' });
     }
 
@@ -1201,19 +2361,37 @@ app.get('/api/department-data/:type', authenticate, authorizeRoles('dept_head', 
     let query;
     if (type === 'instructors') {
       query = `SELECT u.id, TRIM(CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, ''))) AS name,
-        u.email, u.role, i.employee_id, i.department_id
+        u.email, COALESCE(NULLIF(TRIM(u.role), ''), 'instructor') AS role,
+        COALESCE(NULLIF(TRIM(u.status), ''), 'active') AS status,
+        i.employee_id, i.department_id
         FROM users u
         INNER JOIN instructors i ON i.user_id = u.id
-        WHERE u.role = 'instructor' AND i.department_id = ?
+        WHERE i.department_id = ?
+          AND LOWER(COALESCE(u.role, 'instructor')) IN (
+            'instructor', 'dept_head', 'department_head', 'head',
+            'college_dean', 'dean', 'academic_directorate', 'academic_director',
+            'directorate', 'director'
+          )
         ORDER BY name ASC`;
     } else if (type === 'students') {
       query = `SELECT u.id, TRIM(CONCAT(COALESCE(s.first_name, ''), ' ', COALESCE(s.last_name, ''))) AS name,
         COALESCE(u.email, s.student_id) AS email, u.role, s.student_id, s.department_id,
-        s.program_type, s.year_level, s.section
+        s.program_type, s.year_level, s.semester, s.section
         FROM users u
         INNER JOIN students s ON s.user_id = u.id
         WHERE u.role = 'student' AND s.department_id = ?
         ORDER BY name ASC`;
+    } else if (type === 'lab_assistants') {
+      query = `SELECT la.id, la.full_name AS name,
+        COALESCE(la.email, u.email) AS email,
+        COALESCE(NULLIF(TRIM(u.role), ''), 'lab_assistant') AS role,
+        COALESCE(NULLIF(TRIM(la.status), ''), 'active') AS status,
+        la.employee_id, la.department_id
+        FROM lab_assistants la
+        INNER JOIN users u ON u.id = la.user_id
+        WHERE la.department_id = ?
+          AND LOWER(COALESCE(u.role, 'lab_assistant')) = 'lab_assistant'
+        ORDER BY la.full_name ASC`;
     } else {
       const [courseCreditColumns] = await pool.query(
         `SELECT COLUMN_NAME
@@ -1227,8 +2405,11 @@ app.get('/api/department-data/:type', authenticate, authorizeRoles('dept_head', 
       const creditsExpression = courseCreditColumns.length
         ? `${courseCreditColumns[0].COLUMN_NAME} AS credits`
         : '0 AS credits';
-      query = `SELECT id, code, name, ${creditsExpression}, department_id
-        FROM courses WHERE department_id = ? ORDER BY code ASC`;
+      query = `SELECT c.id, c.code, c.name, c.year_level, c.semester, ${creditsExpression}, c.department_id,
+        d.name AS department_name, 'Active' AS status
+        FROM courses c
+        INNER JOIN departments d ON c.department_id = d.id
+        WHERE c.department_id = ? ORDER BY c.code ASC`;
     }
 
     const [rows] = await pool.query(query, [departmentId]);
@@ -1242,36 +2423,95 @@ app.get('/api/department-data/:type', authenticate, authorizeRoles('dept_head', 
 // Submit or update a department head evaluation
 app.post('/api/dept-head/evaluations', authenticate, authorizeRoles('dept_head'), async (req, res) => {
   try {
-    const { evaluator_id, instructor_id, department_id, criteria_scores, total_score } = req.body;
+    const { evaluator_id, instructor_id, evaluatee_id, target_role, department_id, academic_year, semester, criteria_scores, responses, feedback, total_score } = req.body;
     const evaluatorId = Number(evaluator_id || req.user.id || req.user.user_id || 0);
-    const instrId = Number(instructor_id || 0);
+    const evaluateeId = Number(evaluatee_id || instructor_id || 0);
+    const targetRole = String(target_role || (evaluatee_id ? 'instructor' : 'instructor')).trim().toLowerCase();
     const deptId = Number(department_id || req.user.department_id || req.user.department || 0);
 
-    if (!evaluatorId || !instrId || !deptId) {
+    if (!evaluatorId || !evaluateeId || !deptId) {
       return sendResponse(res, 400, 'Missing required fields.', 'የሚያስፈልጉ መረጃዎች አልተሰጡም።');
     }
+    if (evaluatorId !== Number(req.user.id || req.user.user_id)) {
+      return sendResponse(res, 403, 'You can only submit an evaluation as the authenticated Department Head.', 'እንደ የተረጋገጠው የዲፓርትመንት ኃላፊ ብቻ መገምገም ይችላሉ።');
+    }
 
-    // persist into dept_head_evaluations (upsert)
+    const normalizedTargetRole = ['instructor', 'lab_assistant'].includes(targetRole) ? targetRole : 'instructor';
+    const targetTable = normalizedTargetRole === 'lab_assistant' ? 'lab_assistants' : 'instructors';
+    const [[targetRecord]] = await pool.query(
+      `SELECT target.id, target.user_id, target.department_id
+       FROM ${targetTable} target
+       INNER JOIN users target_user ON target_user.id = target.user_id
+      WHERE (target.id = ? OR target.user_id = ?)
+         AND target.department_id = ?
+         AND target.user_id <> ?
+         AND LOWER(COALESCE(target_user.status, 'active')) = 'active'
+       LIMIT 1`,
+      [evaluateeId, evaluateeId, deptId, evaluatorId]
+    );
+    if (!targetRecord) {
+      return sendResponse(res, 400, 'A Department Head cannot evaluate themselves or a staff member outside their department.', 'የዲፓርትመንት ኃላፊ ራሳቸውን ወይም ከዲፓርትመንታቸው ውጭ ያለ ሰራተኛን መገምገም አይችሉም።');
+    }
+
+    const totalScore = Number(total_score || 0);
+    const weightedDeptHeadScore = Number((totalScore * 0.30).toFixed(2));
     const criteriaJson = criteria_scores ? JSON.stringify(criteria_scores) : null;
+    const responsesJson = responses ? JSON.stringify(responses) : criteriaJson;
     await pool.query(
-      `INSERT INTO dept_head_evaluations (evaluator_id, instructor_id, department_id, criteria_scores, total_score, status)
-       VALUES (?, ?, ?, ?, ?, 'Submitted')
-       ON DUPLICATE KEY UPDATE criteria_scores = VALUES(criteria_scores), total_score = VALUES(total_score), status = VALUES(status), updated_at = CURRENT_TIMESTAMP`,
-      [evaluatorId, instrId, deptId, criteriaJson, Number(total_score || 0)]
+      `INSERT INTO dept_head_evaluations
+       (dept_head_id, evaluator_id, instructor_id, evaluatee_id, target_role, department_id, academic_year, semester, criteria_scores, responses, total_score, feedback, status, submitted_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Submitted', NOW())
+       ON DUPLICATE KEY UPDATE
+         dept_head_id = VALUES(dept_head_id), instructor_id = VALUES(instructor_id), evaluatee_id = VALUES(evaluatee_id),
+         target_role = VALUES(target_role), department_id = VALUES(department_id), academic_year = VALUES(academic_year),
+         semester = VALUES(semester), criteria_scores = VALUES(criteria_scores), responses = VALUES(responses),
+         total_score = VALUES(total_score), feedback = VALUES(feedback), status = VALUES(status), submitted_at = NOW(), updated_at = CURRENT_TIMESTAMP`,
+      [evaluatorId, evaluatorId, evaluateeId, evaluateeId, normalizedTargetRole, deptId, academic_year || '2025/2026', semester || 'Semester II', criteriaJson, responsesJson, totalScore, feedback || null]
     );
 
-    // reflect in evaluation_results so tracking shows the dept_head_score
-    await pool.query(
-      `INSERT INTO evaluation_results (instructor_id, department_id, student_average, peer_average, dept_head_score, total_score)
-       VALUES (?, ?, 0, 0, ?, ?)
-       ON DUPLICATE KEY UPDATE dept_head_score = VALUES(dept_head_score), total_score = VALUES(total_score), published_at = CURRENT_TIMESTAMP`,
-      [instrId, deptId, Number(total_score || 0), Number(total_score || 0)]
-    );
+    if (normalizedTargetRole === 'instructor') {
+      await calculateAndSaveInstructorResult(
+        evaluateeId,
+        academic_year || '2025/2026',
+        semester || 'Semester II'
+      );
+    }
 
-    return sendResponse(res, 200, 'Evaluation submitted successfully.', 'ግምገማው በተሳካ ሁኔታ ተሳክቷል።', { success: true, total_score: Number(total_score || 0) });
+    if (normalizedTargetRole === 'instructor') {
+      await pool.query(
+        `INSERT INTO evaluation_summaries (instructor_id, department_id, dept_head_raw_percentage, dept_head_weighted_score, total_weighted_score, updated_at)
+         VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON DUPLICATE KEY UPDATE department_id = VALUES(department_id), dept_head_raw_percentage = VALUES(dept_head_raw_percentage), dept_head_weighted_score = VALUES(dept_head_weighted_score), total_weighted_score = VALUES(total_weighted_score), updated_at = CURRENT_TIMESTAMP`,
+        [evaluateeId, deptId, totalScore, weightedDeptHeadScore, weightedDeptHeadScore]
+      );
+    }
+
+    return sendResponse(res, 200, 'Evaluation submitted successfully.', 'ግምገማው በተሳካ ሁኔታ ተሳክቷል።', { success: true, total_score: totalScore, dept_head_weighted_score: weightedDeptHeadScore, target_role: normalizedTargetRole });
   } catch (error) {
     console.error('Submit dept-head evaluation error:', error);
     return sendResponse(res, 500, 'Unable to submit evaluation.', 'ግምገማውን ማስተካከል አልቻለም።', { error: error.message });
+  }
+});
+
+app.put('/api/dept-head/evaluations/:id', authenticate, authorizeRoles('dept_head'), async (req, res) => {
+  try {
+    const evaluationId = Number(req.params.id || 0);
+    const { criteria_scores = {}, total_score = 0, strengths = '', weaknesses = '' } = req.body;
+    const score = Number(total_score);
+    if (!evaluationId || !Number.isFinite(score) || score < 0 || score > 30) {
+      return res.status(400).json({ success: false, message: 'A valid evaluation ID and score from 0 to 30 are required.' });
+    }
+    const [result] = await pool.query(
+      `UPDATE dept_head_evaluations
+       SET criteria_scores = ?, total_score = ?, strengths = ?, weaknesses = ?, status = 'Submitted', updated_at = NOW()
+       WHERE id = ? AND evaluator_id = ?`,
+      [JSON.stringify(criteria_scores), score, String(strengths).trim(), String(weaknesses).trim(), evaluationId, req.user.id]
+    );
+    if (!result.affectedRows) return res.status(404).json({ success: false, message: 'Evaluation not found.' });
+    return res.json({ success: true, message: 'Evaluation updated successfully.', data: { id: evaluationId, total_score: score, status: 'Submitted' } });
+  } catch (error) {
+    console.error('Dept head evaluation update error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to update evaluation.' });
   }
 });
 
@@ -1296,28 +2536,48 @@ app.post(['/api/dept-head/calculate-publish', '/api/evaluations/publish-instruct
 
     const results = [];
     for (const instructor of instructors) {
+      const [courseRows] = await pool.query(
+        `SELECT COUNT(*) AS total
+         FROM course_assignments
+         WHERE instructor_id = ?
+           AND academic_year = ?
+           AND semester = ?`,
+        [instructor.id, academicYear, semesterValue]
+      );
+      const hasCourseAssigned = Number(courseRows[0]?.total || 0) > 0;
+
       const [studentRows] = await pool.query(
-        `SELECT COALESCE(AVG(ses.score), 0) AS avg_score
+        `SELECT CASE WHEN ? = 0 THEN 0 ELSE COALESCE(AVG(ses.score), 0) END AS avg_score
          FROM student_evaluation_submissions ses
          JOIN evaluation_dispatches ed ON ses.dispatch_id = ed.id
          JOIN course_assignments ca ON ca.id = ed.assignment_id
-           OR (ca.student_id = ed.student_id AND ca.course_id = ed.course_id)
-         WHERE ca.instructor_id = ? AND ca.department_id = ?
+         WHERE ca.instructor_id = ?
            AND (ed.academic_year = ? OR ed.academic_year IS NULL)
-           AND (ed.semester = ? OR ed.semester IS NULL)`,
-        [instructor.id, departmentId, academicYear, semesterValue]
+           AND (ed.semester = ? OR ed.semester IS NULL)
+           AND LOWER(COALESCE(ed.target_type, 'instructor')) = 'instructor'
+           AND LOWER(TRIM(COALESCE(ses.status, ''))) IN ('submitted', 'completed', 'approved')`,
+        [hasCourseAssigned ? 1 : 0, instructor.id, academicYear, semesterValue]
       );
-      const studentAverage = Number(studentRows[0]?.avg_score || 0);
+      const studentAverage = hasCourseAssigned ? Number(studentRows[0]?.avg_score || 0) : 0;
 
       const [peerRows] = await pool.query(
-        `SELECT COALESCE(AVG(pe.score), 0) AS avg_score
-         FROM instructors i
-         LEFT JOIN peer_evaluation_submissions pe ON i.id = pe.evaluatee_id
-         WHERE i.id = ?
-           AND pe.status IN ('submitted', 'completed', 'approved')`,
+        `SELECT
+           AVG(CASE WHEN LOWER(evaluator.role) IN ('instructor', 'dept_head', 'department_head') THEN pes.score END) AS peer_to_peer_avg,
+           AVG(CASE WHEN LOWER(evaluator.role) IN ('college_dean', 'dean') THEN pes.score END) AS dean_to_peer_avg,
+           AVG(pes.score) AS all_peer_avg
+         FROM peer_evaluation_submissions pes
+         INNER JOIN peer_evaluations pe ON pe.id = pes.peer_evaluation_id
+         INNER JOIN users evaluator ON evaluator.id = pes.evaluator_id
+         WHERE pe.evaluatee_id = ?
+           AND LOWER(TRIM(pes.status)) IN ('submitted', 'completed', 'approved')`,
         [instructor.id]
       );
-      const peerAverage = Number(peerRows[0]?.avg_score || 0);
+      const peerToPeerAverage = Number(peerRows[0]?.peer_to_peer_avg || 0);
+      const deanToPeerAverage = Number(peerRows[0]?.dean_to_peer_avg || 0);
+      const allPeerAverage = Number(peerRows[0]?.all_peer_avg || 0);
+      const peerAverage = peerToPeerAverage && deanToPeerAverage
+        ? (peerToPeerAverage + deanToPeerAverage) / 2
+        : allPeerAverage;
 
       const [deptHeadRows] = await pool.query(
         `SELECT COALESCE(AVG(dhe.total_score), 0) AS avg_score
@@ -1328,14 +2588,23 @@ app.post(['/api/dept-head/calculate-publish', '/api/evaluations/publish-instruct
       );
       const rawDeptHeadAverage = Number(deptHeadRows[0]?.avg_score || 0);
       const deptHeadScore = rawDeptHeadAverage;
-      const totalScore = Number((studentAverage * 0.5 + peerAverage * 0.2 + rawDeptHeadAverage * 0.3).toFixed(2));
+      const deptHeadPercentage = normalizeDeptHeadScore(rawDeptHeadAverage);
+      const normalizedDeptHead = deptHeadScore <= 30 ? (deptHeadScore / 30) * 100 : deptHeadScore;
+      const totalScore = hasCourseAssigned
+        ? Number(((studentAverage * 0.5) + (normalizedDeptHead * 0.3) + (peerAverage * 0.2)).toFixed(2))
+        : Number(((normalizedDeptHead * 0.6) + (peerAverage * 0.4)).toFixed(2));
 
       await pool.query(
-        `INSERT INTO evaluation_results (instructor_id, department_id, student_average, peer_average, dept_head_score, total_score)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE student_average = VALUES(student_average), peer_average = VALUES(peer_average), dept_head_score = VALUES(dept_head_score), total_score = VALUES(total_score), published_at = CURRENT_TIMESTAMP`,
-        [instructor.id, departmentId, studentAverage, peerAverage, deptHeadScore, totalScore]
+        `INSERT INTO evaluation_results (instructor_id, department_id, academic_year, semester, student_average, student_score, peer_average, peer_score, dept_head_score, total_score, final_score)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE student_average = VALUES(student_average), student_score = VALUES(student_score), peer_average = VALUES(peer_average), peer_score = VALUES(peer_score), dept_head_score = VALUES(dept_head_score), total_score = VALUES(total_score), final_score = VALUES(final_score), published_at = CURRENT_TIMESTAMP`,
+          [instructor.id, departmentId, academicYear, semesterValue, hasCourseAssigned ? studentAverage : 0, hasCourseAssigned ? studentAverage : 0, peerAverage, peerAverage, deptHeadScore, totalScore, totalScore]
       );
+
+      const studentWeightedScore = hasCourseAssigned ? Number((studentAverage * 0.5).toFixed(2)) : 0;
+      const deptHeadWeightedScore = hasCourseAssigned ? Number((normalizedDeptHead * 0.3).toFixed(2)) : Number((normalizedDeptHead * 0.6).toFixed(2));
+      const peerWeightedScore = hasCourseAssigned ? Number((peerAverage * 0.2).toFixed(2)) : Number((peerAverage * 0.4).toFixed(2));
+
       await pool.query(
         `INSERT INTO evaluation_summaries (
            instructor_id, department_id,
@@ -1357,15 +2626,28 @@ app.post(['/api/dept-head/calculate-publish', '/api/evaluations/publish-instruct
         [
           instructor.id,
           departmentId,
-          studentAverage,
-          studentAverage * 0.5,
+          hasCourseAssigned ? studentAverage : 0,
+          studentWeightedScore,
           rawDeptHeadAverage,
-          rawDeptHeadAverage * 0.3,
+          deptHeadWeightedScore,
           peerAverage,
-          peerAverage * 0.2,
+          peerWeightedScore,
           totalScore,
         ]
       );
+
+      const [[targetInstructor]] = await pool.query(
+        `SELECT u.id AS user_id
+         FROM instructors i INNER JOIN users u ON u.id = i.user_id
+         WHERE i.id = ? AND LOWER(COALESCE(u.status, 'active')) = 'active' LIMIT 1`,
+        [instructor.id]
+      );
+      await createNotifications({
+        userIds: targetInstructor?.user_id ? [targetInstructor.user_id] : [],
+        title: 'Final evaluation result published',
+        message: `Your final evaluation result for ${academicYear} ${semesterValue} is now available.`,
+        type: 'final_result_published',
+      });
 
       results.push({
         instructor_id: instructor.id,
@@ -1376,6 +2658,7 @@ app.post(['/api/dept-head/calculate-publish', '/api/evaluations/publish-instruct
       });
     }
 
+    emitEvaluationUpdate({ type: 'final-results-published', academicYear, semester: semesterValue, instructorIds: results.map(({ instructor_id }) => instructor_id) });
     return res.status(200).json({ success: true, message: 'Final results calculated and published successfully.', data: { results } });
   } catch (error) {
     console.error(error);
@@ -1448,6 +2731,18 @@ app.post('/api/auth/register', mwAuthenticateToken, mwAuthorizeRoles('admin'), a
       replace_existing = false,
     } = req.body;
 
+    const validationErrors = validateRegistrationPayload({
+      full_name,
+      role,
+      student_id,
+      employee_id,
+      email,
+    });
+
+    if (Object.keys(validationErrors).length) {
+      return res.status(400).json({ success: false, message: 'Validation error', errors: validationErrors });
+    }
+
     const errors = {};
     if (!full_name || !String(full_name).trim()) errors.full_name = 'full_name is required.';
     
@@ -1466,7 +2761,8 @@ app.post('/api/auth/register', mwAuthenticateToken, mwAuthorizeRoles('admin'), a
 
     const normalizedEmail = role === 'student' ? null : (typeof email === 'string' && email.trim() ? email.trim() : null);
     const normalizedStudentId = role === 'student' ? (typeof student_id === 'string' && student_id.trim() ? student_id.trim() : null) : null;
-    
+    const normalizedGender = normalizeGenderValue(gender || req.body?.sex || 'male');
+
     const resolvedDepartmentId = await resolveDepartmentId(department_id ?? department ?? department_name);
     const [departmentRows] = resolvedDepartmentId
       ? await pool.query('SELECT college_id FROM departments WHERE id = ? LIMIT 1', [resolvedDepartmentId])
@@ -1484,8 +2780,7 @@ app.post('/api/auth/register', mwAuthenticateToken, mwAuthorizeRoles('admin'), a
       }
     }
 
-    const passwordValue = typeof password === 'string' && password.trim() ? password.trim() : getDefaultPasswordForRole(role);
-    const hashedPassword = await bcrypt.hash(passwordValue, 12);
+    const hashedPassword = await bcrypt.hash(getDefaultPasswordForRole(role), 12);
     
     const userFields = {
       full_name: String(full_name).trim(),
@@ -1505,13 +2800,21 @@ app.post('/api/auth/register', mwAuthenticateToken, mwAuthorizeRoles('admin'), a
       learning_level: typeof learning_level === 'string' && learning_level.trim() ? learning_level.trim() : null,
       employee_id: typeof employee_id === 'string' && employee_id.trim() ? employee_id.trim() : null,
       program_type: typeof program_type === 'string' && program_type.trim() ? program_type.trim() : null,
-      gender: typeof gender === 'string' && gender.trim() ? gender.trim() : null,
+      gender: normalizedGender,
     };
 
     // Use transaction: insert into users then role-specific tables
     const conn = await pool.getConnection();
     try {
       await conn.beginTransaction();
+
+      if (isSystemAdminRole(userFields.role)) {
+        const activeAdmin = await getActiveSystemAdmin(conn);
+        if (activeAdmin) {
+          await conn.rollback();
+          return sendResponse(res, 409, SYSTEM_ADMIN_CONFLICT_MESSAGE, SYSTEM_ADMIN_CONFLICT_MESSAGE);
+        }
+      }
 
       // Check if email or student_id already exists
       if (normalizedEmail) {
@@ -1530,16 +2833,24 @@ app.post('/api/auth/register', mwAuthenticateToken, mwAuthorizeRoles('admin'), a
         }
       }
 
-      const [userResult] = await conn.query(
-        'INSERT INTO users (email, password_hash, role, status, is_first_login) VALUES (?, ?, ?, ?, ?)',
-        [userFields.email, userFields.password_hash, userFields.role, 'active', 1]
-      );
+      const nameParts = String(userFields.full_name || '').trim().split(/\s+/).filter(Boolean);
+      const firstName = nameParts.shift() || '';
+      const lastName = nameParts.join(' ');
+      const [userResult] = isSystemAdminRole(userFields.role)
+        ? await conn.query(
+          'INSERT INTO users (email, first_name, last_name, password_hash, role, status, is_first_login, must_change_password, gender) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)',
+          [userFields.email, firstName, lastName, userFields.password_hash, userFields.role, 'active', 1, userFields.gender]
+        )
+        : await conn.query(
+          'INSERT INTO users (email, password_hash, role, status, is_first_login, must_change_password, gender) VALUES (?, ?, ?, ?, ?, 1, ?)',
+          [userFields.email, userFields.password_hash, userFields.role, 'active', 1, userFields.gender]
+        );
       const userId = userResult.insertId;
 
       // Insert into role-specific table
       if (userFields.role === 'student') {
         await conn.query(
-          'INSERT INTO students (user_id, student_id, first_name, last_name, department_id, semester, year_level, section, program_type, gender, phone_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO students (user_id, student_id, first_name, last_name, department_id, semester, year_level, section, program_type, gender, phone_number, registration_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_DATE)',
           [
             userId,
             userFields.student_id,
@@ -1554,19 +2865,34 @@ app.post('/api/auth/register', mwAuthenticateToken, mwAuthorizeRoles('admin'), a
             userFields.phone_number || null,
           ]
         );
-      } else if (userFields.role === 'instructor' || userFields.role === 'dept_head') {
-        await conn.query(
-          'INSERT INTO instructors (user_id, employee_id, first_name, last_name, department_id, gender, phone_number) VALUES (?, ?, ?, ?, ?, ?, ?)',
-          [
-            userId,
-            userFields.employee_id || null,
-            userFields.full_name || null,
-            null,
-            resolvedDepartmentId || null,
-            userFields.gender || null,
-            userFields.phone_number || null,
-          ]
-        );
+      } else if (['instructor', 'dept_head', 'lab_assistant'].includes(userFields.role)) {
+        if (userFields.role === 'lab_assistant') {
+          await conn.query(
+            'INSERT INTO lab_assistants (user_id, employee_id, first_name, last_name, email, department_id, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [
+              userId,
+              userFields.employee_id || null,
+              userFields.full_name?.trim().split(/\s+/)[0] || null,
+              userFields.full_name?.trim().split(/\s+/).slice(1).join(' ') || userFields.full_name || null,
+              normalizedEmail || userFields.email || null,
+              resolvedDepartmentId || null,
+              'active',
+            ]
+          );
+        } else {
+          await conn.query(
+            'INSERT INTO instructors (user_id, employee_id, first_name, last_name, department_id, gender, phone_number) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [
+              userId,
+              userFields.employee_id || null,
+              userFields.full_name || null,
+              null,
+              resolvedDepartmentId || null,
+              userFields.gender || null,
+              userFields.phone_number || null,
+            ]
+          );
+        }
       }
 
       await conn.commit();
@@ -1574,6 +2900,9 @@ app.post('/api/auth/register', mwAuthenticateToken, mwAuthorizeRoles('admin'), a
     } catch (sqlErr) {
       console.error('SQL Error:', sqlErr);
       try { await conn.rollback(); } catch (e) {}
+      if (isActiveSystemAdminUniqueError(sqlErr)) {
+        return sendResponse(res, 409, SYSTEM_ADMIN_CONFLICT_MESSAGE, SYSTEM_ADMIN_CONFLICT_MESSAGE);
+      }
       return sendResponse(res, 500, 'Registration failed due to database error.', 'መመዝገብ በዳታቤዝ ስህተት ምክንያት አልተሳካም።');
     } finally {
       conn.release();
@@ -1587,6 +2916,9 @@ app.post('/api/auth/register', mwAuthenticateToken, mwAuthorizeRoles('admin'), a
       stack: error.stack,
       body: req.body,
     });
+    if (isActiveSystemAdminUniqueError(error)) {
+      return sendResponse(res, 409, SYSTEM_ADMIN_CONFLICT_MESSAGE, SYSTEM_ADMIN_CONFLICT_MESSAGE);
+    }
     if (error.code === 'ER_DUP_ENTRY') {
       return sendResponse(res, 409, 'Department Head already exists for this department. Please update or reassign the existing Department Head.', 'ይህ ዲፓርትመንት ለነበረው የዲፓርትመንት አስተዳዳሪ ነው። እባክዎ ነበረውን ይለውጡ ወይም አስተካክሉ።');
     }
@@ -1615,6 +2947,8 @@ const normalizeRow = (row) => {
     fullname: 'full_name',
     firstname: 'first_name',
     lastname: 'last_name',
+    gender: 'gender',
+    sex: 'gender',
     departmentid: 'department_id',
     departmentname: 'department_name',
     registrationdate: 'registration_date',
@@ -1646,6 +2980,7 @@ const parseUploadRows = (fileBuffer, originalName) => {
 const resolveRoleFromType = (registration_type) => {
   const type = String(registration_type || '').trim().toLowerCase();
   if (type === 'dept_head') return 'dept_head';
+  if (type === 'lab_assistant') return 'lab_assistant';
   if (type === 'instructor') return 'instructor';
   return 'student';
 };
@@ -1688,14 +3023,17 @@ const resolveDepartmentValue = (row) => {
   return null;
 };
 
-app.post('/api/auth/bulk-register', upload.single('file'), async (req, res) => {
+app.post(['/api/auth/bulk-register', '/api/admin/bulk-register'], mwAuthenticateToken, mwAuthorizeRoles('admin', 'systemadmin'), upload.single('file'), async (req, res) => {
   let connection;
   try {
     if (!req.file) {
       return sendResponse(res, 400, 'No file uploaded.', 'ፋይል አልተላከም።');
     }
 
-    const registrationType = resolveRoleFromType(req.body.registration_type);
+    const registrationType = resolveRoleFromType(req.body.registration_type || req.body.role);
+    if (req.path === '/api/admin/bulk-register' && registrationType === 'student') {
+      return bulkUploadStudents(req, res);
+    }
     const replaceExisting = String(req.body.replace_existing || 'false').toLowerCase() === 'true';
     const rows = parseUploadRows(req.file.buffer, req.file.originalname);
 
@@ -1721,30 +3059,37 @@ app.post('/api/auth/bulk-register', upload.single('file'), async (req, res) => {
       const full_name = row.full_name || `${row.first_name || ''} ${row.last_name || ''}`.trim();
       const student_id = String(row.student_id || row.student_number || row.studentid || '').trim();
       const employee_id = String(row.employee_id || row.employee_number || row.employeeid || '').trim();
-      const email = String(row.email || row.user_name || row.username || '').trim();
+      const emailInput = String(row.email || row.user_name || row.username || '').trim();
       const department = resolveDepartmentValue(row);
       const resolvedDepartmentId = await resolveDepartmentId(department, connection);
       const section = row.section || '';
       const year = row.year || '';
-      const program_type = row.program_type || row.program || 'regular';
+      const program_type = row.program_type || row.program || (role === 'student' ? '' : 'regular');
       const department_name = row.department_name || '';
       const semester = row.semester || '';
       const phone_number = row.phone_number || '';
+      const genderInput = String(row.gender || row.sex || '').trim().toLowerCase();
+      const gender = normalizeGenderValue(genderInput || 'male');
       const academic_year = row.academic_year || '';
       const specialization = row.specialization || '';
       const learning_level = row.learning_level || '';
 
       // Determine identifier based on role
-      const loginIdentifier = role === 'student' ? student_id : email;
+      const loginIdentifier = role === 'student' ? student_id : (emailInput || employee_id);
 
       const rowErrors = [];
       if (!full_name) rowErrors.push('full_name is required');
       if (!loginIdentifier) rowErrors.push(role === 'student' ? 'student_id is required' : 'email is required');
       if (!resolvedDepartmentId) rowErrors.push('department is required');
+      if (!['male', 'm', 'female', 'f'].includes(genderInput)) rowErrors.push('gender must be male or female');
       if (role === 'student' && !student_id) rowErrors.push('student_id is required');
+      if (role === 'student' && !/^mau\d{7}$/i.test(student_id)) rowErrors.push('student_id must contain mau followed by 7 digits');
       if (role === 'student' && !section) rowErrors.push('section is required');
       if (role === 'student' && !year) rowErrors.push('year is required');
-      if (role !== 'student' && !employee_id) rowErrors.push('employee_id is required');
+      if (role === 'student' && !semester) rowErrors.push('semester is required');
+      if (role === 'student' && !program_type) rowErrors.push('program_type is required');
+      if (emailInput && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailInput)) rowErrors.push('a valid email is required');
+      if (role !== 'student' && !/^[A-Za-z0-9][A-Za-z0-9._-]{2,}$/.test(employee_id)) rowErrors.push('employee_id must contain at least 3 valid characters');
 
       if (rowErrors.length) {
         result.failed += 1;
@@ -1752,18 +3097,48 @@ app.post('/api/auth/bulk-register', upload.single('file'), async (req, res) => {
         continue;
       }
 
-      // Check for existing user based on role
-      let existingUserQuery, existingUserParams;
-      if (role === 'student') {
-        existingUserQuery = 'SELECT s.user_id AS id, u.role FROM students s INNER JOIN users u ON u.id = s.user_id WHERE s.student_id = ? LIMIT 1';
-        existingUserParams = [student_id];
-      } else {
-        existingUserQuery = 'SELECT id, role FROM users WHERE email = ? LIMIT 1';
-        existingUserParams = [email];
+      const profileTable = role === 'student' ? 'students' : role === 'lab_assistant' ? 'lab_assistants' : 'instructors';
+      const profileIdentityColumn = role === 'student' ? 'student_id' : 'employee_id';
+      const profileIdentity = role === 'student' ? student_id : employee_id;
+      const [[existingProfile]] = await connection.query(
+        `SELECT profile.user_id AS profile_user_id,
+          linked_user.id AS linked_user_id, linked_user.role AS linked_user_role,
+          linked_user.email AS linked_user_email
+         FROM ${profileTable} profile
+         LEFT JOIN users linked_user ON linked_user.id = profile.user_id
+         WHERE profile.${profileIdentityColumn} = ? LIMIT 1`,
+        [profileIdentity]
+      );
+      const email = String(emailInput || existingProfile?.linked_user_email || `${profileIdentity}@university.edu.et`).trim().toLowerCase();
+      const [[emailUser]] = await connection.query(
+        'SELECT id, email, role FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1',
+        [email]
+      );
+      if (existingProfile?.linked_user_id && emailUser && Number(existingProfile.linked_user_id) !== Number(emailUser.id)) {
+        result.failed += 1;
+        result.errors.push({ row: rowNumber, errors: ['The login email is already linked to a different user account.'] });
+        continue;
       }
-
-      const [existingUsers] = await connection.query(existingUserQuery, existingUserParams);
-      const existingUser = existingUsers[0];
+      const existingUser = existingProfile?.linked_user_id
+        ? { id: existingProfile.linked_user_id, role: existingProfile.linked_user_role, email: existingProfile.linked_user_email }
+        : emailUser;
+      if (existingUser && String(existingUser.role).toLowerCase() !== role) {
+        result.failed += 1;
+        result.errors.push({ row: rowNumber, errors: ['The login email is already assigned to a different role.'] });
+        continue;
+      }
+      if (existingUser && Number(existingProfile?.linked_user_id || 0) !== Number(existingUser.id)) {
+        const [[otherProfile]] = await connection.query(
+          `SELECT ${profileIdentityColumn} AS profile_identity
+           FROM ${profileTable} WHERE user_id = ? LIMIT 1`,
+          [existingUser.id]
+        );
+        if (otherProfile && String(otherProfile.profile_identity) !== String(profileIdentity)) {
+          result.failed += 1;
+          result.errors.push({ row: rowNumber, errors: ['The login account is already linked to a different role profile.'] });
+          continue;
+        }
+      }
 
       if (role === 'dept_head' && resolvedDepartmentId) {
         const [existingDeptHead] = await connection.query(
@@ -1777,45 +3152,39 @@ app.post('/api/auth/bulk-register', upload.single('file'), async (req, res) => {
         }
       }
 
-      if (existingUser) {
-        if (existingUser.role === 'dept_head' && role === 'dept_head' && replaceExisting) {
-          const password_hash = await bcrypt.hash(getDefaultPasswordForRole(role), 12);
-          const updateFields = { password_hash };
-          const updateClause = Object.keys(updateFields).map((key) => `${key} = ?`).join(', ');
-          const updateValues = Object.values(updateFields);
-          updateValues.push(existingUser.id);
-          await connection.query(`UPDATE users SET ${updateClause} WHERE id = ?`, updateValues);
-          result.updated += 1;
-          continue;
-        }
-
-        result.failed += 1;
-        result.errors.push({ row: rowNumber, errors: [role === 'student' ? 'student_id already exists' : 'email already exists'] });
-        continue;
-      }
-
-      const password_hash = await bcrypt.hash(getDefaultPasswordForRole(role), 12);
-      const userFields = {
-        email: role === 'student' ? null : (email || null),
-        password_hash,
-        role,
-      };
-
-      const [insertResult] = await connection.query(
-        `INSERT INTO users (email, password_hash, role, status, is_first_login)
-         VALUES (?, ?, ?, 'active', 1)`,
-        [userFields.email, userFields.password_hash, userFields.role]
-      );
-
       const nameParts = full_name.split(/\s+/).filter(Boolean);
       const firstName = row.first_name || nameParts.shift() || '';
       const lastName = row.last_name || nameParts.join(' ');
+      const genderValue = normalizeGenderValue(row.gender || row.sex || 'male');
+      let userId = existingUser?.id;
+      if (userId && existingUser.role === 'dept_head' && role === 'dept_head' && replaceExisting) {
+        const password_hash = await bcrypt.hash(row.password || getDefaultPasswordForRole(role), 12);
+        await connection.query(
+          'UPDATE users SET password_hash = ?, first_name = ?, last_name = ?, email = ?, status = \'active\', is_first_login = 1, must_change_password = 1, gender = ? WHERE id = ?',
+          [password_hash, firstName, lastName, email, genderValue, userId]
+        );
+      } else if (userId) {
+        await connection.query(
+          'UPDATE users SET first_name = ?, last_name = ?, email = ?, status = \'active\', gender = ? WHERE id = ?',
+          [firstName, lastName, email, genderValue, userId]
+        );
+      } else {
+        const password_hash = await bcrypt.hash(row.password || getDefaultPasswordForRole(role), 12);
+        const [insertResult] = await connection.query(
+          `INSERT INTO users (email, first_name, last_name, password_hash, role, status, is_first_login, must_change_password, gender)
+           VALUES (?, ?, ?, ?, ?, 'active', 1, 1, ?)`,
+          [email, firstName, lastName, password_hash, role, genderValue]
+        );
+        userId = insertResult.insertId;
+      }
 
       if (role === 'student') {
         await connection.query(
-          'INSERT INTO students (user_id, student_id, first_name, last_name, department_id, semester, year_level, section, program_type, phone_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          `INSERT INTO students (user_id, student_id, first_name, last_name, department_id, semester, year_level, section, program_type, gender, phone_number, registration_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_DATE)
+           ON DUPLICATE KEY UPDATE user_id = VALUES(user_id), first_name = VALUES(first_name), last_name = VALUES(last_name), department_id = VALUES(department_id), semester = VALUES(semester), year_level = VALUES(year_level), section = VALUES(section), program_type = VALUES(program_type), gender = VALUES(gender), phone_number = VALUES(phone_number)`,
           [
-            insertResult.insertId,
+            userId,
             student_id,
             firstName,
             lastName,
@@ -1824,27 +3193,40 @@ app.post('/api/auth/bulk-register', upload.single('file'), async (req, res) => {
             year || null,
             section || null,
             program_type || null,
+            gender || null,
             phone_number || null,
           ]
         );
+      } else if (role === 'lab_assistant') {
+        await connection.query(
+          `INSERT INTO lab_assistants (user_id, employee_id, first_name, last_name, email, department_id, gender, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+           ON DUPLICATE KEY UPDATE user_id = VALUES(user_id), first_name = VALUES(first_name), last_name = VALUES(last_name), email = VALUES(email), department_id = VALUES(department_id), gender = VALUES(gender), status = 'active'`,
+          [userId, employee_id, firstName, lastName, email, resolvedDepartmentId, genderValue]
+        );
       } else {
         await connection.query(
-          'INSERT INTO instructors (user_id, employee_id, first_name, last_name, department_id, phone_number) VALUES (?, ?, ?, ?, ?, ?)',
+          `INSERT INTO instructors (user_id, employee_id, first_name, last_name, department_id, gender, phone_number)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE user_id = VALUES(user_id), first_name = VALUES(first_name), last_name = VALUES(last_name), department_id = VALUES(department_id), gender = VALUES(gender), phone_number = VALUES(phone_number)`,
           [
-            insertResult.insertId,
+            userId,
             employee_id,
             firstName,
             lastName,
             resolvedDepartmentId,
+            genderValue || null,
             phone_number || null,
           ]
         );
       }
 
-      result.created += 1;
+      if (existingUser) result.updated += 1;
+      else result.created += 1;
       result.created_users.push({
-        id: insertResult.insertId,
-        ...userFields,
+        id: userId,
+        email,
+        role,
         full_name,
         first_name: firstName,
         last_name: lastName,
@@ -1857,6 +3239,21 @@ app.post('/api/auth/bulk-register', upload.single('file'), async (req, res) => {
         year,
         section,
         program_type,
+        gender,
+      });
+    }
+
+    if (result.failed > 0) {
+      await connection.rollback();
+      connection.release();
+      connection = null;
+      return res.status(400).json({
+        success: false,
+        message: 'Bulk registration was rolled back because one or more rows failed.',
+        created: 0,
+        updated: 0,
+        failed: result.failed,
+        errors: result.errors,
       });
     }
 
@@ -1882,118 +3279,49 @@ app.post('/api/auth/bulk-register', upload.single('file'), async (req, res) => {
   }
 });
 
-app.get('/api/auth/me', authenticate, async (req, res) => {
-  try {
-    if (!req.user?.id) {
-      console.error('Error in /api/auth/me: missing authenticated user in request');
-      return res.status(401).json({ message: 'User not found or unauthenticated' });
-    }
-
-    const [rows] = await pool.query(
-      `SELECT
-        u.id,
-        u.email,
-        u.role,
-        u.status,
-        u.is_first_login,
-        u.created_at,
-        COALESCE(i.first_name, s.first_name, '') AS first_name,
-        COALESCE(i.last_name, s.last_name, '') AS last_name,
-        CASE WHEN u.role = 'student' THEN s.gender ELSE i.gender END AS gender,
-        CASE WHEN u.role = 'student' THEN s.phone_number ELSE i.phone_number END AS phone_number,
-        CASE WHEN u.role = 'student' THEN s.profile_picture ELSE i.profile_picture END AS profile_picture,
-        CASE WHEN u.role = 'student' THEN s.department_id ELSE i.department_id END AS department_id,
-        d.name AS department_name,
-        c.name AS college_name,
-        s.student_id AS student_id
-      FROM users u
-      LEFT JOIN instructors i ON u.id = i.user_id
-      LEFT JOIN students s ON u.id = s.user_id
-      LEFT JOIN departments d ON d.id = COALESCE(i.department_id, s.department_id)
-      LEFT JOIN colleges c ON c.id = d.college_id
-      WHERE u.id = ? LIMIT 1`,
-      [req.user.id]
-    );
-
-    if (!rows.length) {
-      console.error(`Error in /api/auth/me: user not found for id=${req.user.id}`);
-      return res.status(401).json({ message: 'User not found or unauthenticated' });
-    }
-
-    const user = rows[0];
-    const displayIdentifier = user.email || user.student_id || `user-${user.id}`;
-    return res.status(200).json({
-      success: true,
-      message: { en: 'User profile loaded.', am: 'የተጠቃሚ መገለጫ ተጭኗል።' },
-      data: {
-        id: user.id,
-        username: displayIdentifier,
-        email: user.email,
-        role: user.role,
-        status: user.status,
-        isFirstLogin: Boolean(user.is_first_login),
-        gender: user.gender,
-        created_at: user.created_at,
-        department_id: user.department_id,
-        department_name: user.department_name,
-        college_name: user.college_name,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        student_id: user.student_id,
-        phone_number: user.phone_number,
-        profile_picture: user.profile_picture,
-      },
-    });
-  } catch (error) {
-    console.error('Error in /api/auth/me:', error);
-    return res.status(500).json({ message: 'Unable to load profile.' });
-  }
-});
+app.get('/api/auth/me', authenticate, me);
 
 app.post('/api/auth/register-instructor', authenticate, authorizeRoles('admin', 'systemadmin'), async (req, res) => {
-  const {
-    first_name,
-    last_name,
-    department_id,
-    department,
-    department_name,
-    email,
-    username,
-    employee_id,
-    gender,
-    password,
-    full_name,
-    name,
-  } = req.body;
+  const body = req.body || {};
   const role = 'instructor';
+  const firstName = String(body.firstName ?? body.first_name ?? body.full_name?.split(/\s+/)[0] ?? body.name?.split(/\s+/)[0] ?? '').trim();
+  const lastName = String(body.lastName ?? body.last_name ?? body.full_name?.split(/\s+/).slice(1).join(' ') ?? body.name?.split(/\s+/).slice(1).join(' ') ?? '').trim();
+  const email = String(body.email ?? body.username ?? '').trim();
+  const employeeId = String(body.employeeId ?? body.employee_id ?? '').trim();
+  const departmentIdValue = body.departmentId ?? body.department_id ?? body.department ?? body.departmentName ?? body.department_name ?? '';
+  const departmentId = departmentIdValue === null || departmentIdValue === undefined || departmentIdValue === '' ? null : departmentIdValue;
+  const gender = normalizeGenderValue(body.gender);
+  const password = typeof body.password === 'string' ? body.password.trim() : '';
 
-  // Use email if provided, otherwise fall back to username
-  const staffEmail = email || username;
+  const validationErrors = validateRegistrationPayload({
+    first_name: firstName,
+    last_name: lastName,
+    role,
+    employee_id: employeeId,
+    email,
+    gender,
+  });
 
-  const nameToSplit = String(full_name || name || '').trim();
-  if ((!first_name || !last_name) && nameToSplit) {
-    const [firstName, ...lastNameParts] = nameToSplit.split(/\s+/).filter(Boolean);
-    first_name = first_name || firstName || '';
-    last_name = last_name || lastNameParts.join(' ') || '';
+  if (Object.keys(validationErrors).length) {
+    return res.status(400).json({
+      success: false,
+      message: Object.values(validationErrors).join(', '),
+      errors: Object.entries(validationErrors).map(([field, msg]) => ({ field, msg })),
+    });
   }
 
-  if (!staffEmail || !staffEmail.trim() || !first_name || !String(first_name).trim() || !last_name || !String(last_name).trim()) {
+  const normalizedEmail = String(email).trim();
+  if (!normalizedEmail || !firstName || !lastName) {
     return sendResponse(res, 400, 'Missing required fields (email, first_name, last_name).', 'የሚጠየቁ መረጃዎች አሉ።');
   }
 
-  const normalizedEmail = String(staffEmail).trim();
-  first_name = String(first_name).trim();
-  last_name = String(last_name).trim();
-
-  const resolvedDepartmentId = await resolveDepartmentId(department_id ?? department ?? department_name);
+  const resolvedDepartmentId = await resolveDepartmentId(departmentId);
   if (!resolvedDepartmentId) {
     return res.status(400).json({
+      success: false,
       message: 'Please select a valid department before registering.',
+      errors: [{ field: 'departmentId', msg: 'Please select a valid department before registering.' }],
     });
-  }
-
-  if (department_id || department || department_name) {
-    console.debug('Instructor registration department resolution:', { department_id, department, department_name, resolvedDepartmentId });
   }
 
   const conn = await pool.getConnection();
@@ -2006,18 +3334,17 @@ app.post('/api/auth/register-instructor', authenticate, authorizeRoles('admin', 
       return sendResponse(res, 409, 'Email already exists.', 'ኢሜል አስቀድሞ አለ።');
     }
 
-    const passwordValue = typeof password === 'string' && password.trim() ? password.trim() : getDefaultPasswordForRole(role);
-    const hashed = await bcrypt.hash(String(passwordValue), 12);
+    const hashed = await bcrypt.hash(getDefaultPasswordForRole(role), 12);
 
     const [userResult] = await conn.query(
-      'INSERT INTO users (email, password_hash, role, status, is_first_login) VALUES (?, ?, ?, ?, ?)',
+      'INSERT INTO users (email, password_hash, role, status, is_first_login, must_change_password) VALUES (?, ?, ?, ?, ?, 1)',
       [normalizedEmail, hashed, role, 'active', 1]
     );
     const userId = userResult.insertId;
 
     await conn.query(
       'INSERT INTO instructors (user_id, employee_id, first_name, last_name, department_id, gender) VALUES (?, ?, ?, ?, ?, ?)',
-      [userId, employee_id || null, first_name, last_name, resolvedDepartmentId || null, gender || null]
+      [userId, employeeId || null, firstName, lastName, resolvedDepartmentId || null, gender || null]
     );
 
     await conn.commit();
@@ -2034,8 +3361,88 @@ app.post('/api/auth/register-instructor', authenticate, authorizeRoles('admin', 
   }
 });
 
+app.post('/api/auth/register-lab-assistant', authenticate, authorizeRoles('admin', 'systemadmin'), async (req, res) => {
+  const body = req.body || {};
+  const role = 'lab_assistant';
+  const firstName = String(body.firstName ?? body.first_name ?? body.full_name?.split(/\s+/)[0] ?? body.name?.split(/\s+/)[0] ?? '').trim();
+  const lastName = String(body.lastName ?? body.last_name ?? body.full_name?.split(/\s+/).slice(1).join(' ') ?? body.name?.split(/\s+/).slice(1).join(' ') ?? '').trim();
+  const email = String(body.email ?? body.username ?? '').trim();
+  const employeeId = String(body.employeeId ?? body.employee_id ?? '').trim();
+  const departmentIdValue = body.departmentId ?? body.department_id ?? body.department ?? body.departmentName ?? body.department_name ?? '';
+  const departmentId = departmentIdValue === null || departmentIdValue === undefined || departmentIdValue === '' ? null : departmentIdValue;
+  const gender = normalizeGenderValue(body.gender);
+  const password = typeof body.password === 'string' ? body.password.trim() : '';
+
+  const validationErrors = validateRegistrationPayload({
+    first_name: firstName,
+    last_name: lastName,
+    role,
+    employee_id: employeeId,
+    email,
+    gender,
+  });
+
+  if (Object.keys(validationErrors).length) {
+    return res.status(400).json({
+      success: false,
+      message: Object.values(validationErrors).join(', '),
+      errors: Object.entries(validationErrors).map(([field, msg]) => ({ field, msg })),
+    });
+  }
+
+  const normalizedEmail = String(email).trim();
+  if (!normalizedEmail || !firstName || !lastName) {
+    return sendResponse(res, 400, 'Missing required fields (email, first_name, last_name).', 'የሚጠየቁ መረጃዎች አሉ።');
+  }
+
+  const resolvedDepartmentId = await resolveDepartmentId(departmentId);
+  if (!resolvedDepartmentId) {
+    return res.status(400).json({
+      success: false,
+      message: 'Please select a valid department before registering.',
+      errors: [{ field: 'departmentId', msg: 'Please select a valid department before registering.' }],
+    });
+  }
+
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    const [exists] = await conn.query('SELECT id FROM users WHERE email = ? LIMIT 1', [normalizedEmail]);
+    if (exists.length) {
+      await conn.rollback();
+      return sendResponse(res, 409, 'Email already exists.', 'ኢሜል አስቀድሞ አለ።');
+    }
+
+    const hashed = await bcrypt.hash(getDefaultPasswordForRole(role), 12);
+
+    const [userResult] = await conn.query(
+      'INSERT INTO users (email, password_hash, role, status, is_first_login, must_change_password) VALUES (?, ?, ?, ?, ?, 1)',
+      [normalizedEmail, hashed, role, 'active', 1]
+    );
+    const userId = userResult.insertId;
+
+    await conn.query(
+      'INSERT INTO lab_assistants (user_id, employee_id, first_name, last_name, email, department_id, gender, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [userId, employeeId || null, firstName, lastName, normalizedEmail, resolvedDepartmentId || null, gender || null, 'active']
+    );
+
+    await conn.commit();
+    return sendResponse(res, 201, 'Lab assistant registered successfully.', 'ላብ አስተዳዳሪ በተሳካ ሁኔታ ተመዝግቧል።', { id: userId });
+  } catch (error) {
+    console.error('Register lab assistant failed:', error);
+    try { await conn.rollback(); } catch (e) {}
+    return res.status(500).json({
+      message: 'Registration failed due to database error.',
+      error: error.sqlMessage || error.message,
+    });
+  } finally {
+    conn.release();
+  }
+});
+
 // Register a student (creates user + student record) using a transaction (admin only)
-app.post('/api/auth/register-student', mwAuthenticateToken, mwAuthorizeRoles('admin'), async (req, res) => {
+app.post('/api/auth/register-student', mwAuthenticateToken, mwAuthorizeRoles('admin', 'systemadmin'), async (req, res) => {
   const {
     first_name,
     last_name,
@@ -2050,7 +3457,20 @@ app.post('/api/auth/register-student', mwAuthenticateToken, mwAuthorizeRoles('ad
     section,
     program_type,
     password,
+    email,
   } = req.body;
+
+  const validationErrors = validateRegistrationPayload({
+    first_name,
+    last_name,
+    role: 'student',
+    student_id,
+    email,
+  });
+
+  if (Object.keys(validationErrors).length) {
+    return res.status(400).json({ success: false, message: 'Validation error', errors: validationErrors });
+  }
 
   if (!student_id || !first_name || !last_name) {
     return sendResponse(res, 400, 'Missing required fields (student_id, first_name, last_name).', 'የሚጠየቁ መረጃዎች አሉ።');
@@ -2077,17 +3497,16 @@ app.post('/api/auth/register-student', mwAuthenticateToken, mwAuthorizeRoles('ad
       return sendResponse(res, 400, 'Student ID already exists.', 'ተማሪ ቁጥር አስቀድሞ አለ።');
     }
 
-    const passwordValue = typeof password === 'string' && password.trim() ? password.trim() : getDefaultPasswordForRole('student');
-    const hashedPassword = await bcrypt.hash(String(passwordValue), 12);
+    const hashedPassword = await bcrypt.hash(getDefaultPasswordForRole('student'), 12);
 
     const [userResult] = await conn.query(
-      'INSERT INTO users (email, password_hash, role, status, is_first_login) VALUES (?, ?, ?, ?, ?)',
+      'INSERT INTO users (email, password_hash, role, status, is_first_login, must_change_password) VALUES (?, ?, ?, ?, ?, 1)',
       [null, hashedPassword, 'student', 'active', 1]
     );
     const newUserId = userResult.insertId;
 
     await conn.query(
-      'INSERT INTO students (user_id, student_id, first_name, last_name, department_id, semester, year_level, section, program_type, gender) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO students (user_id, student_id, first_name, last_name, department_id, semester, year_level, section, program_type, gender, registration_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_DATE)',
       [
         newUserId,
         student_id || null,
@@ -2151,32 +3570,137 @@ const getDepartmentInstructors = async (req, res) => {
     }
 
     const [rows] = await pool.query(
-      `SELECT i.id AS instructor_id,
-        u.id AS user_id,
-        CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, '')) AS full_name,
-        u.email, u.status, u.role,
-        i.department_id,
-        d.name AS department_name,
-        c.name AS college_name
-       FROM users u
-      INNER JOIN instructors i ON i.user_id = u.id
-      LEFT JOIN departments d ON d.id = i.department_id
-      LEFT JOIN colleges c ON c.id = d.college_id
-      WHERE i.department_id = ?
-         AND LOWER(COALESCE(u.status, 'active')) = 'active'
-         AND LOWER(u.role) IN ('instructor', 'dept_head', 'college_dean')
-       ORDER BY i.first_name ASC`,
-      [departmentId]
+      `SELECT * FROM (
+        SELECT
+          i.id AS staff_id,
+          i.id AS instructor_id,
+          u.id AS user_id,
+          CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, '')) AS full_name,
+          u.email,
+          LOWER(COALESCE(u.role, 'instructor')) AS role,
+          i.department_id,
+          d.name AS department_name,
+          c.name AS college_name
+        FROM users u
+        INNER JOIN instructors i ON i.user_id = u.id
+        LEFT JOIN departments d ON d.id = i.department_id
+        LEFT JOIN colleges c ON c.id = d.college_id
+        WHERE i.department_id = ?
+          AND LOWER(COALESCE(u.status, 'active')) = 'active'
+          AND LOWER(COALESCE(u.role, 'instructor')) IN ('instructor', 'lab_assistant', 'dept_head', 'department_head', 'college_dean', 'dean', 'academic_director', 'director')
+
+        UNION ALL
+
+        SELECT
+          la.id AS staff_id,
+          NULL AS instructor_id,
+          la.user_id AS user_id,
+          CONCAT(COALESCE(la.first_name, ''), ' ', COALESCE(la.last_name, '')) AS full_name,
+          la.email,
+          'lab_assistant' AS role,
+          la.department_id,
+          d.name AS department_name,
+          c.name AS college_name
+        FROM lab_assistants la
+        LEFT JOIN departments d ON d.id = la.department_id
+        LEFT JOIN colleges c ON c.id = d.college_id
+        LEFT JOIN users u ON u.id = la.user_id
+        WHERE la.department_id = ?
+          AND LOWER(COALESCE(u.status, 'active')) = 'active'
+          AND LOWER(COALESCE(u.role, 'lab_assistant')) = 'lab_assistant'
+      ) staff
+      ORDER BY full_name ASC`,
+      [departmentId, departmentId]
     );
-    return res.json(rows);
+
+    return res.json(rows.map((row) => ({
+      ...row,
+      id: row.staff_id ?? row.instructor_id ?? row.user_id,
+      role: String(row.role || 'instructor').toLowerCase().replace(/^department_head$/, 'dept_head').replace(/^dean$/, 'college_dean'),
+      staff_id: row.staff_id ?? row.instructor_id ?? row.user_id,
+      instructor_id: row.instructor_id ?? row.staff_id ?? row.user_id,
+      name: row.full_name || row.name || row.email || 'Unknown staff',
+    })));
   } catch (error) {
     console.error('Department instructors query failed:', error);
     return res.status(500).json({ message: 'Unable to load department instructors.', error: error.message });
   }
 };
 
+const getDepartmentStaff = async (req, res) => {
+  try {
+    const departmentId = Number(req.query.department_id ?? req.query.department ?? req.user?.department_id ?? req.user?.department ?? 0);
+    if (!Number.isInteger(departmentId) || departmentId <= 0) {
+      return res.status(400).json({ message: 'A valid department ID is required.' });
+    }
+
+    const [[currentDepartment]] = await pool.query(
+      'SELECT college_id FROM departments WHERE id = ? LIMIT 1',
+      [departmentId]
+    );
+    const collegeId = Number(currentDepartment?.college_id || 0);
+
+    const [rows] = await pool.query(
+      `SELECT * FROM (
+        SELECT
+          i.user_id AS id,
+          CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, '')) AS name,
+          u.email,
+          LOWER(COALESCE(u.role, 'instructor')) AS role
+        FROM instructors i
+        JOIN users u ON u.id = i.user_id
+        WHERE i.department_id = ?
+          AND LOWER(COALESCE(u.status, 'active')) = 'active'
+          AND LOWER(COALESCE(u.role, 'instructor')) IN ('instructor', 'dept_head', 'department_head', 'college_dean', 'dean', 'academic_director', 'director')
+
+        UNION ALL
+
+        SELECT
+          la.user_id AS id,
+          CONCAT(COALESCE(la.first_name, ''), ' ', COALESCE(la.last_name, '')) AS name,
+          la.email,
+          'lab_assistant' AS role
+        FROM lab_assistants la
+        JOIN users u ON u.id = la.user_id
+        WHERE la.department_id = ?
+          AND LOWER(COALESCE(u.status, 'active')) = 'active'
+          AND LOWER(COALESCE(u.role, 'lab_assistant')) = 'lab_assistant'
+
+        UNION ALL
+
+        SELECT
+          u.id AS id,
+          CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, '')) AS name,
+          u.email,
+          LOWER(COALESCE(u.role, 'instructor')) AS role
+        FROM users u
+        LEFT JOIN instructors i ON i.user_id = u.id
+        LEFT JOIN lab_assistants la ON la.user_id = u.id
+        LEFT JOIN departments d ON d.id = COALESCE(i.department_id, la.department_id)
+        WHERE LOWER(COALESCE(u.status, 'active')) = 'active'
+          AND LOWER(COALESCE(u.role, 'instructor')) IN ('college_dean', 'dean')
+          AND (? > 0)
+          AND d.college_id = ?
+      ) staff
+      ORDER BY name ASC`,
+      [departmentId, departmentId, departmentId, collegeId]
+    );
+
+    return res.json(Array.from(new Map(rows.map((row) => [String(row.id), {
+      id: Number(row.id),
+      name: row.name || row.email || 'Unknown staff',
+      email: row.email || '',
+      role: String(row.role || 'instructor').toLowerCase().replace(/^department_head$/, 'dept_head').replace(/^dean$/, 'college_dean'),
+    }])).values()));
+  } catch (error) {
+    console.error('Department staff query failed:', error);
+    return res.status(500).json({ message: 'Unable to load department staff.', error: error.message });
+  }
+};
+
 app.get('/api/courses/department-instructors/:deptId', authenticate, authorizeRoles('admin', 'dept_head', 'college_dean'), getDepartmentInstructors);
 app.get('/api/instructors/department/:deptId', authenticate, authorizeRoles('admin', 'dept_head', 'college_dean'), getDepartmentInstructors);
+app.get('/api/dept-head/department-staff', authenticate, authorizeRoles('admin', 'dept_head', 'college_dean'), getDepartmentStaff);
 
 app.get('/api/courses/filter', authenticate, authorizeRoles('admin', 'dept_head', 'college_dean'), async (req, res) => {
   try {
@@ -2197,13 +3721,14 @@ app.get('/api/courses/filter', authenticate, authorizeRoles('admin', 'dept_head'
 
 const getCoursesByFilters = async (req, res) => {
   try {
-    const departmentId = Number(req.query.deptId);
+    const departmentId = Number(req.query.department_id ?? req.query.deptId);
     const requestedYear = String(req.query.year_level || req.query.year || '').trim();
     const requestedSemester = String(req.query.semester || '').trim();
     const yearNum = requestedYear.match(/\d+/)?.[0] || requestedYear;
     const dbYear = /^year\s+\d+$/i.test(requestedYear) ? requestedYear : `Year ${yearNum}`;
     const semesterValue = requestedSemester.replace(/^semester\s+/i, '').trim();
-    const semesterRoman = { 1: 'I', 2: 'II', 3: 'III', 4: 'IV' }[semesterValue] || semesterValue;
+    const numericSemester = semesterValue.match(/^(\d+)(?:st|nd|rd|th)?$/i)?.[1] || semesterValue;
+    const semesterRoman = { 1: 'I', 2: 'II', 3: 'III', 4: 'IV' }[numericSemester] || numericSemester;
     const dbSemester = `Semester ${semesterRoman}`;
     if (!departmentId || !requestedYear || !requestedSemester) return res.status(400).json({ message: 'deptId, year, and semester are required.' });
     const [rows] = await pool.query(
@@ -2211,9 +3736,9 @@ const getCoursesByFilters = async (req, res) => {
        FROM courses
        WHERE department_id = ?
          AND (year_level = ? OR year_level LIKE ?)
-         AND (semester = ? OR semester LIKE ?)
+         AND semester = ?
        ORDER BY code ASC`,
-      [departmentId, dbYear, `%${dbYear}%`, dbSemester, `%${dbSemester}%`]
+      [departmentId, dbYear, `%${dbYear}%`, dbSemester]
     );
     return res.json(rows);
   } catch (error) {
@@ -2242,22 +3767,69 @@ app.post('/api/auth/courses', async (req, res) => {
 app.get('/api/course-assignments', authenticate, async (req, res) => {
   try {
     const params = [];
+    const isDepartmentHead = ['dept_head', 'department_head'].includes(String(req.user?.role || '').toLowerCase());
+    const departmentId = Number(req.user?.department_id ?? req.user?.departmentId ?? req.user?.department ?? 0);
+    const requestedDepartmentId = req.query.department_id == null ? null : Number(req.query.department_id);
     let query = `SELECT ca.id, ca.course_id, c.code AS course_code, c.name AS course_name, ca.department_id, ca.instructor_id, ca.student_id, ca.program_type, ca.year_level, ca.semester, ca.section, ca.publish_target, ca.is_published, ca.is_student_published, ca.is_peer_published, ca.academic_year, ca.status, ca.created_at,
-      CONCAT(COALESCE(i_instructor.first_name, ''), ' ', COALESCE(i_instructor.last_name, '')) AS instructor_name,
-      CONCAT(COALESCE(s_student.first_name, ''), ' ', COALESCE(s_student.last_name, '')) AS student_name
+      ca.staff_id, ca.assigned_role,
+      NULLIF(TRIM(CONCAT(COALESCE(i_instructor.first_name, lab_assistant.first_name, ''), ' ', COALESCE(i_instructor.last_name, lab_assistant.last_name, ''))), '') AS instructor_name,
+      NULLIF(TRIM(CONCAT(COALESCE(i_instructor.first_name, lab_assistant.first_name, ''), ' ', COALESCE(i_instructor.last_name, lab_assistant.last_name, ''))), '') AS staff_name,
+      CASE
+        WHEN ca.instructor_id IS NULL AND ca.staff_id IS NULL AND ca.lab_assistant_id IS NULL THEN 'unassigned'
+        WHEN lab_assistant.id IS NOT NULL OR LOWER(COALESCE(ca.assigned_role, '')) = 'lab_assistant' THEN 'lab_assistant'
+        ELSE 'instructor'
+      END AS staff_role,
+      ca.id AS assignment_id,
+      COALESCE(NULLIF(staff_user.email, ''), NULLIF(i_user.email, '')) AS instructor_email,
+      CASE WHEN ca.instructor_id IS NULL AND ca.staff_id IS NULL THEN 'unassigned' ELSE COALESCE(NULLIF(LOWER(TRIM(ca.status)), ''), 'assigned') END AS normalized_status,
+      COALESCE(NULLIF(TRIM(CONCAT(s_student.first_name, ' ', s_student.last_name)), ''), s_user.email, '') AS student_name
       FROM course_assignments ca
       LEFT JOIN courses c ON ca.course_id = c.id
-      LEFT JOIN instructors i_instructor ON ca.instructor_id = i_instructor.id
-      LEFT JOIN students s_student ON ca.student_id = s_student.id`;
+      LEFT JOIN users u ON ca.instructor_id = u.id
+      LEFT JOIN instructors i_instructor ON i_instructor.id = COALESCE(ca.instructor_id, CASE WHEN LOWER(COALESCE(ca.assigned_role, 'instructor')) <> 'lab_assistant' THEN ca.staff_id END)
+      LEFT JOIN users i_user ON i_user.id = i_instructor.user_id
+      LEFT JOIN lab_assistants lab_assistant ON lab_assistant.id = COALESCE(ca.lab_assistant_id, CASE WHEN LOWER(COALESCE(ca.assigned_role, '')) = 'lab_assistant' THEN ca.staff_id END)
+      LEFT JOIN users staff_user ON staff_user.id = COALESCE(i_instructor.user_id, lab_assistant.user_id, u.id, ca.instructor_id, ca.staff_id)
+      LEFT JOIN students s_student ON ca.student_id = s_student.id
+      LEFT JOIN users s_user ON s_user.id = s_student.user_id`;
 
-    if (req.user && req.user.role === 'dept_head') {
+    if (isDepartmentHead) {
+      if (!Number.isInteger(departmentId) || departmentId <= 0) {
+        return sendResponse(res, 403, 'Your department is not defined.', 'የክፍል መረጃዎ አልተገለጸም።');
+      }
+      if (requestedDepartmentId !== null && requestedDepartmentId !== departmentId) {
+        return sendResponse(res, 403, 'You can only view assignments in your department.', 'የእርስዎን ክፍል ስራዎች ብቻ ማየት ይችላሉ።');
+      }
       query += ' WHERE ca.department_id = ?';
-      params.push(req.user.department_id || null);
+      params.push(departmentId);
+    } else if (requestedDepartmentId !== null) {
+      if (!Number.isInteger(requestedDepartmentId) || requestedDepartmentId <= 0) {
+        return sendResponse(res, 400, 'A valid department_id is required.', 'ትክክለኛ department_id ያስፈልጋል።');
+      }
+      query += ' WHERE ca.department_id = ?';
+      params.push(requestedDepartmentId);
     }
+
+    const statusScope = isDepartmentHead ? ' AND department_id = ?' : '';
+    const statusParams = isDepartmentHead ? [departmentId] : [];
+    await pool.query(
+      `UPDATE course_assignments SET status = 'unassigned'
+       WHERE instructor_id IS NULL AND staff_id IS NULL
+         AND LOWER(COALESCE(status, '')) <> 'unassigned'${statusScope}`,
+      statusParams
+    );
 
     query += ' ORDER BY ca.created_at DESC';
     const [rows] = await pool.query(query, params);
-    return sendResponse(res, 200, 'Course assignments retrieved.', 'የኮርስ ስራዎች ተመልሰዋል።', rows);
+    return sendResponse(res, 200, 'Course assignments retrieved.', 'የኮርስ ስራዎች ተመልሰዋል።', rows.map((row) => ({
+      ...row,
+      course_code: row.course_code || '',
+      course_name: row.course_name || 'Unknown Course',
+      instructor_name: row.instructor_name || null,
+      section: row.section || '',
+      semester: row.semester || '',
+      status: row.normalized_status === 'unassigned' ? 'unassigned' : (row.status || 'Assigned'),
+    })));
   } catch (error) {
     console.error('Course assignments fetch error:', error?.message || error);
     return sendResponse(res, 200, 'Course assignments unavailable; returning empty list.', 'ስራዎች አልተገኙም; ባዶ ዝርዝር ተመልሷል።', []);
@@ -2349,24 +3921,169 @@ app.post('/api/assignments/assign', authenticate, authorizeRoles('dept_head', 'a
   }
 });
 
-app.get('/api/evaluations/publish-assignments', authenticate, authorizeRoles('dept_head', 'admin'), async (req, res) => {
+const canManagePublishedDepartment = async (req, departmentId) => {
+  const role = String(req.user?.role || '').toLowerCase();
+  if (role === 'admin' || role === 'academic_directorate' || role === 'academic_director' || role === 'directorate') return true;
+  if (role === 'dept_head') {
+    const claimedDepartmentId = Number(req.user?.department_id || req.user?.department || 0);
+    if (claimedDepartmentId === departmentId) return true;
+    const [[profile]] = await pool.query(
+      `SELECT i.department_id
+       FROM instructors i
+       INNER JOIN users u ON u.id = i.user_id
+       WHERE i.user_id = ? AND LOWER(u.role) IN ('dept_head', 'department_head')
+       LIMIT 1`,
+      [req.user.id]
+    );
+    return Number(profile?.department_id || 0) === departmentId;
+  }
+  if (role === 'college_dean' || role === 'dean') {
+    const [[scope]] = await pool.query(
+      `SELECT 1 FROM instructors i
+       INNER JOIN departments d ON d.id = i.department_id
+       WHERE i.user_id = ? AND d.college_id = (SELECT college_id FROM departments WHERE id = ? LIMIT 1)
+       LIMIT 1`,
+      [req.user.id, departmentId]
+    );
+    return Boolean(scope);
+  }
+  return false;
+};
+
+const isPeerPublicationActive = async (departmentId, academicYear, semester) => {
+  const [[publication]] = await pool.query(
+    `SELECT id
+     FROM peer_evaluation_publications
+     WHERE department_id = ? AND academic_year = ? AND semester = ? AND status = 'published'
+     LIMIT 1`,
+    [departmentId, academicYear, semester]
+  );
+  if (publication?.id) return true;
+
+  const [[activeForm]] = await pool.query(
+    `SELECT id
+     FROM evaluation_forms
+     WHERE department_id = ?
+       AND academic_year = ?
+       AND semester = ?
+       AND LOWER(COALESCE(form_type, '')) IN ('peer', 'peer_evaluation')
+       AND is_published = 1
+       AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+     LIMIT 1`,
+    [departmentId, academicYear, semester]
+  );
+  return Boolean(activeForm?.id);
+};
+
+app.get(['/api/evaluations/publish-assignments', '/api/dept-head/publish-list'], authenticate, authorizeRoles('dept_head', 'college_dean', 'dean', 'academic_directorate', 'academic_director', 'directorate', 'admin'), async (req, res) => {
   try {
     const departmentId = await resolveDepartmentId(req.query.department || req.user.department_id || req.user.department);
+    const requestedStaffType = String(req.query.staff_type || 'all').trim().toLowerCase();
+    const staffType = ['instructor', 'lab_assistant'].includes(requestedStaffType) ? requestedStaffType : 'all';
     if (!departmentId) return res.status(404).json({ message: 'Department was not found.' });
-    const [rows] = await pool.query(
+    if (!await canManagePublishedDepartment(req, departmentId)) return res.status(403).json({ message: 'You cannot manage evaluation publishing for this department.' });
+
+    const [courseRows] = await pool.query(
       `SELECT ca.id, ca.course_id, ca.instructor_id, ca.program_type, ca.year_level, ca.semester, ca.section,
-        ca.is_student_published, ca.is_peer_published, c.code AS course_code, c.name AS course_name,
-        TRIM(CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, ''))) AS instructor_name
+        ca.staff_id, ca.assigned_role, ca.is_student_published, ca.is_peer_published,
+        c.code AS course_code, c.name AS course_name,
+        NULLIF(TRIM(CONCAT(COALESCE(i.first_name, la.first_name, ''), ' ', COALESCE(i.last_name, la.last_name, ''))), '') AS instructor_name,
+        COALESCE(i.user_id, la.user_id, u.id) AS target_user_id,
+        CASE WHEN LOWER(COALESCE(ca.assigned_role, 'instructor')) = 'lab_assistant' THEN 'lab_assistant' ELSE 'instructor' END AS target_type,
+        CASE WHEN LOWER(COALESCE(ca.assigned_role, 'instructor')) = 'lab_assistant' THEN 'lab_assistant' ELSE 'instructor' END AS publish_role
        FROM course_assignments ca
        INNER JOIN courses c ON c.id = ca.course_id
-       INNER JOIN instructors i ON i.id = ca.instructor_id
-       WHERE ca.department_id = ? ORDER BY ca.created_at DESC`,
-      [departmentId]
+       LEFT JOIN users u ON ca.instructor_id = u.id
+       LEFT JOIN instructors i ON i.id = ca.instructor_id
+       LEFT JOIN lab_assistants la ON LOWER(COALESCE(ca.assigned_role, 'instructor')) = 'lab_assistant' AND la.id = ca.staff_id
+       LEFT JOIN users staff_user ON staff_user.id = COALESCE(i.user_id, la.user_id)
+       WHERE ca.department_id = ?
+         AND (? = 'all' OR CASE WHEN LOWER(COALESCE(ca.assigned_role, 'instructor')) = 'lab_assistant' THEN 'lab_assistant' ELSE 'instructor' END = ?)
+       ORDER BY ca.created_at DESC`,
+      [departmentId, staffType, staffType]
     );
+
+    const rows = [
+      ...courseRows.map((row) => ({
+        ...row,
+        type: row.target_type === 'lab_assistant' ? 'Lab Assistant' : 'Course / Instructor',
+        target_role: row.target_type,
+      })),
+    ];
+
     return res.json(rows);
   } catch (error) {
     console.error('Publish assignments query failed:', error);
-    return res.status(500).json({ message: 'Unable to load course assignments.' });
+    return res.status(500).json({ message: 'Unable to load evaluation assignments.' });
+  }
+});
+
+const getDeptHeadPublishableEvaluations = async (departmentId) => {
+  const [courseRows] = await pool.query(
+    `SELECT ca.id, ca.course_id, ca.instructor_id, ca.program_type, ca.year_level, ca.semester, ca.section,
+      ca.is_student_published, ca.is_peer_published, c.code AS course_code, c.name AS course_name,
+      TRIM(CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, ''))) AS instructor_name,
+      'course' AS target_type, 'instructor' AS publish_role
+     FROM course_assignments ca
+     INNER JOIN courses c ON c.id = ca.course_id
+     INNER JOIN instructors i ON i.id = ca.instructor_id
+     WHERE ca.department_id = ? ORDER BY ca.created_at DESC`,
+    [departmentId]
+  );
+
+  const [labRows] = await pool.query(
+    `SELECT la.id,
+      NULL AS course_id,
+      NULL AS instructor_id,
+      NULL AS program_type,
+      NULL AS year_level,
+      NULL AS semester,
+      NULL AS section,
+      COALESCE(MAX(IF(ed.status = 'published', 1, 0)), 0) AS is_student_published,
+      0 AS is_peer_published,
+      'LAB' AS course_code,
+      'Course: Department Lab / Practical Work' AS course_name,
+      CONCAT(COALESCE(la.first_name, ''), ' ', COALESCE(la.last_name, '')) AS instructor_name,
+      'lab_assistant' AS target_type,
+      'lab_assistant' AS publish_role,
+      la.user_id AS target_user_id,
+      la.first_name AS target_first_name,
+      la.last_name AS target_last_name,
+      la.employee_id AS target_employee_id
+     FROM lab_assistants la
+     INNER JOIN users u ON u.id = la.user_id
+     LEFT JOIN evaluation_dispatches ed ON ed.target_user_id = la.id AND ed.department_id = ? AND ed.evaluation_type = 'student' AND ed.status = 'published'
+     WHERE la.department_id = ?
+       AND LOWER(COALESCE(u.status, 'active')) = 'active'
+     GROUP BY la.id
+     ORDER BY la.first_name ASC, la.last_name ASC`,
+    [departmentId, departmentId]
+  );
+
+  return [
+    ...courseRows.map((row) => ({ ...row, type: 'Course / Instructor' })),
+    ...labRows.map((row) => ({
+      ...row,
+      id: `lab-assistant-${row.id}`,
+      course_code: 'LAB',
+      course_name: 'Course: Department Lab / Practical Work',
+      instructor_name: `Instructor/Staff: ${String(row.instructor_name || '').trim() || 'Lab Assistant'}`,
+      type: 'Lab Assistant',
+      target_role: 'lab_assistant',
+    })),
+  ];
+};
+
+app.get('/api/dept-head/publishable-evaluations', authenticate, authorizeRoles('dept_head', 'college_dean', 'dean', 'academic_directorate', 'academic_director', 'directorate', 'admin'), async (req, res) => {
+  try {
+    const departmentId = await resolveDepartmentId(req.query.department || req.user.department_id || req.user.department);
+    if (!departmentId) return res.status(404).json({ message: 'Department was not found.' });
+    if (!await canManagePublishedDepartment(req, departmentId)) return res.status(403).json({ message: 'You cannot manage evaluation publishing for this department.' });
+    const rows = await getDeptHeadPublishableEvaluations(departmentId);
+    return res.json(rows);
+  } catch (error) {
+    console.error('Publishable evaluations query failed:', error);
+    return res.status(500).json({ message: 'Unable to load publishable evaluations.' });
   }
 });
 
@@ -2381,9 +4098,10 @@ app.post('/api/evaluations/toggle-peer-publish', authenticate, authorizeRoles('d
     if (publishStatus === 1) {
       const [[existingPeerSession]] = await pool.query(
         `SELECT COUNT(*) AS total
-         FROM peer_evaluations pe
-         INNER JOIN instructors target ON target.id = pe.evaluatee_id
-         WHERE target.department_id = ? AND pe.course_id IS NULL`,
+         FROM evaluation_dispatches ed
+         WHERE ed.department_id = ?
+           AND LOWER(COALESCE(ed.evaluation_type, '')) = 'peer'
+           AND LOWER(COALESCE(ed.status, '')) = 'active'`,
         [departmentId]
       );
       if (Number(existingPeerSession?.total || 0) > 0) {
@@ -2395,7 +4113,10 @@ app.post('/api/evaluations/toggle-peer-publish', authenticate, authorizeRoles('d
          FROM peer_evaluation_submissions pes
          INNER JOIN peer_evaluations pe ON pe.id = pes.peer_evaluation_id
          INNER JOIN instructors target ON target.id = pe.evaluatee_id
-         WHERE target.department_id = ? AND pe.course_id IS NULL`,
+         INNER JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id
+         WHERE target.department_id = ?
+           AND LOWER(COALESCE(ed.evaluation_type, '')) = 'peer'
+           AND LOWER(COALESCE(ed.status, '')) = 'active'`,
         [departmentId]
       );
       if (Number(submittedPeerEvaluation?.total || 0) > 0) {
@@ -2407,6 +4128,16 @@ app.post('/api/evaluations/toggle-peer-publish', authenticate, authorizeRoles('d
       'UPDATE course_assignments SET is_peer_published = ?, is_published = IF(? = 1, 1, is_student_published), publish_target = CASE WHEN ? = 1 AND is_student_published = 1 THEN \'both\' WHEN ? = 1 THEN \'instructor\' WHEN is_student_published = 1 THEN \'student\' ELSE \'\' END WHERE department_id = ?',
       [publishStatus, publishStatus, publishStatus, publishStatus, departmentId]
     );
+    await pool.query(
+      `INSERT INTO system_settings (setting_key, setting_value)
+       VALUES ('peer_evaluation_published', ?)
+       ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_at = CURRENT_TIMESTAMP`,
+      [publishStatus === 1 ? 'true' : 'false']
+    );
+    await pool.query(
+      "UPDATE system_settings SET setting_value = ?, updated_at = CURRENT_TIMESTAMP WHERE setting_key = 'peer_evaluation_status'",
+      [publishStatus === 1 ? 'published' : 'unpublished']
+    );
     return res.json({ success: true, department_id: departmentId, is_peer_published: publishStatus, updated: result.affectedRows });
   } catch (error) {
     console.error('Toggle peer publish failed:', error);
@@ -2414,22 +4145,67 @@ app.post('/api/evaluations/toggle-peer-publish', authenticate, authorizeRoles('d
   }
 });
 
-app.get('/api/evaluations/publish-statuses/:deptId', authenticate, authorizeRoles('dept_head', 'admin'), async (req, res) => {
+app.get('/api/evaluations/publish-statuses/:deptId', authenticate, authorizeRoles('dept_head', 'dean', 'college_dean', 'academic_directorate', 'academic_director', 'directorate', 'admin'), async (req, res) => {
   try {
     const requestedDepartmentId = Number(req.params.deptId);
-    const departmentId = req.user.role === 'dept_head' ? Number(req.user.department_id) : requestedDepartmentId;
-    if (!Number.isInteger(requestedDepartmentId) || requestedDepartmentId <= 0 || departmentId !== requestedDepartmentId) return res.status(403).json({ success: false, message: 'You can only access your department publish status.' });
+    let callerDepartmentId = Number(req.user.department_id || req.user.departmentId);
+    if (req.user.role === 'dept_head' && (!Number.isInteger(callerDepartmentId) || callerDepartmentId <= 0)) {
+      const [[caller]] = await pool.query(
+        `SELECT COALESCE(i.department_id, s.department_id) AS department_id
+         FROM users u
+         LEFT JOIN instructors i ON i.user_id = u.id
+         LEFT JOIN students s ON s.user_id = u.id
+         WHERE u.id = ? LIMIT 1`,
+        [req.user.id]
+      );
+      callerDepartmentId = Number(caller?.department_id || 0);
+    }
+    const departmentId = req.user.role === 'dept_head' ? callerDepartmentId : requestedDepartmentId;
+    if (!Number.isInteger(requestedDepartmentId) || requestedDepartmentId <= 0 || !Number.isInteger(departmentId) || departmentId <= 0) {
+      return res.status(400).json({ success: false, message: 'A valid department_id is required.' });
+    }
+    if (!await canManagePublishedDepartment(req, departmentId)) return res.status(403).json({ success: false, message: 'You cannot view publishing status for this department.' });
+    const academicYear = String(req.query.academic_year || new Date().getFullYear());
+    const statusFilters = ['department_id = ?', 'academic_year = ?'];
+    const statusParams = [departmentId, academicYear];
+    [['program_type', req.query.program_type], ['year_level', req.query.year_level], ['semester', req.query.semester], ['section', normalizeSectionValue(req.query.section)]].forEach(([column, value]) => {
+      if (value) { statusFilters.push(`LOWER(TRIM(${column})) = LOWER(TRIM(?))`); statusParams.push(value); }
+    });
     const [[status]] = await pool.query(
       `SELECT COALESCE(MAX(is_student_published), 0) AS is_student_published,
-              COALESCE(MAX(is_peer_published), 0) AS is_peer_published
-       FROM course_assignments WHERE department_id = ?`,
-      [departmentId]
+              COALESCE(MAX(is_peer_published), 0) AS is_peer_published,
+              EXISTS (
+                SELECT 1 FROM peer_evaluations pe
+                INNER JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id
+                WHERE ed.department_id = ?
+                  AND ed.evaluation_type = 'peer'
+                  AND ed.status IN ('active', 'pending')
+              ) AS has_peer_assignments
+      FROM course_assignments WHERE ${statusFilters.join(' AND ')}`,
+          [departmentId, ...statusParams]
     );
+    const [[studentSubmission]] = await pool.query(
+      `SELECT COUNT(DISTINCT ed.id) AS total_assignments,
+              COUNT(DISTINCT CASE WHEN ses.id IS NOT NULL AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved') THEN ed.id END) AS completed_assignments
+       FROM evaluation_dispatches ed
+       LEFT JOIN student_evaluation_submissions ses ON ses.dispatch_id = ed.id
+       WHERE ed.department_id = ? AND ed.evaluation_type = 'student'
+         AND (ed.academic_year = ? OR ed.academic_year IS NULL)
+         AND (ed.semester = ? OR ed.semester IS NULL)
+        AND (? = '' OR ed.year_level = ?)
+         AND ed.status IN ('pending', 'submitted')`,
+      [departmentId, academicYear, req.query.semester || 'Semester I', req.query.year_level || '', req.query.year_level || '']
+    );
+    const studentEvaluationStarted = Number(studentSubmission?.completed_assignments || 0) > 0;
+    const studentEvaluationFullyCompleted = Number(studentSubmission?.total_assignments || 0) > 0
+      && Number(studentSubmission.completed_assignments) === Number(studentSubmission.total_assignments);
     return res.json({
       success: true,
       department_id: departmentId,
       is_student_published: Boolean(status?.is_student_published),
-      is_peer_published: Boolean(status?.is_peer_published),
+      is_peer_published: Boolean(status?.is_peer_published && status?.has_peer_assignments),
+      studentEvaluationStarted,
+      studentEvaluationFullyCompleted,
     });
   } catch (error) {
     console.error('Publish statuses query failed:', error);
@@ -2437,24 +4213,40 @@ app.get('/api/evaluations/publish-statuses/:deptId', authenticate, authorizeRole
   }
 });
 
-const findPublishedEvaluationTerm = async (departmentId, yearLevel, semester, academicYear) => {
+const findPublishedEvaluationTerm = async (departmentId, yearLevel, semester, academicYear, programType = null, section = null, staffType = 'all') => {
+  const filters = [
+    'ca.department_id = ?',
+    'ca.year_level = ?',
+    'ca.semester = ?',
+    'ca.academic_year = ?',
+    'ca.is_published = 1',
+  ];
+  const params = [departmentId, yearLevel, semester, academicYear];
+  if (programType) {
+    filters.push('LOWER(TRIM(ca.program_type)) = LOWER(TRIM(?))');
+    params.push(programType);
+  }
+  if (section) {
+    filters.push("LOWER(TRIM(REPLACE(REPLACE(ca.section, 'Section ', ''), 'section ', ''))) = LOWER(TRIM(REPLACE(REPLACE(?, 'Section ', ''), 'section ', '')))");
+    params.push(section);
+  }
+  if (staffType !== 'all') {
+    filters.push("CASE WHEN LOWER(COALESCE(ca.assigned_role, 'instructor')) = 'lab_assistant' THEN 'lab_assistant' ELSE 'instructor' END = ?");
+    params.push(staffType);
+  }
+
   const [rows] = await pool.query(
     `SELECT ca.id
      FROM course_assignments ca
-     LEFT JOIN evaluation_dispatches ed ON ed.assignment_id = ca.id
-     WHERE ca.department_id = ?
-       AND ca.year_level = ?
-       AND ca.semester = ?
-       AND ca.academic_year = ?
-       AND ca.is_published = 1
+     WHERE ${filters.join(' AND ')}
      LIMIT 1`,
-    [departmentId, yearLevel, semester, academicYear]
+    params
   );
   return rows.length > 0;
 };
 
-const validateEvaluationPublishTerm = async (res, departmentId, yearLevel, semester, academicYear) => {
-  if (await findPublishedEvaluationTerm(departmentId, yearLevel, semester, academicYear)) {
+const validateEvaluationPublishTerm = async (res, departmentId, yearLevel, semester, academicYear, programType = null, section = null, staffType = 'all') => {
+  if (await findPublishedEvaluationTerm(departmentId, yearLevel, semester, academicYear, programType, section, staffType)) {
     res.status(400).json({ message: 'Evaluation form has already been published for this academic term.' });
     return false;
   }
@@ -2468,7 +4260,7 @@ app.post('/api/evaluations/publish', authenticate, authorizeRoles('dept_head', '
     const departmentId = await resolveDepartmentId(department_id || req.user.department_id || req.user.department);
     const academicYear = String(academic_year || new Date().getFullYear());
     if (!departmentId) return res.status(404).json({ message: 'Department was not found.' });
-    if (!await validateEvaluationPublishTerm(res, departmentId, year_level, semester, academicYear)) return;
+    if (!await validateEvaluationPublishTerm(res, departmentId, year_level, semester, academicYear, program_type, section)) return;
 
     const filters = ['ca.department_id = ?', 'ca.year_level = ?', 'ca.semester = ?', 'ca.academic_year = ?'];
     const params = [departmentId, year_level, semester, academicYear];
@@ -2480,6 +4272,21 @@ app.post('/api/evaluations/publish', authenticate, authorizeRoles('dept_head', '
       await connection.query("UPDATE course_assignments SET is_published = 1, is_student_published = 1, is_peer_published = 1, publish_target = 'both' WHERE id = ?", [assignment.id]);
     }
     await connection.commit();
+    const [departmentUsers] = await pool.query(
+      `SELECT DISTINCT u.id AS user_id
+       FROM users u
+       LEFT JOIN students s ON s.user_id = u.id
+       LEFT JOIN instructors i ON i.user_id = u.id
+       WHERE LOWER(COALESCE(u.status, 'active')) = 'active'
+         AND ((u.role = 'student' AND s.department_id = ?) OR (u.role IN ('instructor', 'dept_head') AND i.department_id = ?))`,
+      [departmentId, departmentId]
+    );
+    await createNotifications({
+      userIds: departmentUsers.map((user) => user.user_id),
+      title: 'Evaluation form published',
+      message: `A new ${academicYear} ${semester} evaluation form is available.`,
+      type: 'evaluation_published',
+    });
     return res.json({ message: `Published student and peer evaluations for ${assignments.length} assignments.` });
   } catch (error) {
     try { await connection.rollback(); } catch (rollbackError) { console.error('Publish rollback failed:', rollbackError); }
@@ -2518,11 +4325,82 @@ app.get('/api/evaluations/student-list', authenticate, authorizeRoles('student')
   }
 });
 
-app.post('/api/evaluations/publish-student', authenticate, authorizeRoles('dept_head', 'admin'), async (req, res) => {
+app.post('/api/evaluations/publish-student', authenticate, authorizeRoles('dept_head', 'college_dean', 'dean', 'academic_directorate', 'academic_director', 'directorate', 'admin'), async (req, res) => {
+  try {
+    const { department_id, program_type, year_level, semester, section } = req.body;
+    const requestedStaffType = String(req.body.staff_type || 'all').trim().toLowerCase();
+    const staffType = ['instructor', 'lab_assistant'].includes(requestedStaffType) ? requestedStaffType : 'all';
+    const departmentId = await resolveDepartmentId(department_id || req.user.department_id || req.user.department);
+    if (!departmentId) return res.status(404).json({ message: 'Department was not found.' });
+    if (!await canManagePublishedDepartment(req, departmentId)) return res.status(403).json({ message: 'You cannot publish evaluations for this department.' });
+    const academicYear = String(req.body.academic_year || new Date().getFullYear());
+    const duplicateFilters = ['ca.department_id = ?', 'ca.academic_year = ?', 'ca.is_student_published = 1'];
+    const duplicateParams = [departmentId, academicYear];
+    duplicateFilters.push("(? = 'all' OR CASE WHEN LOWER(COALESCE(ca.assigned_role, 'instructor')) = 'lab_assistant' THEN 'lab_assistant' ELSE 'instructor' END = ?)");
+    duplicateParams.push(staffType, staffType);
+    [['ca.program_type', program_type], ['ca.year_level', year_level], ['ca.semester', semester], ['ca.section', normalizeSectionValue(section)]].forEach(([column, value]) => {
+      if (value) { duplicateFilters.push(`LOWER(TRIM(${column})) = LOWER(TRIM(?))`); duplicateParams.push(value); }
+    });
+    const [[existingBatch]] = await pool.query(`SELECT COUNT(*) AS total FROM course_assignments ca WHERE ${duplicateFilters.join(' AND ')}`, duplicateParams);
+    if (Number(existingBatch?.total || 0) > 0) {
+      return res.status(400).json({ success: false, isAlreadyPublished: true, message: 'Evaluation form has already been published for this section/batch.' });
+    }
+    if (!await validateEvaluationPublishTerm(res, departmentId, year_level, semester, academicYear, program_type, section, staffType)) return;
+
+    const filters = ['ca.department_id = ?', 'ca.academic_year = ?'];
+    const params = [departmentId, academicYear];
+    [['ca.program_type', program_type], ['ca.year_level', year_level], ['ca.semester', semester], ['ca.section', normalizeSectionValue(section)]].forEach(([column, value]) => {
+      if (value) { filters.push(`LOWER(TRIM(${column})) = LOWER(TRIM(?))`); params.push(value); }
+    });
+    filters.push("(? = 'all' OR CASE WHEN LOWER(COALESCE(ca.assigned_role, 'instructor')) = 'lab_assistant' THEN 'lab_assistant' ELSE 'instructor' END = ?)");
+    params.push(staffType, staffType);
+    const [assignments] = await pool.query(`SELECT ca.id, ca.course_id, ca.instructor_id, ca.staff_id, ca.assigned_role, ca.year_level, ca.semester, c.code AS course_code, c.name FROM course_assignments ca JOIN courses c ON c.id = ca.course_id WHERE ${filters.join(' AND ')}`, params);
+
+    const [students] = await pool.query(
+      `SELECT s.id, s.user_id, s.program_type, s.year_level, s.semester, s.section
+       FROM students s
+       WHERE s.department_id = ?
+        AND (? = '' OR LOWER(TRIM(?)) IN ('all', 'all programs') OR LOWER(TRIM(s.program_type)) = LOWER(TRIM(?)))
+        AND (? = '' OR LOWER(TRIM(?)) IN ('all', 'all years') OR REGEXP_REPLACE(LOWER(TRIM(s.year_level)), '[^0-9]', '') = REGEXP_REPLACE(LOWER(TRIM(?)), '[^0-9]', ''))
+         AND (? = '' OR LOWER(TRIM(s.semester)) = LOWER(TRIM(?)))
+        AND (? = '' OR LOWER(TRIM(?)) IN ('all', 'all sections') OR LOWER(TRIM(REPLACE(REPLACE(s.section, 'Section ', ''), 'section ', ''))) = LOWER(TRIM(?)))`,
+      [departmentId, program_type || '', program_type || '', program_type || '', year_level || '', year_level || '', year_level || '', semester || '', semester || '', normalizeSectionValue(section), normalizeSectionValue(section), normalizeSectionValue(section)]
+    );
+
+    const notificationUserIds = new Set();
+    for (const assignment of assignments) {
+      const isLabAssistant = String(assignment.assigned_role || '').toLowerCase() === 'lab_assistant';
+      const [staffRows] = isLabAssistant
+        ? await pool.query('SELECT user_id, first_name, last_name, employee_id FROM lab_assistants WHERE id = ? LIMIT 1', [assignment.staff_id])
+        : await pool.query('SELECT user_id, first_name, last_name, employee_id FROM instructors WHERE id = ? LIMIT 1', [assignment.instructor_id]);
+      const staff = staffRows[0];
+      if (staff?.user_id) notificationUserIds.add(staff.user_id);
+      await pool.query('UPDATE course_assignments SET is_published = 1, is_student_published = 1, publish_target = CASE WHEN is_peer_published = 1 THEN \'both\' ELSE \'student\' END WHERE id = ?', [assignment.id]);
+      for (const student of students) {
+        if (student.user_id) notificationUserIds.add(student.user_id);
+        const dispatchValues = isLabAssistant
+          ? [assignment.id, student.id, assignment.course_id, assignment.name, semester || assignment.semester || null, year_level || assignment.year_level || null, 'student', req.user.id, JSON.stringify({ source: 'student_publish', labAssistantId: assignment.staff_id }), departmentId, 'student', 'lab_assistant', assignment.staff_id, staff?.first_name || '', staff?.last_name || '', staff?.employee_id || '', assignment.course_code || null, program_type || null, academicYear]
+          : [assignment.id, student.id, assignment.course_id, assignment.name, semester || assignment.semester || null, year_level || assignment.year_level || null, 'student', req.user.id, JSON.stringify({ source: 'student_publish' }), departmentId, 'student', null, null, null, null, null, null, assignment.course_code || null, program_type || null, academicYear];
+        await pool.query(
+          'INSERT INTO evaluation_dispatches (assignment_id, student_id, course_id, course_name, semester, year_level, student_group, created_by, payload, department_id, evaluation_type, target_type, target_user_id, target_first_name, target_last_name, target_employee_id, course_code, program_type, academic_year) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          dispatchValues
+        );
+      }
+    }
+
+    await createNotifications({ userIds: [...notificationUserIds], title: 'Evaluation form published', message: `A new ${academicYear} ${semester || ''} evaluation form is available.`, type: 'evaluation_published' });
+    const publishedCount = assignments.length;
+    return res.json({ message: `Published student evaluations for ${publishedCount} target group(s).` });
+  } catch (error) { console.error('Student evaluation publish failed:', error); return res.status(500).json({ message: 'Unable to publish student evaluations.' }); }
+});
+
+app.post('/api/dept-head/publish-student-evaluations', authenticate, authorizeRoles('dept_head', 'college_dean', 'dean', 'academic_directorate', 'academic_director', 'directorate', 'admin'), async (req, res) => {
   try {
     const { department_id, program_type, year_level, semester, section } = req.body;
     const departmentId = await resolveDepartmentId(department_id || req.user.department_id || req.user.department);
     if (!departmentId) return res.status(404).json({ message: 'Department was not found.' });
+    if (!await canManagePublishedDepartment(req, departmentId)) return res.status(403).json({ message: 'You cannot publish evaluations for this department.' });
+
     const academicYear = String(req.body.academic_year || new Date().getFullYear());
     const duplicateFilters = ['ca.department_id = ?', 'ca.academic_year = ?', 'ca.is_student_published = 1'];
     const duplicateParams = [departmentId, academicYear];
@@ -2533,29 +4411,139 @@ app.post('/api/evaluations/publish-student', authenticate, authorizeRoles('dept_
     if (Number(existingBatch?.total || 0) > 0) {
       return res.status(400).json({ success: false, isAlreadyPublished: true, message: 'Evaluation form has already been published for this section/batch.' });
     }
-    if (!await validateEvaluationPublishTerm(res, departmentId, year_level, semester, academicYear)) return;
-    const filters = ['ca.department_id = ?'];
-    const params = [departmentId];
+    if (!await validateEvaluationPublishTerm(res, departmentId, year_level, semester, academicYear, program_type, section)) return;
+
+    const filters = ['ca.department_id = ?', 'ca.academic_year = ?'];
+    const params = [departmentId, academicYear];
     [['ca.program_type', program_type], ['ca.year_level', year_level], ['ca.semester', semester], ['ca.section', normalizeSectionValue(section)]].forEach(([column, value]) => {
       if (value) { filters.push(`LOWER(TRIM(${column})) = LOWER(TRIM(?))`); params.push(value); }
     });
-    const [assignments] = await pool.query(`SELECT ca.id, ca.course_id, ca.instructor_id, c.name FROM course_assignments ca JOIN courses c ON c.id = ca.course_id WHERE ${filters.join(' AND ')}`, params);
+    const [assignments] = await pool.query(`SELECT ca.id, ca.course_id, ca.instructor_id, ca.year_level, ca.semester, c.code AS course_code, c.name FROM course_assignments ca JOIN courses c ON c.id = ca.course_id WHERE ${filters.join(' AND ')}`, params);
+
+    const [students] = await pool.query(
+      `SELECT s.id, s.user_id, s.program_type, s.year_level, s.semester, s.section
+       FROM students s
+       WHERE s.department_id = ?
+        AND (? = '' OR LOWER(TRIM(?)) IN ('all', 'all programs') OR LOWER(TRIM(s.program_type)) = LOWER(TRIM(?)))
+        AND (? = '' OR LOWER(TRIM(?)) IN ('all', 'all years') OR REGEXP_REPLACE(LOWER(TRIM(s.year_level)), '[^0-9]', '') = REGEXP_REPLACE(LOWER(TRIM(?)), '[^0-9]', ''))
+         AND (? = '' OR LOWER(TRIM(s.semester)) = LOWER(TRIM(?)))
+        AND (? = '' OR LOWER(TRIM(?)) IN ('all', 'all sections') OR LOWER(TRIM(REPLACE(REPLACE(s.section, 'Section ', ''), 'section ', ''))) = LOWER(TRIM(?)))`,
+      [departmentId, program_type || '', program_type || '', program_type || '', year_level || '', year_level || '', year_level || '', semester || '', semester || '', normalizeSectionValue(section), normalizeSectionValue(section), normalizeSectionValue(section)]
+    );
+
+    const [labAssistants] = await pool.query(
+      `SELECT la.id, la.user_id, la.first_name, la.last_name, la.employee_id
+       FROM lab_assistants la
+       INNER JOIN users u ON u.id = la.user_id
+       WHERE la.department_id = ?
+         AND LOWER(COALESCE(u.status, 'active')) = 'active'
+       ORDER BY la.first_name ASC, la.last_name ASC`,
+      [departmentId]
+    );
+
+    const notificationUserIds = new Set();
     for (const assignment of assignments) {
+      const [[instructor]] = await pool.query('SELECT user_id FROM instructors WHERE id = ? LIMIT 1', [assignment.instructor_id]);
+      if (instructor?.user_id) notificationUserIds.add(instructor.user_id);
       await pool.query('UPDATE course_assignments SET is_published = 1, is_student_published = 1, publish_target = CASE WHEN is_peer_published = 1 THEN \'both\' ELSE \'student\' END WHERE id = ?', [assignment.id]);
-      const [students] = await pool.query("SELECT id FROM students WHERE department_id = ? AND (? = '' OR LOWER(TRIM(program_type)) = LOWER(TRIM(?))) AND (? = '' OR LOWER(TRIM(year_level)) = LOWER(TRIM(?))) AND (? = '' OR LOWER(TRIM(semester)) = LOWER(TRIM(?))) AND (? = '' OR LOWER(TRIM(REPLACE(REPLACE(section, 'Section ', ''), 'section ', ''))) = LOWER(TRIM(?)))", [departmentId, program_type || '', program_type || '', year_level || '', year_level || '', semester || '', semester || '', normalizeSectionValue(section), normalizeSectionValue(section)]);
-      for (const student of students) await pool.query('INSERT INTO evaluation_dispatches (assignment_id, student_id, course_id, course_name, semester, year_level, student_group, created_by, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [assignment.id, student.id, assignment.course_id, assignment.name, semester || null, year_level || null, 'student', req.user.id, JSON.stringify({ source: 'student_publish' })]);
+      for (const student of students) {
+        if (student.user_id) notificationUserIds.add(student.user_id);
+        await pool.query(
+          'INSERT INTO evaluation_dispatches (assignment_id, student_id, course_id, course_name, semester, year_level, student_group, created_by, payload, department_id, evaluation_type, target_type, target_user_id, target_first_name, target_last_name, target_employee_id, course_code, program_type, academic_year, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'published\')',
+          [
+            assignment.id,
+            student.id,
+            assignment.course_id,
+            assignment.name,
+            semester || assignment.semester || null,
+            year_level || assignment.year_level || null,
+            'student',
+            req.user.id,
+            JSON.stringify({ source: 'dept_head_student_publish' }),
+            departmentId,
+            'student',
+            null,
+            null,
+            null,
+            null,
+            null,
+            assignment.course_code || null,
+            program_type || null,
+            academicYear,
+          ]
+        );
+      }
     }
-    return res.json({ message: `Published student evaluations for ${assignments.length} assignments.` });
-  } catch (error) { console.error('Student evaluation publish failed:', error); return res.status(500).json({ message: 'Unable to publish student evaluations.' }); }
+
+    for (const labAssistant of labAssistants) {
+      if (labAssistant.user_id) notificationUserIds.add(labAssistant.user_id);
+      // Add all students in department to notification list for lab assistant publish
+      for (const student of students) {
+        if (student.user_id) notificationUserIds.add(student.user_id);
+      }
+
+      const [[existingLabDispatch]] = await pool.query(
+        `SELECT id
+         FROM evaluation_dispatches
+         WHERE department_id = ?
+           AND target_type = 'lab_assistant'
+           AND target_user_id = ?
+           AND evaluation_type = 'student'
+           AND academic_year = ?
+           AND semester = ?
+           AND program_type = 'ALL'
+           AND year_level = 'ALL'
+           AND section = 'ALL'
+         LIMIT 1`,
+        [departmentId, labAssistant.id, academicYear, semester || null]
+      );
+
+      if (!existingLabDispatch) {
+        await pool.query(
+          `INSERT INTO evaluation_dispatches (
+            department_id, course_code, course_name, academic_year, semester,
+            year_level, section, program_type, student_group, created_by, payload, evaluation_type, status, target_type, target_user_id,
+            target_first_name, target_last_name, target_employee_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', 'lab_assistant', ?, ?, ?, ?)
+          `,
+          [
+            departmentId,
+            'LAB',
+            'Course: Department Lab / Practical Work',
+            academicYear,
+            semester || null,
+            'ALL',
+            'ALL',
+            'ALL',
+            'student',
+            req.user.id,
+            JSON.stringify({ source: 'dept_head_student_publish_lab_assistant', labAssistantId: labAssistant.id }),
+            'student',
+            labAssistant.id,
+            labAssistant.first_name || '',
+            labAssistant.last_name || '',
+            labAssistant.employee_id || '',
+          ]
+        );
+      }
+    }
+
+    await createNotifications({ userIds: [...notificationUserIds], title: 'Evaluation form published', message: `A new ${academicYear} ${semester || ''} evaluation form is available.`, type: 'evaluation_published' });
+    return res.status(200).json({ success: true, message: `Published student evaluations for ${assignments.length + labAssistants.length} target group(s).` });
+  } catch (error) {
+    console.error('Dept-head student evaluation publish failed:', error);
+    return res.status(500).json({ success: false, message: 'Unable to publish student evaluations.' });
+  }
 });
 
-app.post('/api/evaluations/student/unpublish', authenticate, authorizeRoles('dept_head', 'admin'), async (req, res) => {
+app.post('/api/evaluations/student/unpublish', authenticate, authorizeRoles('dept_head', 'college_dean', 'dean', 'academic_directorate', 'academic_director', 'directorate', 'admin'), async (req, res) => {
   const connection = await pool.getConnection();
   try {
     const { department_id, program_type, year_level, semester, section } = req.body;
     const departmentId = await resolveDepartmentId(department_id || req.user.department_id || req.user.department);
     const academicYear = String(req.body.academic_year || new Date().getFullYear());
     if (!departmentId) return res.status(404).json({ message: 'Department was not found.' });
+    if (!await canManagePublishedDepartment(req, departmentId)) return res.status(403).json({ message: 'You cannot unpublish evaluations for this department.' });
 
     const filters = ['ca.department_id = ?', 'ca.academic_year = ?', 'ca.is_student_published = 1'];
     const params = [departmentId, academicYear];
@@ -2566,14 +4554,37 @@ app.post('/api/evaluations/student/unpublish', authenticate, authorizeRoles('dep
     if (!assignments.length) return res.status(404).json({ message: 'No published student evaluation batch found.' });
     const assignmentIds = assignments.map((assignment) => assignment.id);
     const placeholders = assignmentIds.map(() => '?').join(', ');
-    const [submitted] = await connection.query(
-      `SELECT ses.id FROM student_evaluation_submissions ses INNER JOIN evaluation_dispatches ed ON ed.id = ses.dispatch_id WHERE ed.assignment_id IN (${placeholders}) LIMIT 1`,
+    const [[progress]] = await connection.query(
+      `SELECT COUNT(DISTINCT ed.id) AS total_assignments,
+              COUNT(DISTINCT CASE WHEN ses.id IS NOT NULL AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved') THEN ed.id END) AS completed_assignments
+       FROM evaluation_dispatches ed
+       LEFT JOIN student_evaluation_submissions ses ON ses.dispatch_id = ed.id
+       WHERE ed.assignment_id IN (${placeholders})`,
       assignmentIds
     );
-    if (submitted.length) return res.status(400).json({ success: false, message: 'Cannot unpublish because student evaluations have already been submitted.' });
+    const studentHasStarted = Number(progress?.completed_assignments || 0) > 0;
+    const studentFullyCompleted = Number(progress?.total_assignments || 0) > 0
+      && Number(progress.completed_assignments) === Number(progress.total_assignments);
+    if (studentHasStarted && !studentFullyCompleted) {
+      return res.status(400).json({ success: false, hasStarted: true, fullyCompleted: false, message: 'Cannot unpublish because student evaluations are in progress. Wait until all student evaluations are completed.' });
+    }
 
     await connection.beginTransaction();
-    await connection.query(`DELETE FROM evaluation_dispatches WHERE assignment_id IN (${placeholders})`, assignmentIds);
+    await connection.query(
+      `UPDATE evaluation_dispatches
+       SET status = 'closed'
+       WHERE assignment_id IN (${placeholders})`,
+      assignmentIds
+    );
+    await connection.query(
+      `DELETE ed FROM evaluation_dispatches ed
+       WHERE ed.assignment_id IN (${placeholders})
+         AND NOT EXISTS (
+           SELECT 1 FROM student_evaluation_submissions ses
+           WHERE ses.dispatch_id = ed.id
+         )`,
+      assignmentIds
+    );
     await connection.query(`UPDATE course_assignments SET is_student_published = 0, is_published = IF(is_peer_published = 1, 1, 0), publish_target = IF(is_peer_published = 1, 'instructor', '') WHERE id IN (${placeholders})`, assignmentIds);
     await connection.commit();
     return res.json({ success: true, message: 'Student evaluation form unpublished successfully.' });
@@ -2589,18 +4600,18 @@ app.post('/api/evaluations/publish-instructor', authenticate, authorizeRoles('de
     const departmentId = await resolveDepartmentId(department_id || req.user.department_id || req.user.department);
     if (!departmentId) return res.status(404).json({ message: 'Department was not found.' });
     const academicYear = String(req.body.academic_year || new Date().getFullYear());
-    if (!await validateEvaluationPublishTerm(res, departmentId, year_level, semester, academicYear)) return;
-    const filters = ['ca.department_id = ?'];
-    const params = [departmentId];
+    if (!await validateEvaluationPublishTerm(res, departmentId, year_level, semester, academicYear, program_type, section)) return;
+    const filters = ['ca.department_id = ?', 'ca.academic_year = ?'];
+    const params = [departmentId, academicYear];
     [['ca.program_type', program_type], ['ca.year_level', year_level], ['ca.semester', semester], ['ca.section', normalizeSectionValue(section)]].forEach(([column, value]) => { if (value) { filters.push(`LOWER(TRIM(${column})) = LOWER(TRIM(?))`); params.push(value); } });
     const [assignments] = await pool.query(`SELECT id, course_id, instructor_id FROM course_assignments ca WHERE ${filters.join(' AND ')}`, params);
     const evaluatorUserIds = new Set();
     for (const assignment of assignments) {
       await pool.query('UPDATE course_assignments SET is_published = 1, is_peer_published = 1, publish_target = CASE WHEN is_student_published = 1 THEN \'both\' ELSE \'instructor\' END WHERE id = ?', [assignment.id]);
-      const [peers] = await pool.query('SELECT user_id FROM instructors WHERE department_id = ? AND id <> ?', [departmentId, assignment.instructor_id]);
+      const [peers] = await pool.query('SELECT id, user_id FROM instructors WHERE department_id = ? AND id <> ?', [departmentId, assignment.instructor_id]);
       for (const peer of peers) {
         evaluatorUserIds.add(peer.user_id);
-        await pool.query('INSERT IGNORE INTO peer_evaluations (evaluator_id, evaluatee_id, course_id, status) VALUES (?, ?, ?, \'pending\')', [peer.user_id, assignment.instructor_id, assignment.course_id]);
+        await pool.query('INSERT IGNORE INTO peer_evaluations (evaluator_id, evaluatee_id, course_id, status) VALUES (?, ?, ?, \'pending\')', [peer.id, assignment.instructor_id, assignment.course_id]);
       }
     }
     if (evaluatorUserIds.size) {
@@ -2634,73 +4645,146 @@ app.get('/api/instructor/assigned-courses', authenticate, authorizeRoles('instru
   }
 });
 
-app.get('/api/instructor/peer-evaluations', authenticate, authorizeRoles('instructor', 'dept_head', 'admin'), async (req, res) => {
+app.get(['/api/instructor/peer-evaluations', '/api/peer-evaluations/assigned', '/api/evaluations/peer-list-for-instructor', '/api/evaluations/peers'], authenticate, authorizeRoles('instructor', 'lab_assistant', 'dept_head', 'department_head', 'college_dean', 'dean', 'academic_directorate', 'academic_director', 'directorate', 'admin'), async (req, res) => {
   try {
     const instructorIdParam = Number(req.query.instructor_id || req.query.user_id || 0);
-    let evaluatorId = Number(req.user?.id || 0);
+    let evaluatorId = 0;
+    let evaluatorUserId = Number(req.user?.id || 0);
 
     if (instructorIdParam) {
       const [userRows] = await pool.query(
-        'SELECT user_id FROM instructors WHERE id = ? OR user_id = ? LIMIT 1',
+        'SELECT id, user_id FROM instructors WHERE id = ? OR user_id = ? LIMIT 1',
         [instructorIdParam, instructorIdParam]
       );
-      evaluatorId = userRows[0].user_id;
+      evaluatorId = Number(userRows[0]?.id || 0);
+      evaluatorUserId = Number(userRows[0]?.user_id || 0);
+    }
+
+    if (!evaluatorId && evaluatorUserId) {
+      const [[profile]] = await pool.query(
+        'SELECT id FROM instructors WHERE user_id = ? LIMIT 1',
+        [evaluatorUserId]
+      );
+      evaluatorId = Number(profile?.id || 0);
     }
 
     if (!evaluatorId) {
       return res.status(400).json({ success: false, message: 'Instructor ID is required.' });
     }
 
-    console.log('Fetching peer evaluations for evaluator user_id:', evaluatorId);
+    const [[evaluatorProfile]] = await pool.query(
+      'SELECT department_id FROM instructors WHERE id = ? LIMIT 1',
+      [evaluatorId]
+    );
+    const academicYear = String(req.query.academic_year || new Date().getFullYear());
+    const semester = String(req.query.semester || 'Semester I');
+    if (!evaluatorProfile?.department_id || !await isPeerPublicationActive(evaluatorProfile.department_id, academicYear, semester)) {
+      return res.json({ success: true, pendingCount: 0, evaluations: [], isPublished: false, message: 'Peer evaluation is not currently published.' });
+    }
 
-    await pool.query(`CREATE TABLE IF NOT EXISTS peer_evaluations (
-      id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      evaluator_id INT UNSIGNED NOT NULL,
-      evaluatee_id INT UNSIGNED NOT NULL,
-      course_id INT UNSIGNED DEFAULT NULL,
-      deadline VARCHAR(64) DEFAULT '2026-08-17',
-      status ENUM('pending', 'submitted') DEFAULT 'pending',
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      INDEX idx_evaluator_id (evaluator_id),
-      INDEX idx_evaluatee_id (evaluatee_id),
-      UNIQUE KEY uk_peer_eval (evaluator_id, evaluatee_id, course_id),
-      CONSTRAINT fk_peer_evaluations_evaluator FOREIGN KEY (evaluator_id) REFERENCES users(id) ON DELETE CASCADE,
-      CONSTRAINT fk_peer_evaluations_evaluatee FOREIGN KEY (evaluatee_id) REFERENCES instructors(id) ON DELETE CASCADE,
-      CONSTRAINT fk_peer_evaluations_course FOREIGN KEY (course_id) REFERENCES courses(id) ON DELETE SET NULL
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    console.log('Fetching peer evaluations for evaluator instructor_id:', evaluatorId);
+
+    await pool.query(
+      `INSERT IGNORE INTO peer_evaluations
+        (evaluator_id, evaluatee_id, course_id, dispatch_id, deadline, status)
+             SELECT evaluator.id, target.id, NULL, dispatch.id, dispatch.deadline, 'pending'
+      FROM instructors evaluator
+       INNER JOIN instructors target ON target.department_id = evaluator.department_id
+       INNER JOIN users target_user ON target_user.id = target.user_id
+       INNER JOIN evaluation_dispatches dispatch
+         ON dispatch.department_id = evaluator.department_id
+        AND dispatch.evaluation_type = 'peer'
+        AND dispatch.academic_year = ?
+        AND dispatch.semester = ?
+        AND dispatch.status = 'active'
+       WHERE evaluator.id = ?
+         AND target.id <> evaluator.id
+         AND LOWER(COALESCE(target_user.status, 'active')) = 'active'
+         AND LOWER(TRIM(target_user.role)) IN (
+           'instructor', 'dept_head', 'department_head', 'depthead',
+           'college_dean', 'dean', 'lab_assistant',
+           'academic_director', 'academic_directorate', 'directorate'
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM peer_evaluations existing
+           WHERE existing.evaluator_id = evaluator.id
+             AND existing.evaluatee_id = target.id
+             AND existing.course_id IS NULL
+         )
+      ORDER BY dispatch.id DESC`,
+      [academicYear, semester, evaluatorId]
+    );
 
     const [rows] = await pool.query(
       `SELECT
         pe.id,
-        pe.evaluatee_id,
+        pe.id AS peer_evaluation_id,
+        i.id AS evaluatee_id,
+        i.id AS instructor_id,
         pe.course_id,
         CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, '')) AS instructor_name,
+        u.email,
+        LOWER(u.role) AS instructor_role,
+        CASE
+          WHEN LOWER(u.role) IN ('dept_head', 'department_head', 'depthead') THEN 'dept_head'
+          WHEN LOWER(u.role) IN ('college_dean', 'dean') THEN 'college_dean'
+          ELSE 'instructor'
+        END AS target_role,
         c.code AS course_code,
         c.name AS course_name,
-        pe.deadline,
+        COALESCE(NULLIF(pe.deadline, ''), DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 7 DAY), '%Y-%m-%d')) AS deadline,
+        CASE WHEN pes.id IS NULL THEN 'pending' ELSE 'completed' END AS status,
         CASE
-          WHEN LOWER(TRIM(pe.status)) = 'pending' THEN 'pending'
-          ELSE 'completed'
-        END AS status,
-        pes.score AS total_score,
+          WHEN pes.score IS NULL THEN NULL
+          WHEN pes.score <= 5 THEN ROUND(pes.score * 20, 2)
+          ELSE ROUND(pes.score, 2)
+        END AS raw_score,
+        CASE
+          WHEN pes.score IS NULL THEN NULL
+          WHEN pes.score <= 5 THEN ROUND(pes.score * 4, 2)
+          ELSE ROUND(pes.score * 0.20, 2)
+        END AS weighted_score,
+        CASE
+          WHEN pes.score IS NULL THEN NULL
+          WHEN pes.score <= 5 THEN ROUND(pes.score * 20, 2)
+          ELSE ROUND(pes.score, 2)
+        END AS total_score,
         pes.strengths,
         pes.suggestions,
         pes.responses,
         pes.status AS submission_status,
         pes.id AS submission_id,
-        CASE WHEN pes.id IS NOT NULL THEN 1 ELSE 0 END AS is_evaluated
-       FROM peer_evaluations pe
-       JOIN instructors i ON pe.evaluatee_id = i.id
+        CASE WHEN pes.id IS NOT NULL THEN 1 ELSE 0 END AS is_evaluated,
+        'instructor' AS target_type
+       FROM instructors evaluator
+       INNER JOIN instructors i ON i.department_id = evaluator.department_id
+       INNER JOIN users u ON u.id = i.user_id
+       LEFT JOIN peer_evaluations pe
+         ON pe.evaluator_id = evaluator.id
+        AND pe.evaluatee_id = i.id
+        AND pe.course_id IS NULL
+        AND LOWER(TRIM(pe.status)) IN ('pending', 'active', 'submitted')
+      LEFT JOIN peer_evaluation_submissions pes ON pes.peer_evaluation_id = pe.id
+       AND pes.evaluator_id = ?
        LEFT JOIN courses c ON pe.course_id = c.id
-       LEFT JOIN peer_evaluation_submissions pes ON pes.peer_evaluation_id = pe.id
-       WHERE pe.evaluator_id = ?
-       ORDER BY pe.created_at DESC`,
-      [evaluatorId]
+       WHERE evaluator.id = ?
+         AND i.id <> evaluator.id
+         AND pe.id IS NOT NULL
+         AND LOWER(COALESCE(u.status, 'active')) = 'active'
+         AND LOWER(TRIM(u.role)) IN (
+           'instructor', 'dept_head', 'department_head', 'depthead',
+           'college_dean', 'dean', 'lab_assistant',
+           'academic_director', 'academic_directorate', 'directorate'
+         )
+       ORDER BY instructor_name ASC`,
+      [evaluatorUserId, evaluatorId]
     );
 
     const normalized = rows.map(row => ({
       ...row,
-      total_score: row.total_score !== null ? Number(row.total_score) : 0,
+      raw_score: row.raw_score === null ? null : Number(row.raw_score),
+      weighted_score: row.weighted_score === null ? null : Number(row.weighted_score),
+      total_score: row.total_score === null ? null : Number(row.total_score),
       is_evaluated: Boolean(row.is_evaluated),
       responses: row.responses ? (typeof row.responses === 'string' ? JSON.parse(row.responses) : row.responses) : {},
     }));
@@ -2710,15 +4794,89 @@ app.get('/api/instructor/peer-evaluations', authenticate, authorizeRoles('instru
       success: true,
       pendingCount,
       evaluations: normalized,
+      isPublished: normalized.length > 0,
     });
   } catch (err) {
     console.error('Peer Evaluations SQL Error:', err?.message || err);
-    return res.status(200).json({
+    return res.status(500).json({ success: false, pendingCount: 0, evaluations: [], message: 'Unable to load peer evaluations.', error: err?.message });
+  }
+});
+
+app.get('/api/peer-evaluations/targets', authenticate, authorizeRoles('instructor', 'lab_assistant', 'dept_head', 'department_head', 'college_dean', 'dean', 'academic_directorate', 'academic_director', 'directorate', 'admin'), async (req, res) => {
+  try {
+    const currentUserId = Number(req.user?.id || 0);
+    let departmentId = Number(req.user?.department_id || req.query.department_id || 0);
+
+    if (!currentUserId) {
+      return res.status(401).json({ success: false, message: 'User not authenticated.' });
+    }
+
+    if (!departmentId) {
+      const [[profile]] = await pool.query(
+        `SELECT COALESCE(i.department_id, la.department_id) AS department_id
+         FROM users u
+         LEFT JOIN instructors i ON i.user_id = u.id
+         LEFT JOIN lab_assistants la ON la.user_id = u.id
+         WHERE u.id = ?
+         LIMIT 1`,
+        [currentUserId]
+      );
+      departmentId = Number(profile?.department_id || 0);
+    }
+
+    if (!departmentId) {
+      return res.status(400).json({ success: false, message: 'Department is not assigned for this user.' });
+    }
+
+    const [rows] = await pool.query(
+      `SELECT
+         i.id AS target_instructor_id,
+         u.id AS user_id,
+         CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, '')) AS name,
+         u.email,
+         LOWER(TRIM(COALESCE(u.role, ''))) AS role,
+         COALESCE(NULLIF(d.department_name, ''), d.name) AS department_name,
+         CASE WHEN pe.id IS NOT NULL THEN 'Completed' ELSE 'Pending' END AS status,
+         pe.id AS evaluation_id,
+         pe.total_score
+       FROM instructors i
+       INNER JOIN users u ON u.id = i.user_id
+       LEFT JOIN departments d ON d.id = i.department_id
+       LEFT JOIN peer_evaluations pe
+         ON pe.evaluator_id = ?
+        AND pe.evaluatee_id = i.id
+        AND pe.course_id IS NULL
+       WHERE i.department_id = ?
+         AND u.id <> ?
+         AND LOWER(COALESCE(u.status, 'active')) = 'active'
+         AND LOWER(TRIM(u.role)) IN (
+           'instructor', 'dept_head', 'department_head', 'depthead',
+           'college_dean', 'dean', 'lab_assistant',
+           'academic_director', 'academic_directorate', 'directorate'
+         )
+       ORDER BY name ASC`,
+      [currentUserId, departmentId, currentUserId]
+    );
+
+    return res.json({
       success: true,
-      pendingCount: 0,
-      evaluations: [],
-      message: 'Fallback: No peer evaluations table or records found.',
+      targets: rows.map((row) => ({
+        id: row.target_instructor_id,
+        target_instructor_id: row.target_instructor_id,
+        user_id: row.user_id,
+        name: row.name || row.email || 'Unknown',
+        email: row.email,
+        role: row.role,
+        department_name: row.department_name || 'N/A',
+        evaluation_id: row.evaluation_id || null,
+        total_score: row.total_score != null ? Number(row.total_score) : 0,
+        status: String(row.status || 'Pending').toLowerCase() === 'completed' ? 'Completed' : 'Pending',
+      })),
+      count: rows.length,
     });
+  } catch (error) {
+    console.error('Peer evaluation targets fetch error:', error?.message || error);
+    return res.status(500).json({ success: false, message: 'Unable to load peer evaluation targets.', error: error?.message || 'Unknown error' });
   }
 });
 
@@ -2896,14 +5054,6 @@ app.post('/api/dept-head/assign-course', authenticate, authorizeRoles('dept_head
            normalizedSection, normalizedSection, normalizedSection, normalizedSection, normalizedSection]
         );
 
-        if (!studentRows.length) {
-          console.log(`[Assign Course Warning] No strict match for Dept ${departmentId}. Falling back to all department students.`);
-          [studentRows] = await pool.query(
-            `SELECT id, user_id FROM students WHERE department_id = ?`,
-            [departmentId]
-          );
-        }
-
         console.log(`[Assign Course Success] Creating dispatches for ${studentRows.length} students.`);
 
         for (const student of studentRows) {
@@ -2922,7 +5072,7 @@ app.post('/api/dept-head/assign-course', authenticate, authorizeRoles('dept_head
         await pool.query(`CREATE TABLE IF NOT EXISTS peer_evaluations (
           id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
           evaluator_id INT UNSIGNED NOT NULL,
-          evaluatee_id INT UNSIGNED NOT NULL,
+          evaluatee_id INT UNSIGNED DEFAULT NULL,
           course_id INT UNSIGNED DEFAULT NULL,
           deadline VARCHAR(64) DEFAULT '2026-08-17',
           status ENUM('pending', 'submitted') DEFAULT 'pending',
@@ -2936,15 +5086,15 @@ app.post('/api/dept-head/assign-course', authenticate, authorizeRoles('dept_head
 
         console.log('Dispatching to instructors strictly by department_id...');
         const [peerRows] = await pool.query(
-          'SELECT user_id FROM instructors WHERE department_id = ? AND id != ?',
+          'SELECT id FROM instructors WHERE department_id = ? AND id != ?',
           [departmentId, instructorRecordId]
         );
         console.log(`Found ${peerRows.length} peer instructors in department ${departmentId}`);
         for (const peer of peerRows) {
-          if (!peer.user_id) continue;
+          if (!peer.id) continue;
           await pool.query(
             'INSERT INTO peer_evaluations (evaluator_id, evaluatee_id, course_id, status) VALUES (?, ?, ?, ?)',
-            [peer.user_id, instructorRecordId, courseIdNum, 'pending']
+            [peer.id, instructorRecordId, courseIdNum, 'pending']
           );
         }
       }
@@ -3076,30 +5226,153 @@ app.put('/api/evaluations/template/:id', authenticate, authorizeRoles('dept_head
   }
 });
 
-const criterionTypes = ['student', 'peer', 'dept_head', 'dean'];
+const criterionTypes = ['student', 'peer', 'dept_head', 'dean', 'dean_evaluates_dept_head'];
+const targetRoles = ['instructor', 'lab_assistant'];
 
-app.get('/api/admin/criteria', authenticate, authorizeRoles('admin', 'systemadmin'), async (req, res) => {
+const getCriteriaQuery = (req) => {
+  const type = req.query.type ? String(req.query.type).trim().toLowerCase() : null;
+  const rawTargetRole = req.query.target_role !== undefined ? String(req.query.target_role).trim().toLowerCase() : 'instructor';
+  const targetRole = targetRoles.includes(rawTargetRole) ? rawTargetRole : 'instructor';
+
+  if (type && !criterionTypes.includes(type)) return { error: 'Invalid evaluator type.' };
+
+  const filters = [];
+  const values = [];
+
+  if (type) {
+    filters.push('evaluator_type = ?');
+    values.push(type);
+  }
+
+  filters.push('(target_role = ? OR target_role IS NULL)');
+  values.push(targetRole);
+
+  return {
+    type,
+    targetRole,
+    query: filters.length ? `WHERE ${filters.join(' AND ')}` : '',
+    values,
+  };
+};
+
+const getCriteriaPagination = (req) => {
+  const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 10));
+  const search = String(req.query.search || '').trim();
+  return { page, limit, offset: (page - 1) * limit, search };
+};
+
+const getPaginatedCriteria = async (req) => {
+  const criteriaQuery = getCriteriaQuery(req);
+  if (criteriaQuery.error) return { error: criteriaQuery.error };
+  const { page, limit, offset, search } = getCriteriaPagination(req);
+  const filters = [...criteriaQuery.values];
+  let whereSQL = criteriaQuery.query;
+  if (search) {
+    whereSQL += `${whereSQL ? ' AND' : 'WHERE'} (criterion_text LIKE ? OR criterion_text_am LIKE ? OR category LIKE ?)`;
+    const searchParam = `%${search}%`;
+    filters.push(searchParam, searchParam, searchParam);
+  }
+  const [[countRow]] = await pool.query(`SELECT COUNT(*) AS total FROM evaluation_criteria ${whereSQL}`, filters);
+  const totalItems = Number(countRow?.total || 0);
+  const [rows] = await pool.query(
+    `SELECT id, evaluator_type, target_role, criterion_text, criterion_text_am, category, weight, is_active, created_at
+     FROM evaluation_criteria ${whereSQL}
+     ORDER BY evaluator_type ASC, target_role ASC, category ASC, id ASC
+     LIMIT ? OFFSET ?`,
+    [...filters, limit, offset]
+  );
+  return { rows, pagination: { totalItems, totalPages: Math.ceil(totalItems / limit), currentPage: page, itemsPerPage: limit } };
+};
+
+const getLegacyPaginatedCriteria = async (req) => {
+  const type = req.query.type ? String(req.query.type).trim().toLowerCase() : null;
+  if (type && !criterionTypes.includes(type)) return { error: 'Invalid evaluator type.' };
+  const { page, limit, offset, search } = getCriteriaPagination(req);
+  const clauses = [];
+  const values = [];
+  if (type) {
+    clauses.push('evaluator_type = ?');
+    values.push(type);
+  }
+  if (search) {
+    clauses.push('(criterion_text LIKE ? OR criterion_text_am LIKE ? OR category LIKE ?)');
+    const searchParam = `%${search}%`;
+    values.push(searchParam, searchParam, searchParam);
+  }
+  const whereSQL = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const [[countRow]] = await pool.query(`SELECT COUNT(*) AS total FROM evaluation_criteria ${whereSQL}`, values);
+  const totalItems = Number(countRow?.total || 0);
+  const [rows] = await pool.query(
+    `SELECT id, evaluator_type, criterion_text, criterion_text_am, category, weight, is_active, created_at
+     FROM evaluation_criteria ${whereSQL}
+     ORDER BY evaluator_type ASC, category ASC, id ASC
+     LIMIT ? OFFSET ?`,
+    [...values, limit, offset]
+  );
+  return { rows, pagination: { totalItems, totalPages: Math.ceil(totalItems / limit), currentPage: page, itemsPerPage: limit } };
+};
+
+app.get('/api/admin/evaluation-criteria', authenticate, authorizeRoles('admin', 'systemadmin'), async (req, res) => {
   try {
-    const type = req.query.type ? String(req.query.type).trim().toLowerCase() : null;
-    if (type && !criterionTypes.includes(type)) return res.status(400).json({ message: 'Invalid evaluator type.' });
-    const [rows] = await pool.query(
-      `SELECT id, evaluator_type, criterion_text, criterion_text_am, category, weight, is_active, created_at
-       FROM evaluation_criteria ${type ? 'WHERE evaluator_type = ?' : ''} ORDER BY evaluator_type ASC, category ASC, id ASC`,
-      type ? [type] : []
-    );
-    return res.json(rows);
+    const result = await getPaginatedCriteria(req);
+    if (result.error) return res.status(400).json({ message: result.error });
+    return res.json({ success: true, data: result.rows, pagination: result.pagination });
   } catch (error) {
+    const isMissingTargetRoleColumn = error && (error.code === 'ER_BAD_FIELD_ERROR' || error.code === 'ER_NO_SUCH_FIELD' || String(error.message).includes('target_role'));
+    if (isMissingTargetRoleColumn) {
+      const result = await getLegacyPaginatedCriteria(req);
+      if (result.error) return res.status(400).json({ message: result.error });
+      return res.json({ success: true, data: result.rows, pagination: result.pagination });
+    }
     return res.status(500).json({ message: 'Unable to load all evaluation criteria.', error: error.message });
   }
 });
 
-app.get('/api/criteria', authenticate, authorizeRoles('student', 'instructor', 'dept_head', 'college_dean', 'dean', 'academic_directorate', 'academic_director', 'directorate', 'admin', 'systemadmin'), async (req, res) => {
+app.get('/api/admin/criteria', authenticate, authorizeRoles('admin', 'systemadmin'), async (req, res) => {
+  try {
+    const result = await getPaginatedCriteria(req);
+    if (result.error) return res.status(400).json({ message: result.error });
+    return res.json({ success: true, data: result.rows, pagination: result.pagination });
+  } catch (error) {
+    const isMissingTargetRoleColumn = error && (error.code === 'ER_BAD_FIELD_ERROR' || error.code === 'ER_NO_SUCH_FIELD' || String(error.message).includes('target_role'));
+    if (isMissingTargetRoleColumn) {
+      const result = await getLegacyPaginatedCriteria(req);
+      if (result.error) return res.status(400).json({ message: result.error });
+      return res.json({ success: true, data: result.rows, pagination: result.pagination });
+    }
+    return res.status(500).json({ message: 'Unable to load all evaluation criteria.', error: error.message });
+  }
+});
+
+app.get('/api/criteria', authenticate, authorizeRoles('student', 'instructor', 'dept_head', 'college_dean', 'dean', 'academic_directorate', 'academic_director', 'directorate', 'lab_assistant', 'admin', 'systemadmin'), async (req, res) => {
   try {
     const type = String(req.query.type || '').trim().toLowerCase();
+    const rawTargetRole = req.query.target_role !== undefined ? String(req.query.target_role).trim().toLowerCase() : 'instructor';
+    const targetRole = targetRoles.includes(rawTargetRole) ? rawTargetRole : 'instructor';
+
     if (!criterionTypes.includes(type)) return res.status(400).json({ message: 'A valid evaluator type is required.' });
-    const [rows] = await pool.query('SELECT id, evaluator_type, criterion_text, criterion_text_am, category, weight, is_active, created_at FROM evaluation_criteria WHERE evaluator_type = ? AND is_active = 1 ORDER BY category ASC, id ASC', [type]);
+
+    const [rows] = await pool.query(
+      `SELECT id, evaluator_type, target_role, criterion_text, criterion_text_am, category, weight, is_active, created_at
+       FROM evaluation_criteria
+       WHERE evaluator_type = ? AND is_active = 1 AND (target_role = ? OR target_role IS NULL)
+       ORDER BY category ASC, id ASC`,
+      [type, targetRole]
+    );
     return res.json(rows);
   } catch (error) {
+    const isMissingTargetRoleColumn = error && (error.code === 'ER_BAD_FIELD_ERROR' || error.code === 'ER_NO_SUCH_FIELD' || String(error.message).includes('target_role'));
+    if (isMissingTargetRoleColumn) {
+      const [rows] = await pool.query(
+        `SELECT id, evaluator_type, criterion_text, criterion_text_am, category, weight, is_active, created_at
+         FROM evaluation_criteria
+         WHERE evaluator_type = ? AND is_active = 1
+         ORDER BY category ASC, id ASC`,
+        [type]
+      );
+      return res.json(rows);
+    }
     return res.status(500).json({ message: 'Unable to load evaluation criteria.', error: error.message });
   }
 });
@@ -3107,16 +5380,17 @@ app.get('/api/criteria', authenticate, authorizeRoles('student', 'instructor', '
 app.post('/api/admin/criteria', authenticate, authorizeRoles('admin', 'systemadmin'), async (req, res) => {
   try {
     const evaluatorType = String(req.body.evaluator_type || '').trim().toLowerCase();
+    const targetRole = String(req.body.target_role || 'instructor').trim().toLowerCase();
     const criterionText = String(req.body.criterion_text || '').trim();
     const criterionTextAm = String(req.body.criterion_text_am || '').trim();
     const category = String(req.body.category || 'General').trim() || 'General';
     const weight = Number(req.body.weight ?? 5);
-    if (!criterionTypes.includes(evaluatorType) || !criterionText || criterionText.length > 255 || !Number.isInteger(weight) || weight < 1) {
-      return res.status(400).json({ message: 'evaluator_type, criterion_text, and a positive whole-number weight are required.' });
+    if (!criterionTypes.includes(evaluatorType) || !targetRoles.includes(targetRole) || !criterionText || criterionText.length > 255 || !Number.isInteger(weight) || weight < 1) {
+      return res.status(400).json({ message: 'evaluator_type, target_role, criterion_text, and a positive whole-number weight are required.' });
     }
     if (criterionTextAm.length > 255) return res.status(400).json({ message: 'criterion_text_am must be 255 characters or fewer.' });
-    const [result] = await pool.query('INSERT INTO evaluation_criteria (evaluator_type, criterion_text, criterion_text_am, category, weight, is_active) VALUES (?, ?, ?, ?, ?, 1)', [evaluatorType, criterionText, criterionTextAm || null, category, weight]);
-    return res.status(201).json({ id: result.insertId, evaluator_type: evaluatorType, criterion_text: criterionText, criterion_text_am: criterionTextAm || null, category, weight, is_active: 1 });
+    const [result] = await pool.query('INSERT INTO evaluation_criteria (evaluator_type, target_role, criterion_text, criterion_text_am, category, weight, is_active) VALUES (?, ?, ?, ?, ?, ?, 1)', [evaluatorType, targetRole, criterionText, criterionTextAm || null, category, weight]);
+    return res.status(201).json({ id: result.insertId, evaluator_type: evaluatorType, target_role: targetRole, criterion_text: criterionText, criterion_text_am: criterionTextAm || null, category, weight, is_active: 1 });
   } catch (error) {
     return res.status(500).json({ message: 'Unable to create evaluation criterion.', error: error.message });
   }
@@ -3129,6 +5403,7 @@ app.put('/api/admin/criteria/:id', authenticate, authorizeRoles('admin', 'system
     const values = [];
     if (req.body.criterion_text !== undefined) { const text = String(req.body.criterion_text).trim(); if (!text || text.length > 255) return res.status(400).json({ message: 'criterion_text must be 1-255 characters.' }); fields.push('criterion_text = ?'); values.push(text); }
     if (req.body.criterion_text_am !== undefined) { const textAm = String(req.body.criterion_text_am || '').trim(); if (textAm.length > 255) return res.status(400).json({ message: 'criterion_text_am must be 255 characters or fewer.' }); fields.push('criterion_text_am = ?'); values.push(textAm || null); }
+    if (req.body.target_role !== undefined) { const targetRole = String(req.body.target_role).trim().toLowerCase(); if (!targetRoles.includes(targetRole)) return res.status(400).json({ message: 'target_role must be instructor or lab_assistant.' }); fields.push('target_role = ?'); values.push(targetRole); }
     if (req.body.category !== undefined) { fields.push('category = ?'); values.push(String(req.body.category).trim() || 'General'); }
     if (req.body.weight !== undefined) { const weight = Number(req.body.weight); if (!Number.isInteger(weight) || weight < 1) return res.status(400).json({ message: 'weight must be a positive whole number.' }); fields.push('weight = ?'); values.push(weight); }
     if (req.body.is_active !== undefined) { fields.push('is_active = ?'); values.push(req.body.is_active ? 1 : 0); }
@@ -3206,6 +5481,7 @@ app.get('/api/student/evaluations', authenticate, authorizeRoles('student'), asy
   try {
     const [[student]] = await pool.query('SELECT id, department_id, year_level, semester, section, program_type FROM students WHERE user_id = ? LIMIT 1', [req.user.id]);
     if (!student) return res.json([]);
+    const studentSection = normalizeSectionValue(student.section);
     const [rows] = await pool.query(
       `SELECT DISTINCT ca.id AS assignment_id, ed.id AS dispatch_id, c.code AS course_code, c.name AS course_name,
         ca.year_level, ca.semester, ca.section, ca.program_type,
@@ -3217,11 +5493,17 @@ app.get('/api/student/evaluations', authenticate, authorizeRoles('student'), asy
          AND ed.year_level = ca.year_level AND ed.semester = ca.semester
          AND ed.academic_year = ca.academic_year AND ed.is_student_published = 1
          AND (ed.program_type IS NULL OR ed.program_type = ca.program_type)
-         AND (ed.student_group IS NULL OR ed.student_group = ca.section)
+         AND (
+           ed.student_id = ? OR (
+             ed.student_id IS NULL
+             AND ed.student_group IS NOT NULL
+             AND LOWER(TRIM(REPLACE(REPLACE(ed.student_group, 'Section ', ''), 'section ', ''))) = LOWER(TRIM(REPLACE(REPLACE(?, 'Section ', ''), 'section ', '')))
+           )
+         )
        WHERE ca.department_id = ? AND ca.year_level = ? AND ca.semester = ?
          AND ca.section = ? AND ca.program_type = ?
        ORDER BY c.code ASC`,
-      [student.department_id, student.year_level, student.semester, student.section, student.program_type]
+      [student.id, studentSection, student.department_id, student.year_level, student.semester, student.section, student.program_type]
     );
     return res.json(rows);
   } catch (error) {
@@ -3410,7 +5692,111 @@ app.get('/api/instructor/profile', authenticate, authorizeRoles('instructor'), a
   }
 });
 
-app.get('/api/instructor/performance-summary', authenticate, authorizeRoles('instructor'), async (req, res) => {
+app.get('/api/lab-assistant/profile', authenticate, authorizeRoles('lab_assistant'), async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.json({
+        success: false,
+        data: {
+          id: null,
+          user_id: null,
+          employee_id: 'N/A',
+          first_name: 'Lab Assistant',
+          last_name: '',
+          department_id: null,
+          department_name: 'N/A'
+        },
+        message: 'Authentication required.'
+      });
+    }
+
+    const [rows] = await pool.query(
+      `SELECT la.id, la.user_id, la.employee_id, la.first_name, la.last_name, la.department_id,
+              COALESCE(NULLIF(d.department_name, ''), d.name, 'N/A') AS department_name,
+              c.name AS college_name
+       FROM lab_assistants la
+       LEFT JOIN departments d ON d.id = la.department_id
+       LEFT JOIN colleges c ON c.id = d.college_id
+       WHERE la.user_id = ? LIMIT 1`,
+      [userId]
+    );
+
+    if (!rows || rows.length === 0) {
+      return res.json({
+        success: false,
+        data: {
+          id: null,
+          user_id: userId,
+          employee_id: 'N/A',
+          first_name: 'Lab Assistant',
+          last_name: '',
+          department_id: null,
+          department_name: 'N/A'
+        },
+        message: 'Lab Assistant profile not found.'
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: rows[0],
+      message: 'Lab Assistant profile retrieved.'
+    });
+  } catch (error) {
+    console.error('Lab Assistant profile error:', error);
+    return res.json({
+      success: false,
+      data: {
+        id: null,
+        user_id: null,
+        employee_id: 'N/A',
+        first_name: 'Lab Assistant',
+        last_name: '',
+        department_id: null,
+        department_name: 'N/A'
+      },
+      message: 'Unable to load Lab Assistant profile. Showing defaults.'
+    });
+  }
+});
+
+app.get('/api/lab-assistant/performance-summary', authenticate, authorizeRoles('lab_assistant'), async (req, res) => {
+  try {
+    const [[assistant]] = await pool.query('SELECT id, user_id, employee_id, first_name, last_name, department_id FROM lab_assistants WHERE user_id = ? LIMIT 1', [req.user.id]);
+    if (!assistant) return sendResponse(res, 404, 'Lab Assistant profile not found.', 'የላብ ረዳት መገለጫ አልተገኘም።');
+    const [[student]] = await pool.query(
+      `SELECT COALESCE(AVG(ses.score), 0) AS score
+       FROM student_evaluation_submissions ses
+       INNER JOIN evaluation_dispatches ed ON ed.id = ses.dispatch_id
+       WHERE ed.department_id = ? AND ed.target_type = 'lab_assistant' AND ed.target_user_id IN (?, ?)
+         AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved')`,
+      [assistant.department_id, assistant.id, assistant.user_id]
+    );
+    const [[peer]] = await pool.query(
+      `SELECT COALESCE(AVG(pes.score), 0) AS score
+       FROM peer_evaluation_submissions pes
+       INNER JOIN peer_evaluations pe ON pe.id = pes.peer_evaluation_id
+       INNER JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id
+       WHERE ed.department_id = ? AND ed.target_type = 'lab_assistant' AND ed.target_user_id IN (?, ?)
+         AND LOWER(COALESCE(pes.status, 'submitted')) IN ('submitted', 'completed', 'approved')`,
+      [assistant.department_id, assistant.id, assistant.user_id]
+    );
+    const studentScore = Number(student?.score || 0);
+    const peerScore = Number(peer?.score || 0);
+    return sendResponse(res, 200, 'Lab Assistant performance retrieved.', 'የላብ ረዳት አፈጻጸም ተገኝቷል።', {
+      studentScore: Number(studentScore.toFixed(2)),
+      peerScore: Number(peerScore.toFixed(2)),
+      overallScore: Number((studentScore * 0.5 + peerScore * 0.5).toFixed(2)),
+      weights: { student: 50, peer: 50 },
+    });
+  } catch (error) {
+    console.error('Lab Assistant performance error:', error);
+    return res.status(500).json({ message: 'Unable to load Lab Assistant performance.' });
+  }
+});
+
+const getInstructorPerformance = async (req, res) => {
   try {
     const [instructorRows] = await pool.query('SELECT id, department_id FROM instructors WHERE user_id = ? LIMIT 1', [req.user.id]);
     if (!instructorRows.length) {
@@ -3418,52 +5804,142 @@ app.get('/api/instructor/performance-summary', authenticate, authorizeRoles('ins
     }
 
     const instructor = instructorRows[0];
-    const [summaryRows] = await pool.query(
-      `SELECT student_raw_percentage, student_weighted_score,
-              dept_head_raw_percentage, dept_head_weighted_score,
-              peer_raw_percentage, peer_weighted_score, total_weighted_score,
-              is_published
-       FROM evaluation_summaries
-       WHERE instructor_id = ? AND is_published = 1
+    const unified = await getInstructorOverallPerformance({
+      instructorId: instructor.id,
+      academicYear: String(req.query.academic_year || '').trim(),
+      semester: String(req.query.semester || '').trim(),
+    });
+    return sendResponse(res, 200, 'Performance summary retrieved.', 'የአፈጻጸም ማጠቃለያ ተመለሰ።', {
+      totalWeightedScore: unified.totalScore,
+      totalScore: unified.totalScore,
+      isComplete: unified.isComplete,
+      statusBadge: unified.statusBadge,
+      status: unified.isComplete ? unified.classification.split(' (')[0] : unified.statusBadge,
+      badgeColor: unified.isComplete ? (unified.totalScore >= 90 ? 'emerald' : unified.totalScore >= 85 ? 'blue' : unified.totalScore >= 70 ? 'cyan' : unified.totalScore >= 50 ? 'amber' : 'red') : 'amber',
+      completion: unified.completion,
+      hasAssignedCourse: unified.hasAssignedCourse,
+      isDepartmentHead: false,
+      breakdown: {
+        student: { rawPercentage: unified.studentRaw, rawScore: unified.studentRaw, weightedContribution: unified.studentWeighted, weight: 50, isAvailable: unified.hasAssignedCourse },
+        deptHead: { rawPercentage: unified.deptHeadRaw, rawScore: unified.deptHeadRaw, weightedContribution: unified.deptHeadWeighted, weight: 30, isAvailable: unified.deptHead.count > 0 },
+        peer: { rawPercentage: unified.peerRaw, rawScore: unified.peerRaw, weightedContribution: unified.peerWeighted, weight: 20, isAvailable: unified.peer.count > 0 },
+      },
+      instructor: { name: unified.instructorName, department: unified.department },
+      academicYear: unified.academicYear,
+      semester: unified.semester,
+    });
+    const [latestResultRows] = await pool.query(
+      `SELECT e.instructor_id, e.student_average, e.student_score, e.peer_average,
+              e.peer_score, e.dept_head_score, e.total_score, e.final_score,
+              e.academic_year, e.semester,
+              TRIM(CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, ''))) AS instructor_name,
+              d.name AS department_name
+       FROM evaluation_results e
+       INNER JOIN instructors i ON i.id = e.instructor_id
+       LEFT JOIN departments d ON d.id = e.department_id
+       WHERE e.instructor_id = ?
+         AND (COALESCE(e.total_score, 0) > 0 OR COALESCE(e.final_score, 0) > 0
+           OR COALESCE(e.student_average, 0) > 0 OR COALESCE(e.peer_average, 0) > 0
+           OR COALESCE(e.dept_head_score, 0) > 0)
+       ORDER BY e.id DESC
        LIMIT 1`,
       [instructor.id]
     );
-    if (!summaryRows.length) return res.json({ published: false });
-
-    const publishedSummary = summaryRows[0];
-    return res.json({
-      published: true,
-      totalWeightedScore: Number(publishedSummary.total_weighted_score || 0),
-      breakdown: {
-        student: { rawPercentage: Number(publishedSummary.student_raw_percentage || 0), weightedContribution: Number(publishedSummary.student_weighted_score || 0), weight: 50 },
-        deptHead: { rawPercentage: Number(publishedSummary.dept_head_raw_percentage || 0), weightedContribution: Number(publishedSummary.dept_head_weighted_score || 0), weight: 30 },
-        peer: { rawPercentage: Number(publishedSummary.peer_raw_percentage || 0), weightedContribution: Number(publishedSummary.peer_weighted_score || 0), weight: 20 },
-      },
-    });
-
+    const latestResult = latestResultRows[0] || null;
+    const [summaryRows] = await pool.query(
+      `SELECT student_score, student_weighted_score,
+              dept_head_score, dept_head_weighted_score,
+              peer_score, peer_weighted_score, total_weighted_score,
+              ${INSTRUCTOR_WEIGHTED_SCORE_SQL} AS sql_final_score,
+              is_published
+       FROM (
+         SELECT student_raw_percentage AS student_score,
+                student_weighted_score,
+                dept_head_raw_percentage AS dept_head_score,
+                dept_head_weighted_score,
+                peer_raw_percentage AS peer_score,
+                peer_weighted_score,
+                total_weighted_score,
+                is_published
+         FROM evaluation_summaries
+         WHERE instructor_id = ? AND is_published = 1
+       ) AS published_summary
+       LIMIT 1`,
+      [instructor.id]
+    );
+    const [assignmentRows] = await pool.query(
+      `SELECT COUNT(*) AS total
+       FROM course_assignments
+       WHERE instructor_id = ?
+         AND (semester IS NULL OR TRIM(semester) <> '')
+         AND (academic_year IS NULL OR TRIM(academic_year) <> '')`,
+      [instructor.id]
+    );
+    const hasAssignedCourse = Number(assignmentRows[0]?.total || 0) > 0;
+    const requestedAcademicYear = String(req.query.academic_year || '').trim();
+    const requestedSemester = String(req.query.semester || '').trim();
     const [studentRows] = await pool.query(
-      `SELECT ses.score, ses.feedback, ses.responses, ed.course_name, ses.created_at
+      `SELECT ses.score, ses.feedback, ses.strengths, ses.improvements, ses.responses, ed.course_name, ses.created_at
        FROM student_evaluation_submissions ses
        JOIN evaluation_dispatches ed ON ed.id = ses.dispatch_id
-       LEFT JOIN course_assignments ca ON (ca.id = ed.assignment_id OR (ca.student_id = ed.student_id AND ca.course_id = ed.course_id))
-       WHERE ca.instructor_id = ? AND ses.status = 'submitted'
+       JOIN course_assignments ca ON ca.id = ed.assignment_id
+       WHERE ca.instructor_id = ?
+         AND LOWER(COALESCE(ed.target_type, 'instructor')) = 'instructor'
+         AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved')
+         AND (? = '' OR ca.academic_year = ? OR ed.academic_year = ?)
+         AND (? = '' OR LOWER(TRIM(ca.semester)) = LOWER(TRIM(?)) OR LOWER(TRIM(ed.semester)) = LOWER(TRIM(?)))
        ORDER BY ses.created_at DESC`,
-      [instructor.id]
+      [instructor.id, requestedAcademicYear, requestedAcademicYear, requestedAcademicYear, requestedSemester, requestedSemester, requestedSemester]
     );
     const [deptHeadRows] = await pool.query(
       `SELECT dhe.total_score AS score, dhe.criteria_scores, dhe.created_at
        FROM dept_head_evaluations dhe
-       WHERE dhe.instructor_id = ? AND LOWER(TRIM(dhe.status)) IN ('submitted', 'completed', 'approved')
+       WHERE (dhe.instructor_id = ? OR dhe.evaluatee_id = ?)
+         AND LOWER(TRIM(dhe.status)) IN ('submitted', 'completed', 'approved')
        ORDER BY dhe.created_at DESC`,
-      [instructor.id]
+      [instructor.id, req.user.id]
     );
+    const [peerTargetColumns] = await pool.query(
+      `SELECT TABLE_NAME, COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME IN ('peer_evaluations', 'peer_evaluation_submissions')
+         AND COLUMN_NAME IN ('evaluatee_id', 'evaluated_instructor_id', 'target_instructor_id', 'instructor_id')`
+    );
+    const getTargetColumn = (tableName) => {
+      const available = peerTargetColumns
+        .filter((column) => column.TABLE_NAME === tableName)
+        .map((column) => column.COLUMN_NAME);
+      return ['evaluatee_id', 'evaluated_instructor_id', 'target_instructor_id', 'instructor_id'].find((column) => available.includes(column));
+    };
+    const peerTargetColumn = getTargetColumn('peer_evaluations');
+    const submissionTargetColumn = getTargetColumn('peer_evaluation_submissions');
+    const peerTargetPredicates = [];
+    const peerTargetParams = [];
+    if (peerTargetColumn) {
+      peerTargetPredicates.push(`pe.${peerTargetColumn} IN (?, ?)`);
+      peerTargetParams.push(instructor.id);
+      peerTargetParams.push(req.user.id);
+    }
+    if (submissionTargetColumn) {
+      peerTargetPredicates.push(`pes.${submissionTargetColumn} IN (?, ?)`);
+      peerTargetParams.push(instructor.id);
+      peerTargetParams.push(req.user.id);
+    }
+    peerTargetPredicates.push('target.user_id = ?');
+    peerTargetParams.push(req.user.id);
+    const peerTargetJoin = peerTargetColumn
+      ? `LEFT JOIN instructors target ON target.id = pe.${peerTargetColumn}`
+      : 'LEFT JOIN instructors target ON 1 = 0';
     const [peerRows] = await pool.query(
       `SELECT pes.score, pes.strengths, pes.suggestions, pes.responses, pes.created_at
        FROM peer_evaluation_submissions pes
        JOIN peer_evaluations pe ON pe.id = pes.peer_evaluation_id
-       WHERE pe.evaluatee_id = ? AND LOWER(TRIM(pes.status)) IN ('submitted', 'completed', 'approved')
+       ${peerTargetJoin}
+       WHERE (${peerTargetPredicates.join(' OR ')})
+         AND LOWER(TRIM(pes.status)) IN ('submitted', 'completed', 'approved')
        ORDER BY pes.created_at DESC`,
-      [instructor.id]
+      peerTargetParams
     );
 
     const parseJson = (value) => {
@@ -3472,49 +5948,117 @@ app.get('/api/instructor/performance-summary', authenticate, authorizeRoles('ins
       try { return JSON.parse(value); } catch { return {}; }
     };
     const average = (rows) => rows.length ? rows.reduce((total, row) => total + Number(row.score || 0), 0) / rows.length : 0;
-    const scores = { student: average(studentRows), deptHead: average(deptHeadRows), peer: average(peerRows) };
-    const weights = { student: 0.5, deptHead: 0.3, peer: 0.2 };
-    const totalScore = (scores.student * weights.student) + (scores.deptHead * weights.deptHead) + (scores.peer * weights.peer);
-    const status = totalScore >= 85 ? 'Excellent' : totalScore >= 70 ? 'Good' : totalScore >= 50 ? 'Needs Improvement' : 'At Risk';
-    const badgeColor = totalScore >= 85 ? 'emerald' : totalScore >= 70 ? 'blue' : totalScore >= 50 ? 'amber' : 'red';
+    const calculatedScores = { student: average(studentRows), deptHead: average(deptHeadRows), peer: average(peerRows) };
+    const scores = {
+      student: calculatedScores.student > 0
+        ? calculatedScores.student
+        : Number(latestResult?.student_score ?? latestResult?.student_average ?? 0),
+      deptHead: calculatedScores.deptHead > 0
+        ? calculatedScores.deptHead
+        : Number(latestResult?.dept_head_score ?? 0),
+      peer: calculatedScores.peer > 0
+        ? calculatedScores.peer
+        : Number(latestResult?.peer_score ?? latestResult?.peer_average ?? 0),
+    };
+    const isDepartmentHead = ['dept_head', 'department_head', 'depthead'].includes(String(req.user?.role || '').trim().toLowerCase());
+    const weightedSummary = calculateInstructorWeightedScore({
+      student: scores.student,
+      deptHead: scores.deptHead,
+      peer: scores.peer,
+      hasAssignedCourse,
+      isDepartmentHead,
+      deptHeadMaxScore: 30,
+    });
+    const persistedSqlScore = Number(summaryRows[0]?.sql_final_score);
+    const hasLiveEvaluationData = studentRows.length > 0 || deptHeadRows.length > 0 || peerRows.length > 0;
+    const totalScore = hasLiveEvaluationData ? weightedSummary.totalWeightedScore : (persistedSqlScore > 0 ? persistedSqlScore : weightedSummary.totalWeightedScore);
+    const [[term]] = await pool.query(
+      'SELECT academic_year, semester FROM course_assignments WHERE instructor_id = ? ORDER BY created_at DESC LIMIT 1',
+      [instructor.id]
+    );
+    const academicYear = String(latestResult?.academic_year || term?.academic_year || new Date().getFullYear());
+    const semester = String(latestResult?.semester || term?.semester || '');
+    await pool.query(
+      `INSERT INTO evaluation_results
+        (instructor_id, department_id, academic_year, semester, student_average, student_score, peer_average, peer_score, dept_head_score, total_score, final_score)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         student_average = VALUES(student_average), student_score = VALUES(student_score),
+         peer_average = VALUES(peer_average), peer_score = VALUES(peer_score),
+         dept_head_score = VALUES(dept_head_score), total_score = VALUES(total_score),
+         final_score = VALUES(final_score), published_at = CURRENT_TIMESTAMP`,
+      [instructor.id, instructor.department_id, academicYear, semester, scores.student, scores.student, scores.peer, scores.peer, scores.deptHead, totalScore, totalScore]
+    );
+    const status = totalScore >= 90 ? 'Excellent' : totalScore >= 85 ? 'Very Good' : totalScore >= 70 ? 'Good' : totalScore >= 50 ? 'Satisfactory' : 'Unsatisfactory';
+    const badgeColor = totalScore >= 90 ? 'emerald' : totalScore >= 85 ? 'blue' : totalScore >= 70 ? 'cyan' : totalScore >= 50 ? 'amber' : 'red';
     const strengths = [];
     const improvements = [];
     const addUnique = (list, value) => {
-      const text = String(value || '').trim();
+      const text = sanitizeEvaluationFeedback(value);
       if (text && !list.includes(text)) list.push(text);
     };
-    const classifyRemark = (text, score, fallback) => {
+    const classifyRemark = (text, score) => {
       const normalized = String(text || '').trim();
       if (!normalized) {
-        addUnique(score >= 70 ? strengths : improvements, fallback);
         return;
       }
       const indicatesImprovement = /improv|enhanc|weak|need|lack|late|timely|คว|should|suggest/i.test(normalized);
       addUnique(indicatesImprovement || score < 50 ? improvements : strengths, normalized);
     };
 
-    studentRows.forEach((row) => classifyRemark(row.feedback, Number(row.score || 0), 'Maintains positive engagement with students.'));
+    studentRows.forEach((row) => {
+      if (row.strengths) addUnique(strengths, row.strengths);
+      if (row.improvements) addUnique(improvements, row.improvements);
+      classifyRemark(row.feedback, Number(row.score || 0));
+    });
     deptHeadRows.forEach((row) => {
       const criteria = parseJson(row.criteria_scores);
-      classifyRemark(criteria.remarks || criteria.feedback, Number(row.score || 0), 'Demonstrates consistent professional performance.');
+      classifyRemark(criteria.remarks || criteria.feedback, Number(row.score || 0));
     });
     peerRows.forEach((row) => {
       addUnique(strengths, row.strengths);
       addUnique(improvements, row.suggestions);
     });
 
-    if (!strengths.length) addUnique(strengths, 'No positive highlights have been recorded yet.');
-    if (!improvements.length) addUnique(improvements, 'No improvement areas have been recorded yet.');
-
     return sendResponse(res, 200, 'Performance summary retrieved.', 'የአፈጻጸም ማጠቃለያ ተመለሰ።', {
       totalWeightedScore: Number(totalScore.toFixed(2)),
+      totalScore: Number(totalScore.toFixed(2)),
       status,
       badgeColor,
+      hasAssignedCourse: Boolean(weightedSummary.hasAssignedCourse),
+      isDepartmentHead: Boolean(isDepartmentHead),
+      warning: weightedSummary.warning,
+      breakdown: weightedSummary.breakdown,
       feedback: { strengths, improvements },
+      instructor: {
+        name: latestResult?.instructor_name || 'Instructor',
+        department: latestResult?.department_name || '',
+      },
+      academicYear,
+      semester,
     });
   } catch (error) {
     console.error('Performance dashboard error:', error);
     return sendResponse(res, 500, 'Unable to retrieve performance dashboard.', 'የአፈጻጸም ዳሽቦርድን ማግኘት አልተቻለም።');
+  }
+};
+
+app.get('/api/instructor/performance-summary', authenticate, authorizeRoles('instructor'), getInstructorPerformance);
+app.get('/api/instructor/performance', authenticate, authorizeRoles('instructor'), getInstructorPerformance);
+app.post('/api/instructors/goals', authenticate, authorizeRoles('instructor'), async (req, res) => {
+  const focusArea = String(req.body?.focusArea || '').trim();
+  const goal = String(req.body?.goal || '').trim();
+  const term = String(req.body?.term || '').trim();
+  if (!focusArea || !goal || !term) return res.status(400).json({ success: false, message: 'Focus area, goal, and term are required.' });
+  try {
+    const [result] = await pool.query(
+      'INSERT INTO instructor_goals (instructor_user_id, focus_area, goal, term) VALUES (?, ?, ?, ?)',
+      [req.user.id, focusArea, goal, term]
+    );
+    return res.status(201).json({ success: true, data: { id: result.insertId, focusArea, goal, term, status: 'active' } });
+  } catch (error) {
+    console.error('Instructor goal save failed:', error);
+    return res.status(500).json({ success: false, message: 'Unable to save improvement goal.' });
   }
 });
 
@@ -3526,7 +6070,7 @@ app.get('/api/student/pending-evaluations', authenticate, authorizeRoles('studen
     }
 
     const [studentRows] = await pool.query(
-      'SELECT department_id, year_level, semester, section FROM students WHERE user_id = ? LIMIT 1',
+      'SELECT id, department_id, program_type, year_level, semester, section FROM students WHERE user_id = ? LIMIT 1',
       [req.user.id]
     );
 
@@ -3543,17 +6087,26 @@ app.get('/api/student/pending-evaluations', authenticate, authorizeRoles('studen
         ca.id AS assignment_id,
         ca.is_published,
         ca.is_student_published,
-        ca.is_peer_published
+        ca.is_peer_published,
+        ed.id AS dispatch_id
       FROM course_assignments ca
       JOIN courses c ON ca.course_id = c.id
       LEFT JOIN instructors i ON ca.instructor_id = i.id
+      INNER JOIN evaluation_dispatches ed ON ed.assignment_id = ca.id AND (
+        ed.student_id = ? OR (
+          ed.student_id IS NULL
+          AND ed.student_group IS NOT NULL
+          AND LOWER(TRIM(REPLACE(REPLACE(ed.student_group, 'Section ', ''), 'section ', ''))) = LOWER(TRIM(REPLACE(REPLACE(?, 'Section ', ''), 'section ', '')))
+        )
+      )
       WHERE ca.department_id = ?
         AND LOWER(TRIM(ca.year_level)) = LOWER(TRIM(?))
         AND LOWER(TRIM(ca.semester)) = LOWER(TRIM(?))
         AND LOWER(TRIM(REPLACE(REPLACE(ca.section, 'Section ', ''), 'section ', ''))) = LOWER(?)
-        AND ca.is_student_published = 1
+        AND (ca.is_student_published = 1 OR LOWER(TRIM(COALESCE(ca.status, ''))) = 'published')
+        AND LOWER(TRIM(COALESCE(ca.program_type, ''))) = LOWER(TRIM(COALESCE(?, '')))
       ORDER BY c.code ASC`,
-      [student.department_id, student.year_level, student.semester, normalizedSection]
+      [student.id, normalizedSection, student.department_id, student.year_level, student.semester, normalizedSection, student.program_type]
     );
 
     return sendResponse(res, 200, 'Pending evaluations retrieved successfully.', 'የቅድሚያ ግምገማዎች በትክክል ተቀርቧል።', rows);
@@ -3570,14 +6123,20 @@ app.get('/api/student/evaluations/pending', authenticate, authorizeRoles('studen
       return res.status(200).json([]);
     }
 
-    const [studentRows] = await pool.query('SELECT id FROM students WHERE user_id = ? LIMIT 1', [req.user.id]);
+    const [studentRows] = await pool.query('SELECT id, department_id, program_type, year_level, semester, section FROM students WHERE user_id = ? LIMIT 1', [req.user.id]);
     if (!studentRows.length) {
       return res.status(200).json([]);
     }
 
     const student = studentRows[0];
-    const [rows] = await pool.query(
+    const academicYear = String(req.query.academic_year || new Date().getFullYear());
+    const semester = String(req.query.semester || student.semester || 'Semester I');
+    const studentSection = normalizeSectionValue(student.section);
+
+    const [evaluations] = await pool.query(
       `SELECT ed.id,
+        ed.assignment_id,
+        ed.course_id,
         ed.template_id,
         ed.student_id,
         ed.student_identifier,
@@ -3591,25 +6150,58 @@ app.get('/api/student/evaluations/pending', authenticate, authorizeRoles('studen
         ed.payload,
         ed.status,
         ed.created_at,
-        CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, '')) AS instructor_name,
+        CASE WHEN LOWER(COALESCE(ca.assigned_role, ed.target_type, 'instructor')) = 'lab_assistant' THEN 'lab_assistant' ELSE 'instructor' END AS target_type,
+        CASE WHEN LOWER(COALESCE(ca.assigned_role, ed.target_type, 'instructor')) = 'lab_assistant' THEN COALESCE(ca.staff_id, ed.target_user_id) ELSE i.id END AS target_user_id,
+        COALESCE(NULLIF(TRIM(CONCAT(COALESCE(i.first_name, la.first_name, ''), ' ', COALESCE(i.last_name, la.last_name, ''))), ''), CONCAT(COALESCE(ed.target_first_name, ''), ' ', COALESCE(ed.target_last_name, ''))) AS instructor_name,
+        COALESCE(NULLIF(TRIM(CONCAT(COALESCE(i.first_name, la.first_name, ''), ' ', COALESCE(i.last_name, la.last_name, ''))), ''), CONCAT(COALESCE(ed.target_first_name, ''), ' ', COALESCE(ed.target_last_name, ''))) AS target_name,
         ses.score AS total_score,
         ses.feedback,
         ses.responses,
+        ses.submitted_at,
+        ses.editable_until,
         ses.status AS submission_status,
         ses.id AS submission_id,
         CASE WHEN ses.id IS NOT NULL THEN 1 ELSE 0 END AS is_evaluated
-      FROM evaluation_dispatches ed
-      LEFT JOIN courses c ON ed.course_id = c.id
-      LEFT JOIN course_assignments ca ON (ca.id = ed.assignment_id OR (ca.student_id = ed.student_id AND ca.course_id = ed.course_id))
+      FROM course_assignments ca
+      LEFT JOIN courses c ON ca.course_id = c.id
+      LEFT JOIN evaluation_dispatches ed ON ed.assignment_id = ca.id AND (
+        ed.student_id = ? OR (
+          ed.student_id IS NULL
+          AND ed.student_group IS NOT NULL
+          AND LOWER(TRIM(REPLACE(REPLACE(ed.student_group, 'Section ', ''), 'section ', ''))) = LOWER(TRIM(REPLACE(REPLACE(?, 'Section ', ''), 'section ', '')))
+        )
+      )
       LEFT JOIN instructors i ON ca.instructor_id = i.id
+      LEFT JOIN lab_assistants la ON LOWER(COALESCE(ca.assigned_role, 'instructor')) = 'lab_assistant' AND la.id = ca.staff_id
       LEFT JOIN student_evaluation_submissions ses ON ses.dispatch_id = ed.id
-      WHERE ed.student_id = ?
+      WHERE ca.department_id = ?
+        AND ed.id IS NOT NULL
+        AND (ca.is_student_published = 1 OR LOWER(TRIM(COALESCE(ca.status, ''))) = 'published')
+        AND (? = '' OR ca.academic_year = ? OR ca.academic_year LIKE CONCAT('%', ?, '%'))
+        AND (
+          LOWER(TRIM(COALESCE(ca.program_type, ''))) IN ('', 'all', 'all programs')
+          OR LOWER(TRIM(COALESCE(ca.program_type, ''))) = LOWER(TRIM(COALESCE(?, '')))
+        )
+        AND (
+          LOWER(TRIM(COALESCE(ca.year_level, ''))) IN ('', 'all', 'all years')
+          OR REGEXP_REPLACE(LOWER(TRIM(ca.year_level)), '[^0-9]', '') = REGEXP_REPLACE(LOWER(TRIM(?)), '[^0-9]', '')
+        )
+        AND LOWER(TRIM(REPLACE(REPLACE(ca.semester, 'Semester', ''), 'semester', ''))) = LOWER(TRIM(REPLACE(REPLACE(?, 'Semester', ''), 'semester', '')))
+        AND (
+          ca.section IS NULL
+          OR LOWER(TRIM(REPLACE(REPLACE(ca.section, 'Section', ''), 'section', ''))) IN ('', 'all', 'all sections')
+          OR LOWER(TRIM(REPLACE(REPLACE(ca.section, 'Section', ''), 'section', ''))) = LOWER(TRIM(REPLACE(REPLACE(?, 'Section', ''), 'section', '')))
+        )
+        AND (ed.evaluation_type IN ('student', 'lab_assistant_student') AND LOWER(COALESCE(ed.status, 'pending')) IN ('pending', 'active', 'published', 'submitted'))
       ORDER BY ed.created_at DESC`,
-      [student.id]
+      [student.id, studentSection, student.department_id, academicYear, academicYear, academicYear, student.program_type, student.year_level, semester, studentSection]
     );
 
-    const normalized = rows.map(row => ({
+    const normalized = evaluations.map(row => ({
       ...row,
+      status: row.submission_id
+        ? String(row.submission_status || 'completed').toLowerCase()
+        : 'pending',
       total_score: row.total_score !== null ? Number(row.total_score) : 0,
       is_evaluated: Boolean(row.is_evaluated),
       responses: row.responses ? (typeof row.responses === 'string' ? JSON.parse(row.responses) : row.responses) : {},
@@ -3659,10 +6251,12 @@ app.get('/api/student/evaluations/available', authenticate, authorizeRoles('stud
 
 app.post('/api/student/evaluations/submit', authenticate, authorizeRoles('student'), async (req, res) => {
   try {
-    const { dispatch_id, score, feedback = '', responses = {} } = req.body;
+    const { dispatch_id, score, strengths = '', improvements = '', responses = {} } = req.body;
     if (!dispatch_id) {
       return sendResponse(res, 400, 'Dispatch ID is required.', 'Dispatch ID ያስፈልጋል።');
     }
+    const feedbackValidation = validateEvaluationFeedbackPair(strengths, improvements);
+    if (!feedbackValidation.valid) return sendResponse(res, 400, feedbackValidation.errors[0], feedbackValidation.errors[0]);
 
     const scores = Array.isArray(responses)
       ? responses
@@ -3684,7 +6278,14 @@ app.post('/api/student/evaluations/submit', authenticate, authorizeRoles('studen
     }
 
     const student = studentRows[0];
-    const [dispatchRows] = await pool.query('SELECT * FROM evaluation_dispatches WHERE id = ? AND student_id = ? LIMIT 1', [dispatch_id, student.id]);
+    const [dispatchRows] = await pool.query(
+      `SELECT * FROM evaluation_dispatches 
+       WHERE id = ? AND (
+         (student_id = ? AND target_type IS NULL) OR 
+         (department_id = ? AND target_type = 'lab_assistant')
+       ) LIMIT 1`,
+      [dispatch_id, student.id, student.department_id]
+    );
     if (!dispatchRows.length) {
       return sendResponse(res, 404, 'Dispatch not found.', 'Dispatch አልተገኘም።');
     }
@@ -3701,18 +6302,25 @@ app.post('/api/student/evaluations/submit', authenticate, authorizeRoles('studen
     let result;
     if (submissionWasUpdated) {
       await pool.query(
-        'UPDATE student_evaluation_submissions SET score = ?, feedback = ?, responses = ?, status = ? WHERE dispatch_id = ?',
-        [finalScore, feedback, responsePayload, 'submitted', dispatch.id]
+        'UPDATE student_evaluation_submissions SET score = ?, strengths = ?, improvements = ?, responses = ?, status = ? WHERE dispatch_id = ?',
+        [finalScore, strengths, improvements, responsePayload, 'submitted', dispatch.id]
       );
       result = { insertId: existingSubmission[0].id };
     } else {
       [result] = await pool.query(
-        'INSERT INTO student_evaluation_submissions (dispatch_id, student_id, student_name, score, feedback, responses, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [dispatch.id, student.id, student.student_name || req.user.username, finalScore, feedback, responsePayload, 'submitted']
+        'INSERT INTO student_evaluation_submissions (dispatch_id, student_id, student_name, score, strengths, improvements, responses, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [dispatch.id, student.id, student.student_name || req.user.username, finalScore, strengths, improvements, responsePayload, 'submitted']
       );
     }
 
     await pool.query('UPDATE evaluation_dispatches SET status = ? WHERE id = ?', ['submitted', dispatch.id]);
+    emitEvaluationUpdate({ type: 'student-submission', dispatchId: dispatch.id, instructorId: dispatch.instructor_id, studentId: student.id });
+
+    try {
+      await autoCloseStudentEvaluation(dispatch);
+    } catch (autoCloseError) {
+      console.error('Student evaluation auto-close failed:', autoCloseError);
+    }
 
     try {
       await notifyDepartmentHead({
@@ -3733,10 +6341,12 @@ app.post('/api/student/evaluations/submit', authenticate, authorizeRoles('studen
 
 app.post('/api/evaluations/submit-student', authenticate, authorizeRoles('student'), async (req, res) => {
   try {
-    const { dispatch_id, score, feedback = '', responses = {} } = req.body;
+    const { dispatch_id, score, strengths = '', improvements = '', responses = {} } = req.body;
     if (!dispatch_id) {
       return sendResponse(res, 400, 'Dispatch ID is required.', 'Dispatch ID ያስፈልጋል።');
     }
+    const feedbackValidation = validateEvaluationFeedbackPair(strengths, improvements);
+    if (!feedbackValidation.valid) return sendResponse(res, 400, feedbackValidation.errors[0], feedbackValidation.errors[0]);
 
     // Validate that responses are not empty
     const responseValues = Array.isArray(responses) ? responses : (responses && typeof responses === 'object' ? Object.values(responses) : []);
@@ -3785,19 +6395,26 @@ app.post('/api/evaluations/submit-student', authenticate, authorizeRoles('studen
     if (submissionWasUpdated) {
       // Update existing submission
       await pool.query(
-        'UPDATE student_evaluation_submissions SET score = ?, feedback = ?, responses = ?, status = ? WHERE dispatch_id = ?',
-        [finalScore, feedback, responsePayload, 'submitted', dispatch.id]
+        'UPDATE student_evaluation_submissions SET score = ?, strengths = ?, improvements = ?, responses = ?, status = ? WHERE dispatch_id = ?',
+        [finalScore, strengths, improvements, responsePayload, 'submitted', dispatch.id]
       );
       result = { insertId: existingSubmission[0].id };
     } else {
       // Insert new submission
       [result] = await pool.query(
-        'INSERT INTO student_evaluation_submissions (dispatch_id, student_id, student_name, score, feedback, responses, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [dispatch.id, student.id, student.student_name || req.user.username, finalScore, feedback, responsePayload, 'submitted']
+        'INSERT INTO student_evaluation_submissions (dispatch_id, student_id, student_name, score, strengths, improvements, responses, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [dispatch.id, student.id, student.student_name || req.user.username, finalScore, strengths, improvements, responsePayload, 'submitted']
       );
     }
 
     await pool.query('UPDATE evaluation_dispatches SET status = ? WHERE id = ?', ['submitted', dispatch.id]);
+    emitEvaluationUpdate({ type: 'student-submission', dispatchId: dispatch.id, instructorId: dispatch.instructor_id, studentId: student.id });
+
+    try {
+      await autoCloseStudentEvaluation(dispatch);
+    } catch (autoCloseError) {
+      console.error('Student evaluation auto-close failed:', autoCloseError);
+    }
 
     try {
       await notifyDepartmentHead({
@@ -3816,7 +6433,7 @@ app.post('/api/evaluations/submit-student', authenticate, authorizeRoles('studen
   }
 });
 
-app.post('/api/evaluations/submit-peer', authenticate, authorizeRoles('instructor', 'dept_head', 'admin'), async (req, res) => {
+app.post('/api/evaluations/submit-peer', authenticate, authorizeRoles('instructor', 'lab_assistant', 'dept_head', 'department_head', 'college_dean', 'dean', 'academic_directorate', 'academic_director', 'directorate', 'admin'), async (req, res) => {
   const connection = await pool.getConnection();
   try {
     const { peer_evaluation_id, score, strengths = '', suggestions = '', responses = {} } = req.body;
@@ -3830,34 +6447,39 @@ app.post('/api/evaluations/submit-peer', authenticate, authorizeRoles('instructo
       return sendResponse(res, 400, 'Please answer all criteria questions before submitting.', 'ሁሉንም ጥያቄዎች መልስ ከመስጠት በፊት እባክዎ ያስገቡ።');
     }
 
+    const [[evaluatorProfile]] = await connection.query(
+      'SELECT id, department_id FROM instructors WHERE user_id = ? LIMIT 1',
+      [req.user.id]
+    );
+    const evaluatorInstructorId = Number(evaluatorProfile?.id || 0);
+    const academicYear = String(req.body.academic_year || new Date().getFullYear());
+    const semester = String(req.body.semester || 'Semester I');
+    if (!evaluatorInstructorId || !evaluatorProfile?.department_id || !await isPeerPublicationActive(evaluatorProfile.department_id, academicYear, semester)) {
+      return sendResponse(res, 403, 'Peer evaluation is not currently published.', 'የባልደረባ ግምገማ አሁን አልታተመም።');
+    }
+
     const scores = Array.isArray(responses)
       ? responses
       : (responses && typeof responses === 'object')
         ? Object.values(responses)
         : [];
 
-    const computedScore = scores
-      .map((value) => {
-        if (typeof value === 'string' && value.trim().toUpperCase() === 'NA') return null;
-        return Number(value);
-      })
-      .filter((value) => Number.isFinite(value) && value > 0)
-      .reduce((sum, value) => sum + value, 0);
-    const count = scores
-      .map((value) => {
-        if (typeof value === 'string' && value.trim().toUpperCase() === 'NA') return null;
-        return Number(value);
-      })
-      .filter((value) => Number.isFinite(value) && value > 0).length;
-    const normalizedScore = count ? (computedScore / count) * 20 : 0;
-    const finalScore = score === undefined ? normalizedScore : Number(score);
+    const ratedScores = getRatedLikertValues(Object.fromEntries(scores.map((value, index) => [index, value])));
+    const hasValidResponses = scores.every(isValidLikertResponse);
+    if (!hasValidResponses || !ratedScores.length) {
+      return sendResponse(res, 400, 'Please provide valid 1-5 ratings or NA.', 'እባክዎ ትክክለኛ 1-5 ደረጃ ወይም NA ያስገቡ።');
+    }
+    const finalScore = Number(calculateLikertPercentage(Object.fromEntries(scores.map((value, index) => [index, value]))).toFixed(2));
 
     const [peerRows] = await connection.query(
-      `SELECT pe.*, target.id AS target_instructor_id
+      `SELECT pe.*, target.id AS target_instructor_id,
+          ed.academic_year AS dispatch_academic_year,
+          ed.semester AS dispatch_semester
        FROM peer_evaluations pe
        INNER JOIN instructors target ON target.id = pe.evaluatee_id
+       LEFT JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id
        WHERE pe.id = ? AND pe.evaluator_id = ? LIMIT 1`,
-      [peer_evaluation_id, req.user.id]
+      [peer_evaluation_id, evaluatorInstructorId]
     );
     if (!peerRows.length) {
       return sendResponse(res, 404, 'Peer evaluation assignment was not found for this evaluator.', 'የባልደረባ ግምገማ ለዚህ ገምጋሚ አልተገኘም።');
@@ -3892,7 +6514,28 @@ app.post('/api/evaluations/submit-peer', authenticate, authorizeRoles('instructo
     }
 
     await connection.query('UPDATE peer_evaluations SET status = ? WHERE id = ?', ['submitted', peerEval.id]);
+    await connection.query(
+      `UPDATE peer_evaluation_publications p
+       INNER JOIN evaluation_dispatches ed ON ed.department_id = p.department_id
+         AND ed.academic_year = p.academic_year AND ed.semester = p.semester
+       INNER JOIN peer_evaluations assigned ON assigned.dispatch_id = ed.id
+       SET p.started_at = COALESCE(p.started_at, CURRENT_TIMESTAMP)
+       WHERE assigned.id = ?`,
+      [peerEval.id]
+    );
+    await calculateAndSaveInstructorResult(
+      peerEval.evaluatee_id,
+      peerEval.dispatch_academic_year || academicYear,
+      peerEval.dispatch_semester || semester,
+      connection
+    );
     await connection.commit();
+    emitEvaluationUpdate({
+      type: 'peer-submission',
+      peerEvaluationId: peerEval.id,
+      instructorId: peerEval.evaluatee_id,
+      evaluatorId: req.user.id,
+    });
 
     try {
       const [[evaluatee]] = await pool.query(
@@ -3969,7 +6612,13 @@ app.get('/api/evaluations/submissions', authenticate, authorizeRoles('admin', 'd
     }
     const query = `SELECT * FROM student_evaluation_submissions ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY created_at DESC`;
     const [rows] = await pool.query(query, params);
-    return sendResponse(res, 200, 'Submissions retrieved.', 'የግምገማ ሰነዶች ተመልሰዋል።', rows);
+    const sanitizedRows = rows.map((row) => ({
+      ...row,
+      feedback: sanitizeEvaluationFeedback(row.feedback),
+      strengths: sanitizeEvaluationFeedback(row.strengths),
+      improvements: sanitizeEvaluationFeedback(row.improvements),
+    }));
+    return sendResponse(res, 200, 'Submissions retrieved.', 'የግምገማ ሰነዶች ተመልሰዋል።', sanitizedRows);
   } catch (error) {
     console.error('Failed to list submissions:', error?.message || error);
     return sendResponse(res, 500, 'Unable to list submissions.', 'የግምገማ ሰነዶችን ለማግኘት አልተቻለም።', []);
@@ -3983,6 +6632,14 @@ app.put('/api/evaluations/:id', authenticate, async (req, res) => {
 
     if (!rows.length) {
       return sendResponse(res, 404, 'Evaluation not found.', 'ግምገማ አልተገኘም።');
+    }
+
+    const evaluation = rows[0];
+    if (Number(evaluation.evaluator_id) !== Number(req.user.id)) {
+      return sendResponse(res, 403, 'You can only update your own evaluation.', 'የራስዎን ግምገማ ብቻ ማዘመን ይችላሉ።');
+    }
+    if (evaluation.editable_until && new Date(evaluation.editable_until).getTime() <= Date.now()) {
+      return sendResponse(res, 403, 'This evaluation can no longer be edited because the 72-hour window has expired.', 'የ72 ሰዓት የማስተካከያ ጊዜ ስላለፈ ይህ ግምገማ ከአሁን በኋላ ሊስተካከል አይችልም።');
     }
 
     const updateFields = [];
@@ -4005,6 +6662,7 @@ app.put('/api/evaluations/:id', authenticate, async (req, res) => {
       return sendResponse(res, 400, 'No update fields provided.', 'ምንም የማዘመኛ መስኮች አልተሰጡም።');
     }
 
+    updateFields.push('is_updated = TRUE');
     values.push(req.params.id);
     await pool.query(`UPDATE evaluations SET ${updateFields.join(', ')} WHERE id = ?`, values);
     return sendResponse(res, 200, 'Evaluation updated successfully.', 'ግምገማ በተሳካ ሁኔታ ተዘምኗል።');
@@ -4019,20 +6677,46 @@ app.get('/', (req, res) => {
 });
 
 const startServer = async () => {
-  try {
-    if (process.env.SKIP_SCHEMA_INIT !== 'true') {
+  if (process.env.SKIP_SCHEMA_INIT !== 'true') {
+    try {
       await initializeSchema();
-    } else {
-      console.log('Skipping schema initialization (SKIP_SCHEMA_INIT=true)');
+    } catch (error) {
+      const details = Array.isArray(error.errors)
+        ? error.errors.map((item) => `${item.code || 'ERROR'} ${item.address || ''}:${item.port || ''}`.trim()).join(', ')
+        : error.message;
+      console.error(`Database initialization failed; API will start without database access: ${details}`);
     }
-    httpServer.listen(PORT, () => {
-      console.log(`🚀 IEPS API listening on http://localhost:${PORT}`);
-      console.log(`📘 Health: http://localhost:${PORT}/api/health`);
-    });
-  } catch (error) {
-    console.error('Failed to start API:', error);
-    process.exit(1);
+  } else {
+    console.log('Skipping schema initialization (SKIP_SCHEMA_INIT=true)');
   }
+
+  const handleServerError = (error) => {
+    if (error.code === 'EADDRINUSE') {
+      console.error(`\n❌ ERROR: API port ${PORT} is already in use.`);
+      console.error(`   Stop the existing backend process or set a different PORT.`);
+      console.error(`   To use a different port, run: PORT=5006 npm start\n`);
+      io.close();
+      process.exit(1);
+    }
+    console.error('API server error:', error);
+    process.exit(1);
+  };
+  // Add form expiration middleware
+  app.use(autoExpireFormsMiddleware);
+
+  httpServer.once('error', handleServerError);
+  httpServer.listen(PORT, () => {
+    httpServer.removeListener('error', handleServerError);
+    console.log(`\n✅ IEPS API listening on http://localhost:${PORT}`);
+    console.log(`   Health: http://localhost:${PORT}/api/health\n`);
+
+    startTelegramBot();
+    startCronService();
+
+    // Initialize form expiration scheduler (runs every 30 minutes)
+    initFormExpirationScheduler();
+    console.log(`✅ Form expiration scheduler initialized (checks every 30 minutes)`);
+  });
 };
 
 if (require.main === module) {

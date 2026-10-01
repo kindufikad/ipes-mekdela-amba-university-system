@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
+import { CheckCircle2, X } from 'lucide-react';
 import { FaStar } from 'react-icons/fa';
-import { deanApi } from '../services/api';
+import { criteriaApi, deanApi } from '../services/api';
+import { getQuestionText, groupCriteriaByCategory } from '../utils/evaluationCriteria';
 
 const competencyGroups = [
   {
@@ -20,9 +22,7 @@ const competencyGroups = [
   },
 ];
 
-const allCriteria = competencyGroups.flatMap((group) => group.criteria);
-
-const EvaluateDeptHeads = () => {
+const EvaluateDeptHeads = ({ mode = 'dept-heads' }) => {
   const [deptHeads, setDeptHeads] = useState([]);
   const [selectedHead, setSelectedHead] = useState(null);
   const [scores, setScores] = useState({});
@@ -31,13 +31,22 @@ const EvaluateDeptHeads = () => {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
-  const pendingHeads = deptHeads.filter((head) => !['submitted', 'completed', 'approved'].includes(String(head.status || '').toLowerCase()));
+  const [detailsHead, setDetailsHead] = useState(null);
+  const [criteria, setCriteria] = useState([]);
+  const title = mode === 'peer' ? 'Peer Evaluation' : 'Evaluate Department Heads';
+  const configuredCriteria = criteria.length
+    ? groupCriteriaByCategory(criteria).map((group) => ({
+      title: group.category,
+      criteria: group.criteria.map((criterion) => ({ ...criterion, label: getQuestionText(criterion, 'en') })),
+    }))
+    : competencyGroups;
+  const allCriteria = configuredCriteria.flatMap((group) => group.criteria);
 
   const loadDepartmentHeads = async () => {
     setLoading(true);
     setError('');
     try {
-      const data = await deanApi.getDepartmentHeads();
+      const data = await deanApi.getEvaluations();
       setDeptHeads(Array.isArray(data) ? data : []);
     } catch (loadError) {
       setDeptHeads([]);
@@ -48,6 +57,12 @@ const EvaluateDeptHeads = () => {
   };
 
   useEffect(() => { void loadDepartmentHeads(); }, []);
+
+  useEffect(() => {
+    criteriaApi.get(mode === 'peer' ? 'peer' : 'dept_head')
+      .then((rows) => setCriteria(Array.isArray(rows) ? rows : []))
+      .catch(() => setCriteria([]));
+  }, [mode]);
 
   const openEvaluation = (head) => {
     setSelectedHead(head);
@@ -104,7 +119,7 @@ const EvaluateDeptHeads = () => {
 
         {error ? <div className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div> : null}
         <form onSubmit={submitEvaluation} className="space-y-7">
-          {competencyGroups.map((group) => (
+          {configuredCriteria.map((group) => (
             <fieldset key={group.title} className="space-y-4">
               <legend className="border-b border-slate-200 pb-2 text-xs font-bold tracking-[0.14em] text-slate-500">{group.title}</legend>
               {group.criteria.map((criterion) => (
@@ -141,7 +156,7 @@ const EvaluateDeptHeads = () => {
 
   return (
     <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-      <div className="mb-6"><h2 className="text-xl font-bold text-slate-900">Evaluate Department Heads</h2><p className="mt-1 text-sm text-slate-500">Select a Department Head to open the evaluation criteria.</p></div>
+      <div className="mb-6"><h2 className="text-xl font-bold text-slate-900">{title}</h2><p className="mt-1 text-sm text-slate-500">Select an evaluation to open the criteria or review a submitted evaluation.</p></div>
       {message ? <div className="mb-5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{message}</div> : null}
       {error ? <div className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div> : null}
       {loading ? <p className="py-8 text-center text-sm text-slate-500">Loading pending evaluations...</p> : (
@@ -149,13 +164,22 @@ const EvaluateDeptHeads = () => {
           <table className="min-w-full text-left text-sm">
             <thead className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-3">Department Head / Instructor</th><th className="px-4 py-3">Deadline</th><th className="px-4 py-3">Action</th></tr></thead>
             <tbody className="divide-y divide-slate-100">
-              {pendingHeads.length ? pendingHeads.map((head) => <tr key={head.dept_head_id || head.instructorId}><td className="px-4 py-4 font-medium text-slate-900">{head.full_name || head.name || head.email}<span className="block text-xs font-normal text-slate-500">{head.department_name || head.department || 'Department'}</span></td><td className="px-4 py-4 text-slate-600">{head.deadline || '-'}</td><td className="px-4 py-4"><button type="button" onClick={() => openEvaluation(head)} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-blue-700"><FaStar className="h-3 w-3" /> Evaluate</button></td></tr>) : <tr><td colSpan="3" className="px-4 py-8 text-center text-sm text-slate-500">No pending Department Head evaluations.</td></tr>}
+              {deptHeads.length ? deptHeads.map((head) => {
+                const evaluated = Boolean(head.isEvaluated);
+                return <tr key={head.id || head.dept_head_id || head.instructorId}><td className="px-4 py-4 font-medium text-slate-900">{head.full_name || head.name || head.email}<span className="block text-xs font-normal text-slate-500">{head.department_name || head.department || 'Department'}</span></td><td className="px-4 py-4 text-slate-600">{head.deadline || '-'}</td><td className="px-4 py-4">{evaluated ? <div className="space-y-1"><span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-semibold text-emerald-700"><CheckCircle2 className="h-4 w-4" /> Evaluated ({Number(head.score || 0).toFixed(0)}/100)</span><button type="button" onClick={() => setDetailsHead(head)} className="block text-xs font-semibold text-blue-700 underline-offset-2 hover:underline">View Details</button></div> : <button type="button" onClick={() => openEvaluation(head)} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-blue-700"><FaStar className="h-3 w-3" /> Evaluate</button>}</td></tr>;
+              }) : <tr><td colSpan="3" className="px-4 py-8 text-center text-sm text-slate-500">No evaluations are available.</td></tr>}
             </tbody>
           </table>
         </div>
       )}
+      {detailsHead ? <EvaluationDetailsModal head={detailsHead} onClose={() => setDetailsHead(null)} /> : null}
     </section>
   );
+};
+
+const EvaluationDetailsModal = ({ head, onClose }) => {
+  const criteriaScores = typeof head.criteriaScores === 'string' ? (() => { try { return JSON.parse(head.criteriaScores); } catch { return {}; } })() : (head.criteriaScores || {});
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="evaluation-details-title"><div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white p-6 shadow-xl"><div className="flex items-start justify-between gap-4"><div><h2 id="evaluation-details-title" className="text-xl font-bold text-slate-900">Submitted Evaluation</h2><p className="mt-1 text-sm text-slate-500">{head.name || head.full_name || head.email}</p></div><button type="button" onClick={onClose} aria-label="Close details" className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"><X className="h-5 w-5" /></button></div><div className="mt-6 space-y-3">{Object.entries(criteriaScores).map(([criterionId, score]) => <div key={criterionId} className="flex items-center justify-between gap-4 rounded-xl bg-slate-50 p-3"><span className="text-sm text-slate-700">{criterionId}</span><strong className="text-blue-700">{score}/5</strong></div>)}</div><div className="mt-6 grid gap-4 sm:grid-cols-2"><div><h3 className="text-sm font-semibold text-slate-700">Strengths / Key Achievements</h3><p className="mt-1 whitespace-pre-wrap text-sm text-slate-600">{head.strengths || 'No feedback provided.'}</p></div><div><h3 className="text-sm font-semibold text-slate-700">Areas for Improvement</h3><p className="mt-1 whitespace-pre-wrap text-sm text-slate-600">{head.weaknesses || 'No feedback provided.'}</p></div></div><div className="mt-6 border-t border-slate-200 pt-4 text-right text-sm font-bold text-emerald-700">Total score: {Number(head.score || 0).toFixed(0)}/100</div></div></div>;
 };
 
 export default EvaluateDeptHeads;

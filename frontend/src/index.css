@@ -10,7 +10,66 @@
   }
 
   body {
-    @apply bg-gray-50 text-gray-800 font-sans antialiased;
+    @apply bg-gray-50 text-gray-800 font-sans antialiased transition-colors duration-200;
+  }
+
+  html.dark body {
+    @apply bg-slate-950 text-slate-100;
+  }
+
+  html.dark .bg-white,
+  html.dark .bg-white\/90 {
+    background-color: #111827 !important;
+  }
+
+  html.dark .bg-gray-50,
+  html.dark .bg-slate-50 {
+    background-color: #0f172a !important;
+  }
+
+  html.dark .bg-gray-100,
+  html.dark .bg-slate-100 {
+    background-color: #1e293b !important;
+  }
+
+  html.dark .text-gray-900,
+  html.dark .text-slate-900,
+  html.dark .text-slate-800,
+  html.dark .text-gray-800 {
+    color: #f8fafc !important;
+  }
+
+  html.dark .text-gray-700,
+  html.dark .text-slate-700,
+  html.dark .text-gray-600,
+  html.dark .text-slate-600 {
+    color: #cbd5e1 !important;
+  }
+
+  html.dark .text-gray-500,
+  html.dark .text-slate-500,
+  html.dark .text-gray-400,
+  html.dark .text-slate-400 {
+    color: #94a3b8 !important;
+  }
+
+  html.dark .border-gray-200,
+  html.dark .border-slate-200,
+  html.dark .border-slate-100 {
+    border-color: #334155 !important;
+  }
+
+  html.dark input,
+  html.dark textarea,
+  html.dark select {
+    color: #f8fafc;
+    background-color: #1e293b;
+    border-color: #475569;
+  }
+
+  html.dark input::placeholder,
+  html.dark textarea::placeholder {
+    color: #94a3b8;
   }
 
   ::-webkit-scrollbar {
@@ -56,6 +115,14 @@
   .btn-success {
     @apply bg-green-600 text-white px-6 py-2 rounded-full font-semibold 
            hover:bg-green-500 transition-all duration-300;
+  }
+
+  .badge-success {
+    @apply inline-flex rounded-full bg-green-100 px-3 py-1 text-xs font-semibold text-green-700;
+  }
+
+  .badge-danger {
+    @apply inline-flex rounded-full bg-red-100 px-3 py-1 text-xs font-semibold text-red-700;
   }
   
   .card {

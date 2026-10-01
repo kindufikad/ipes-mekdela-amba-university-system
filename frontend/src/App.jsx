@@ -16,9 +16,11 @@ import ProfilePage from './pages/ProfilePage';
 import SettingsPage from './pages/SettingsPage';
 import CollegeDeanDashboard from './pages/CollegeDeanDashboard';
 import DirectorateDashboard from './pages/DirectorateDashboard';
+import LabAssistantDashboard from './pages/LabAssistantDashboard';
 import Unauthorized from './pages/Unauthorized';
 import { LanguageProvider } from './context/LanguageContext';
 import { AuthProvider } from './context/AuthContext';
+import { EvaluationProvider } from './context/EvaluationContext';
 import { ThemeProvider } from './context/ThemeContext';
 import './App.css';
 
@@ -26,7 +28,8 @@ function App() {
   return (
     <LanguageProvider>
       <AuthProvider>
-        <ThemeProvider>
+        <EvaluationProvider>
+          <ThemeProvider>
           <div className="min-h-screen flex flex-col bg-white dark:bg-black text-black dark:text-white">
       <Toaster 
         position="top-right"
@@ -65,6 +68,7 @@ function App() {
           <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
           <Route path="/student-dashboard" element={<ProtectedRoute allowedRoles={['student']}><DashboardLayout role="student"><StudentDashboard /></DashboardLayout></ProtectedRoute>} />
           <Route path="/instructor-dashboard" element={<ProtectedRoute allowedRoles={['instructor']}><DashboardLayout role="instructor"><InstructorDashboard /></DashboardLayout></ProtectedRoute>} />
+          <Route path="/lab-assistant/dashboard" element={<ProtectedRoute allowedRoles={['lab_assistant']}><DashboardLayout role="lab_assistant"><LabAssistantDashboard /></DashboardLayout></ProtectedRoute>} />
           <Route path="/unauthorized" element={<Unauthorized />} />
           <Route path="/admin/dashboard" element={<ProtectedRoute allowedRoles={['systemadmin']}><DashboardLayout role="systemadmin"><SystemAdminDashboard /></DashboardLayout></ProtectedRoute>} />
           <Route path="/admin-dashboard" element={<ProtectedRoute allowedRoles={['systemadmin']}><DashboardLayout role="systemadmin"><SystemAdminDashboard /></DashboardLayout></ProtectedRoute>} />
@@ -83,7 +87,8 @@ function App() {
         </Routes>
       </main>
     </div>
-        </ThemeProvider>
+          </ThemeProvider>
+        </EvaluationProvider>
       </AuthProvider>
     </LanguageProvider>
   );

@@ -2,94 +2,7 @@ import { useMemo, useState, useEffect } from 'react';
 import { criteriaApi } from '../services/api';
 import LanguageToggle from './LanguageToggle';
 import { getQuestionText, groupCriteriaByCategory } from '../utils/evaluationCriteria';
-
-export const evaluationCriteria = [
-  {
-    category: {
-      en: 'Teaching & Pedagogy',
-      am: 'ትምህርት እና የማስተማር ሂደት',
-    },
-    items: [
-      {
-        id: 'q1',
-        en: 'Prepared and distributed the course outline on time.',
-        am: 'የትምህርት እቅድ በጊዜው አዘጋጅቶ ሰጥቶ ነበር።',
-      },
-      {
-        id: 'q2',
-        en: 'Maintained punctuality and used the full contact hours effectively.',
-        am: 'በጊዜው ተገኝቶ የትምህርት ሰዓቶችን በብቃት ተጠቅመልናቸው።',
-      },
-      {
-        id: 'q3',
-        en: 'Used student-centered teaching methods.',
-        am: 'ተማሪ ተኮር የሆኑ ዘዴዎችን ተጠቅመዋል።',
-      },
-    ],
-  },
-  {
-    category: {
-      en: 'Assessment & Evaluation',
-      am: 'መልካም ግምገማ እና ተመልካቾች',
-    },
-    items: [
-      {
-        id: 'q4',
-        en: 'Delivered balanced examinations and assignments of good quality.',
-        am: 'ሚዛናዊ እና ጥራት ያለው ፈተና እና ስራዎችን ሰጠዋል።',
-      },
-      {
-        id: 'q5',
-        en: 'Submitted grade sheets and assessment reports on time.',
-        am: 'የውጤት ወረቀቶችን በጊዜው አቅርቧል።',
-      },
-    ],
-  },
-  {
-    category: {
-      en: 'Research & Community Service',
-      am: 'ምርምር እና የማህበረሰብ አገልግሎት',
-    },
-    items: [
-      {
-        id: 'q6',
-        en: 'Participated in research and publications.',
-        am: 'በምርምር እና በህትመት ተሳትፏል።',
-      },
-      {
-        id: 'q7',
-        en: 'Provided professional support or training to the community.',
-        am: 'ለማህበረሰቡ በሙያ ድጋፍ ወይም ስልጠና ሰጥቷል።',
-      },
-    ],
-  },
-  {
-    category: {
-      en: 'Professional Conduct',
-      am: 'የሙያ ባህሪ',
-    },
-    items: [
-      {
-        id: 'q8',
-        en: 'Attended departmental meetings regularly.',
-        am: 'የዲፓርትመንት ስብሰባዎችን በመደበኛነት ተሳትፏል።',
-      },
-      {
-        id: 'q9',
-        en: 'Demonstrated professional ethics and healthy relationships with staff and students.',
-        am: 'የሙያ ሥነ ምግባርን እና ጤናማ ግንኙነትን ተገልጿል።',
-      },
-    ],
-  },
-];
-
-export const ratings = [
-  { value: '1', label: '1', am: '1' },
-  { value: '2', label: '2', am: '2' },
-  { value: '3', label: '3', am: '3' },
-  { value: '4', label: '4', am: '4' },
-  { value: '5', label: '5', am: '5' },
-];
+import { ratings } from './evaluationRatings';
 
 const EvaluationForm = ({ instructors = [], courses = [], isCourseAssigned: isCourseAssignedProp, onAssignCourse }) => {
   const [language, setLanguage] = useState('en');
@@ -127,7 +40,7 @@ const EvaluationForm = ({ instructors = [], courses = [], isCourseAssigned: isCo
     setFormData((prev) => ({ ...prev, [field]: value }));
     if (field === 'instructorId' || field === 'courseId') {
       // reset ratings when changing selection
-      setRatings({});
+      setSelectedRatings({});
       setAttemptedSubmit(false);
     }
   };
@@ -160,7 +73,7 @@ const EvaluationForm = ({ instructors = [], courses = [], isCourseAssigned: isCo
       return;
     }
 
-    if (Object.keys(ratings).length < totalQuestions) {
+    if (Object.keys(selectedRatings).length < totalQuestions) {
       setStatusMessage(language === 'en' ? 'Please complete all evaluation items before submitting.' : 'እባክዎን ከሁሉም ግምገማ ነጥቦች በፊት ያስገቡ።');
       return;
     }

@@ -1,16 +1,18 @@
 ﻿import React, { useState, useEffect, useContext } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { LanguageContext } from '../context/LanguageContext';
+import useLandingContent from '../hooks/useLandingContent';
 import campus from '../assets/campus.jpg';
 import classroom from '../assets/classroom.jpg';
 import dashboard from '../assets/dashboard.jpg';
 
 const ImageSlider = () => {
   const { language } = useContext(LanguageContext);
+  const landingContent = useLandingContent();
   const [currentSlide, setCurrentSlide] = useState(0);
   const [fadeOut, setFadeOut] = useState(false);
 
-  const slides = [
+  const fallbackSlides = [
     {
       id: 1,
       image: campus,
@@ -33,6 +35,10 @@ const ImageSlider = () => {
       alt: 'System statistics dashboard',
     },
   ];
+  const slides = fallbackSlides.map((slide, index) => ({
+    ...slide,
+    image: landingContent.home_hero_images[index] || slide.image,
+  }));
 
   useEffect(() => {
     const interval = setInterval(() => {

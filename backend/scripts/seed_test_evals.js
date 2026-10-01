@@ -62,11 +62,11 @@ const pool = require('../config/db');
     // create peer_evaluation for instructor to evaluate (assign to instructorUserId)
     // evaluatee - use instructor.id (the same instructor) or find another instructor
     const evaluateeId = instructor.id;
-    const [existingPeer] = await pool.query('SELECT id FROM peer_evaluations WHERE evaluator_id = ? AND evaluatee_id = ? AND course_id = ? LIMIT 1', [instructor.user_id, evaluateeId, courseId]);
+    const [existingPeer] = await pool.query('SELECT id FROM peer_evaluations WHERE evaluator_id = ? AND evaluatee_id = ? AND course_id = ? LIMIT 1', [instructor.id, evaluateeId, courseId]);
     if (existingPeer.length) {
       console.log('Existing peer evaluation', existingPeer[0].id);
     } else {
-      const [res] = await pool.query('INSERT INTO peer_evaluations (evaluator_id, evaluatee_id, course_id, deadline, status, created_at) VALUES (?, ?, ?, ?, ?, NOW())', [instructor.user_id, evaluateeId, courseId, '2026-08-30', 'pending']);
+      const [res] = await pool.query('INSERT INTO peer_evaluations (evaluator_id, evaluatee_id, course_id, deadline, status, created_at) VALUES (?, ?, ?, ?, ?, NOW())', [instructor.id, evaluateeId, courseId, '2026-08-30', 'pending']);
       console.log('Created peer evaluation', res.insertId);
     }
 

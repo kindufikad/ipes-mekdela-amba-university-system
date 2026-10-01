@@ -101,7 +101,7 @@ const getEvaluations = (req, res) => res.json(state.evaluationSummaries);
 
 const getOverview = async (req, res) => {
   try {
-    const departmentValue = req.user?.department_id || req.user?.departmentId || req.user?.department || req.query.department_id || req.query.department;
+    const departmentValue = req.user?.department_id ?? req.user?.departmentId ?? req.user?.department ?? req.query.department_id ?? req.query.department ?? req.body?.department_id ?? req.body?.department;
     if (!departmentValue) return res.status(400).json({ message: 'Department is required.' });
 
     const numericDepartmentId = Number(departmentValue);
@@ -114,11 +114,12 @@ const getOverview = async (req, res) => {
     const departmentId = departments[0]?.id;
     if (!departmentId) return res.status(404).json({ message: 'Department was not found.' });
 
-    const [[instructorCount], [studentCount], [courseCount], [assignmentCount]] = await Promise.all([
+    const [[instructorCount], [studentCount], [courseCount], [assignmentCount], [labAssistantCount]] = await Promise.all([
       pool.query(`SELECT COUNT(*) AS total FROM instructors i JOIN users u ON u.id = i.user_id WHERE i.department_id = ? AND u.role IN ('instructor', 'dept_head') AND u.status = 'active'`, [departmentId]),
       pool.query(`SELECT COUNT(*) AS total FROM students s JOIN users u ON u.id = s.user_id WHERE s.department_id = ? AND u.role = 'student' AND u.status = 'active'`, [departmentId]),
       pool.query('SELECT COUNT(*) AS total FROM courses WHERE department_id = ?', [departmentId]),
       pool.query(`SELECT COUNT(*) AS total FROM course_assignments WHERE department_id = ? AND (is_published = 1 OR is_student_published = 1 OR is_peer_published = 1)`, [departmentId]),
+      pool.query(`SELECT COUNT(*) AS total FROM lab_assistants WHERE department_id = ? AND status = 'active'`, [departmentId]),
     ]);
 
     return res.json({
@@ -126,6 +127,7 @@ const getOverview = async (req, res) => {
       totalInstructors: Number(instructorCount[0]?.total || 0),
       totalStudents: Number(studentCount[0]?.total || 0),
       totalCourses: Number(courseCount[0]?.total || 0),
+      totalLabAssistants: Number(labAssistantCount[0]?.total || 0),
       activeAssignments: Number(assignmentCount[0]?.total || 0),
       pendingEvaluations: 0,
       avgScore: '0.0',

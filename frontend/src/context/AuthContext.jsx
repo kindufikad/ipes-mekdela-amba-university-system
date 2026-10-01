@@ -1,13 +1,7 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { authApi } from '../services/api';
-
-const initialAccounts = [
-  { username: 'student', password: 'student123', role: 'student', name: 'Student User' },
-  { username: 'instructor', password: 'instructor123', role: 'instructor', name: 'Instructor User' },
-  { username: 'depthead', password: 'depthead123', role: 'depthead', name: 'Department Head' },
-  { username: 'systemadmin', password: 'systemadmin123', role: 'systemadmin', name: 'System Administrator' },
-];
+import { AuthContext } from './authContextStore';
 
 const normalizeRole = (value) => {
   const normalizedValue = String(value || '').trim().toLowerCase();
@@ -15,22 +9,25 @@ const normalizeRole = (value) => {
   if (normalizedValue === 'system_admin' || normalizedValue === 'systemadmin' || normalizedValue === 'admin') return 'systemadmin';
   if (normalizedValue === 'college_dean' || normalizedValue === 'dean') return 'college_dean';
   if (normalizedValue === 'academic_directorate' || normalizedValue === 'academic_director' || normalizedValue === 'directorate') return 'academic_directorate';
+  if (normalizedValue === 'lab_assistant') return 'lab_assistant';
   if (normalizedValue === 'instructor') return 'instructor';
   return 'student';
 };
 
-const AuthContext = createContext({
-  user: null,
-  role: null,
-  isFirstLogin: false,
-  isAuthenticated: false,
-  isAuthLoading: false,
-  accounts: [],
-  login: () => null,
-  logout: () => {},
-  registerUser: () => false,
-  updateUser: () => false,
-});
+const normalizeProfilePhoto = (value) => {
+  const candidate = String(value || '').trim();
+  if (!candidate) return null;
+  if (candidate.startsWith('http://') || candidate.startsWith('https://') || candidate.startsWith('data:')) {
+    return candidate;
+  }
+  if (candidate.startsWith('/')) {
+    if (typeof window !== 'undefined') {
+      return `${window.location.origin}${candidate}`;
+    }
+    return candidate;
+  }
+  return candidate;
+};
 
 export const AuthProvider = ({ children }) => {
   const [session, setSession] = useState(null);
@@ -46,7 +43,7 @@ export const AuthProvider = ({ children }) => {
     return normalizeRole(window.localStorage.getItem('role'));
   });
 
-  const [accounts, setAccounts] = useState(initialAccounts);
+  const [accounts, setAccounts] = useState([]);
 
   const navigate = useNavigate();
   const user = session?.name ? session : null;
@@ -64,14 +61,23 @@ export const AuthProvider = ({ children }) => {
     const loadUserProfile = async () => {
       try {
         const profile = await authApi.me();
+        const profilePhoto = normalizeProfilePhoto(profile.profile_photo || profile.profile_picture || profile.avatar);
         const normalizedProfileRole = normalizeRole(profile.role);
-        setSession({
+        const hydratedUser = {
           ...profile,
-          name: profile.full_name || profile.username,
-          username: profile.username,
+          name: profile.full_name || profile.name || profile.username,
+          username: profile.username || profile.email,
           role: normalizedProfileRole,
+          profile_photo: profilePhoto,
+          profile_picture: profilePhoto,
+          avatar: profilePhoto,
           isFirstLogin: Boolean(profile.isFirstLogin ?? profile.is_first_login ?? false),
-        });
+        };
+        setSession(hydratedUser);
+        if (typeof window !== 'undefined') {
+          window.localStorage.setItem('user', JSON.stringify(hydratedUser));
+          window.localStorage.setItem('userData', JSON.stringify(hydratedUser));
+        }
         setRole(normalizedProfileRole);
       } catch {
         setAuthToken(null);
@@ -104,12 +110,17 @@ export const AuthProvider = ({ children }) => {
     try {
       const parsedUser = JSON.parse(storedUser);
       if (parsedUser && (parsedUser.username || parsedUser.first_name || parsedUser.last_name || parsedUser.full_name)) {
-        setSession({
+        const storedPhoto = normalizeProfilePhoto(parsedUser.profile_photo || parsedUser.profile_picture || parsedUser.avatar);
+        const hydratedStoredUser = {
           ...parsedUser,
           role: normalizeRole(parsedUser.role),
+          profile_photo: storedPhoto,
+          profile_picture: storedPhoto,
+          avatar: storedPhoto,
           isFirstLogin: Boolean(parsedUser.isFirstLogin ?? parsedUser.is_first_login ?? false),
           name: parsedUser.full_name || `${parsedUser.first_name || ''} ${parsedUser.last_name || ''}`.trim() || parsedUser.username,
-        });
+        };
+        setSession(hydratedStoredUser);
         setRole(normalizeRole(parsedUser.role));
       }
     } catch (error) {
@@ -150,6 +161,7 @@ export const AuthProvider = ({ children }) => {
   const setAuthSession = (token, user) => {
     if (!token || !user) return false;
     const normalizedRole = normalizeRole(user.role);
+    const photo = normalizeProfilePhoto(user.profile_photo || user.profile_picture || user.avatar);
     const fullUser = {
       ...user,
       id: user.id ?? user.user_id ?? null,
@@ -158,6 +170,9 @@ export const AuthProvider = ({ children }) => {
       last_name: user.last_name || user.lastName || null,
       full_name: user.full_name || [user.first_name || user.firstName, user.last_name || user.lastName].filter(Boolean).join(' ') || user.username || null,
       role: normalizedRole,
+      profile_photo: photo,
+      profile_picture: photo,
+      avatar: photo,
       isFirstLogin: Boolean(user.isFirstLogin ?? user.is_first_login ?? false),
     };
 
@@ -176,7 +191,14 @@ export const AuthProvider = ({ children }) => {
 
   const updateUser = (updates) => {
     if (!session || !updates || typeof updates !== 'object') return false;
-    const updatedUser = { ...session, ...updates };
+    const photo = normalizeProfilePhoto(updates.profile_photo || updates.profile_picture || updates.avatar || session.profile_photo || session.profile_picture || session.avatar);
+    const updatedUser = {
+      ...session,
+      ...updates,
+      profile_photo: photo,
+      profile_picture: photo,
+      avatar: photo,
+    };
     if (typeof window !== 'undefined') {
       window.localStorage.setItem('user', JSON.stringify(updatedUser));
       window.localStorage.setItem('userData', JSON.stringify(updatedUser));
@@ -187,13 +209,18 @@ export const AuthProvider = ({ children }) => {
 
   const registerUser = (newAccount) => {
     const username = (newAccount.username || '').trim().toLowerCase();
-    if (!username || !newAccount.password) {
+    const email = (newAccount.email || '').trim().toLowerCase();
+    const candidate = username || email;
+
+    if (!candidate) {
       return false;
     }
 
-    const alreadyExists = accounts.some(
-      (acct) => acct.username.trim().toLowerCase() === username
-    );
+    const alreadyExists = accounts.some((acct) => {
+      const acctUsername = (acct.username || '').trim().toLowerCase();
+      const acctEmail = (acct.email || '').trim().toLowerCase();
+      return acctUsername === candidate || acctEmail === candidate;
+    });
 
     if (alreadyExists) {
       return false;
@@ -203,7 +230,8 @@ export const AuthProvider = ({ children }) => {
       ...current,
       {
         ...newAccount,
-        username,
+        username: username || email,
+        email: email || undefined,
       },
     ]);
 
@@ -218,7 +246,7 @@ export const AuthProvider = ({ children }) => {
     }
 
     if (typeof window !== 'undefined') {
-      const keysToClear = ['isLoggedIn', 'userData', 'user', 'ipesAuthToken', 'role'];
+      const keysToClear = ['isLoggedIn', 'userData', 'user', 'ipesAuthToken', 'token', 'role'];
       keysToClear.forEach((key) => {
         window.localStorage.removeItem(key);
         window.sessionStorage.removeItem(key);
@@ -251,5 +279,3 @@ export const AuthProvider = ({ children }) => {
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };
-
-export const useAuth = () => useContext(AuthContext);

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'react-hot-toast';
 import { FaEye, FaEyeSlash, FaLock, FaShieldAlt } from 'react-icons/fa';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/useAuth';
 import { authApi } from '../services/api';
 import BackButton from '../components/BackButton';
 
@@ -51,8 +51,8 @@ const ChangePassword = () => {
       return;
     }
 
-    if (newPassword.length < 6) {
-      setError('New password must be at least 6 characters long.');
+    if (newPassword.length < 8) {
+      setError('New password must be at least 8 characters long.');
       return;
     }
 
@@ -69,7 +69,7 @@ const ChangePassword = () => {
     setIsLoading(true);
 
     try {
-      const response = await authApi.changePassword({ currentPassword, newPassword });
+      const response = await authApi.changePassword({ currentPassword, newPassword, confirmPassword });
       const newToken = response?.token || response?.data?.token || null;
       const updatedUser = response?.user || response?.data?.user || user || {};
 
@@ -134,6 +134,16 @@ const ChangePassword = () => {
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
+          <input
+            type="text"
+            name="username"
+            autoComplete="username"
+            value={user?.email || user?.student_id || ''}
+            readOnly
+            tabIndex={-1}
+            aria-hidden="true"
+            className="sr-only"
+          />
           {error && (
             <div style={{ padding: '12px', backgroundColor: '#fee2e2', border: '1px solid #f87171', color: '#991b1b', borderRadius: '8px', marginBottom: '16px', fontWeight: 'bold' }}>
               ⚠️ {error}
@@ -166,6 +176,7 @@ const ChangePassword = () => {
               <input
                 type={showNew ? 'text' : 'password'}
                 autoComplete="new-password"
+                minLength={8}
                 value={formData.newPassword}
                 onChange={handleChange('newPassword')}
                 placeholder="Enter new password"

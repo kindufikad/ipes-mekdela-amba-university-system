@@ -1,62 +1,18 @@
 import { useContext, useEffect, useState } from 'react';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/useAuth';
 import { FaClipboardCheck, FaUsers, FaChartBar, FaStar, FaBookOpen } from 'react-icons/fa';
 import { LanguageContext } from '../context/LanguageContext';
+import { useTranslation } from '../context/useTranslation';
 import PeerEvaluationModal from '../components/PeerEvaluationModal';
 import PerformanceDashboard from '../components/PerformanceDashboard';
-import { authApi, courseAssignmentApi, evaluationApi } from '../services/api';
+import { aiApi, authApi, courseAssignmentApi, evaluationApi } from '../services/api';
 import { SUBMISSIONS_UPDATED_EVENT } from '../services/formSubmissions';
-
-const peerEvaluationSections = [
-  {
-    title: 'Core Competency: Subject matter',
-    items: [
-      { id: 'p1', label: 'Contribution in preparing and searching for teaching materials.' },
-      { id: 'p2', label: 'Continuous update of the subject matter.' },
-      { id: 'p3', label: 'Delivering seminars that are relevant to his/her teaching subject.' },
-      { id: 'p4', label: 'Level of subject matter knowledge and skill.' },
-    ],
-  },
-  {
-    title: 'Core Competency: Research and Community Services',
-    items: [
-      { id: 'p5', label: 'Willingness and level of engagement in community service and volunteer activities.' },
-      { id: 'p6', label: 'Participation in seminars/workshops at department, faculty or institution level during the year.' },
-      { id: 'p7', label: 'Identifying priority areas in one’s discipline and pursuing research in that area and willingness to help colleagues in identifying areas of research and proposal development.' },
-    ],
-  },
-  {
-    title: 'Professional Competency',
-    items: [
-      { id: 'p8', label: 'Guidance and counseling role to students.' },
-      { id: 'p9', label: 'Contributing constructive ideas and activities that improve the teaching-learning process.' },
-      { id: 'p10', label: 'Participation in problem identification and solving at department, college, or institution level.' },
-      { id: 'p11', label: 'Participation in Comprehensive Continuous Professional Development (CCPD, HDP, ELIP).' },
-      { id: 'p12', label: 'Willingness to actively participate in cooperative learning and team teaching activities.' },
-    ],
-  },
-  {
-    title: 'Ethical Competency',
-    items: [
-      { id: 'p13', label: 'Willingness to participate and level of commitment in committee work.' },
-      { id: 'p14', label: 'Willingness to share university resources with other colleagues.' },
-      { id: 'p15', label: 'Showing cordiality to others and respecting ideas of others.' },
-      { id: 'p16', label: 'Having a positive attitude to work with others (team spirit).' },
-      { id: 'p17', label: 'Level of respect to rules, regulations and guidelines of the institution.' },
-      { id: 'p18', label: 'His/her discipline (dressing, addictions, personality, etc.).' },
-    ],
-  },
-  {
-    title: 'Time Management',
-    items: [
-      { id: 'p19', label: 'Time management in department affairs and teaching-learning activities.' },
-      { id: 'p20', label: 'Time utilization for consultation hours.' },
-    ],
-  },
-];
+import IPESAISmartInsights from '../components/ai/IPESAISmartInsights';
+import { SetGoalModal } from '../components/ai/AIActionModals';
 
 const InstructorDashboard = () => {
   const { strings } = useContext(LanguageContext);
+  const { t } = useTranslation();
   const { user: authUser } = useAuth();
   const [profile, setProfile] = useState(() => {
     if (typeof window === 'undefined') return authUser || null;
@@ -67,8 +23,9 @@ const InstructorDashboard = () => {
       return authUser || null;
     }
   });
-  const [activeView, setActiveView] = useState('overview');
+  const [activeView, setActiveView] = useState('performanceDashboard');
   const [peerEvaluations, setPeerEvaluations] = useState([]);
+  const [peerPublished, setPeerPublished] = useState(null);
   const [peerPendingCount, setPeerPendingCount] = useState(0);
   const [peerLoading, setPeerLoading] = useState(false);
   const [peerError, setPeerError] = useState('');
@@ -79,27 +36,65 @@ const InstructorDashboard = () => {
   const [peerModalLoading, setPeerModalLoading] = useState(false);
   const [peerModalError, setPeerModalError] = useState('');
   const [peerModalSuccess, setPeerModalSuccess] = useState('');
+  const [isGoalModalOpen, setIsGoalModalOpen] = useState(false);
+  const [isGoalSaving, setIsGoalSaving] = useState(false);
+  const [goalMessage, setGoalMessage] = useState('');
+
+  const handleAiAction = (actionType) => {
+    if (actionType === 'VIEW_FEEDBACK' || actionType === 'VIEW_STUDENT_FEEDBACK') {
+      setActiveView('performanceDashboard');
+      window.setTimeout(() => document.getElementById('student-feedback-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
+    }
+    if (actionType === 'SET_GOAL' || actionType === 'SET_TEACHING_GOAL') setIsGoalModalOpen(true);
+    if (actionType === 'VIEW_PENDING_EVALUATIONS') setActiveView('peerEvaluation');
+  };
+
+  const saveGoal = async (payload) => {
+    setIsGoalSaving(true);
+    try {
+      await aiApi.saveInstructorGoal({ focusArea: payload.focusArea, goal: payload.goal, term: payload.term });
+      setGoalMessage('Improvement goal saved successfully.');
+      setIsGoalModalOpen(false);
+    } catch (error) {
+      setGoalMessage(error?.message || 'Unable to save improvement goal.');
+    } finally {
+      setIsGoalSaving(false);
+    }
+  };
 
   const loadPeerEvaluations = async () => {
     setPeerLoading(true);
     setPeerError('');
     try {
       const data = await courseAssignmentApi.getPeerEvaluations();
+      const normalizePeerRows = (rows) => (Array.isArray(rows) ? rows : []).map((item) => ({
+        ...item,
+        id: item.id ?? item.peer_evaluation_id ?? item.evaluation_id,
+        peer_evaluation_id: item.peer_evaluation_id ?? item.id ?? item.evaluation_id,
+        target_role: ['dept_head', 'department_head', 'depthead'].includes(String(item.target_role || item.instructor_role || '').toLowerCase()) ? 'dept_head' : (item.target_role || 'instructor'),
+        status: String(item.status || item.submission_status || 'pending').toLowerCase(),
+        isEvaluated: Boolean(item.isEvaluated || item.is_evaluated || ['submitted', 'completed', 'approved'].includes(String(item.status || item.submission_status || '').toLowerCase())),
+      })).filter((item) => item.id);
       if (data && typeof data === 'object' && Array.isArray(data.evaluations)) {
-        setPeerEvaluations(data.evaluations);
-        setPeerPendingCount(Number(data.pendingCount) || data.evaluations.filter((item) => item.status === 'pending').length);
+        setPeerPublished(data.isPublished !== false);
+        const evaluations = normalizePeerRows(data.evaluations);
+        setPeerEvaluations(evaluations);
+        setPeerPendingCount(Number(data.pendingCount) || evaluations.filter((item) => item.status === 'pending').length);
       } else if (Array.isArray(data)) {
-        setPeerEvaluations(data);
-        setPeerPendingCount(data.filter((item) => item.status === 'pending').length);
+        const evaluations = normalizePeerRows(data);
+        setPeerPublished(true);
+        setPeerEvaluations(evaluations);
+        setPeerPendingCount(evaluations.filter((item) => item.status === 'pending').length);
       } else {
+        setPeerPublished(false);
         setPeerEvaluations([]);
         setPeerPendingCount(0);
       }
     } catch (error) {
       console.error('Peer evaluations load failed:', error);
       setPeerError(error?.message || 'Unable to load peer evaluations.');
-      setPeerEvaluations([]);
-      setPeerPendingCount(0);
+      // Keep the last assignment list visible during transient refresh/auth state changes.
+      setPeerPublished((current) => current !== false ? current : null);
     } finally {
       setPeerLoading(false);
     }
@@ -119,7 +114,7 @@ const InstructorDashboard = () => {
     if (storedUser?.first_name && storedUser?.last_name) {
       return `${storedUser.first_name} ${storedUser.last_name}`;
     }
-    return profile?.username || storedUser?.username || 'Instructor';
+    return profile?.username || storedUser?.username || t('instructorDashboard.tableInstructor');
   };
 
   useEffect(() => {
@@ -159,9 +154,12 @@ const InstructorDashboard = () => {
   }, [activeView]);
 
   useEffect(() => {
-    if (activeView !== 'peerEvaluation') return;
     void loadPeerEvaluations();
-  }, [activeView]);
+    const refreshTimer = window.setInterval(() => {
+      void loadPeerEvaluations();
+    }, 15000);
+    return () => window.clearInterval(refreshTimer);
+  }, [authUser]);
 
   useEffect(() => {
     window.dispatchEvent(new CustomEvent('ipes-pending-evaluations-updated', { detail: { count: peerPendingCount } }));
@@ -169,14 +167,18 @@ const InstructorDashboard = () => {
   }, [peerPendingCount]);
 
   const sidebarItems = [
-    { key: 'overview', label: strings.instructorDashboard.reviewEvaluations, icon: FaClipboardCheck, active: activeView === 'overview' },
-    { key: 'peerEvaluation', label: strings.instructorDashboard.peerEvaluation, icon: FaUsers, active: activeView === 'peerEvaluation' },
-    { key: 'performanceDashboard', label: 'Performance Dashboard', icon: FaChartBar, active: activeView === 'performanceDashboard' },
+    { key: 'peerEvaluation', label: t('instructorDashboard.peerEvaluation'), icon: FaUsers, active: activeView === 'peerEvaluation' },
+    { key: 'performanceDashboard', label: t('instructorDashboard.performanceDashboard'), icon: FaChartBar, active: activeView === 'performanceDashboard' },
   ];
 
-
   const openPeerModal = (evaluation, mode = 'create', record = null) => {
-    setSelectedPeerEvaluation(evaluation);
+    if (mode === 'create' && peerPublished === false) return;
+    const normalizedEvaluation = {
+      ...evaluation,
+      id: evaluation?.id ?? evaluation?.peer_evaluation_id ?? evaluation?.evaluation_id,
+      peer_evaluation_id: evaluation?.peer_evaluation_id ?? evaluation?.id ?? evaluation?.evaluation_id,
+    };
+    setSelectedPeerEvaluation(normalizedEvaluation);
     setPeerModalMode(mode);
     setPeerModalRecord(record);
     setPeerModalError('');
@@ -204,6 +206,26 @@ const InstructorDashboard = () => {
     }
   };
 
+  const [report, setReport] = useState(null);
+  const [reportLoading, setReportLoading] = useState(true);
+
+  const loadPerformanceReport = async () => {
+    setReportLoading(true);
+    try {
+      const data = await evaluationApi.getPerformanceDashboard();
+      setReport(data);
+    } catch (error) {
+      console.error('Failed to load performance report:', error);
+      setReport(null);
+    } finally {
+      setReportLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadPerformanceReport();
+  }, [authUser]);
+
   const renderContent = () => {
     if (activeView === 'peerEvaluation') {
       return (
@@ -215,7 +237,7 @@ const InstructorDashboard = () => {
                 <p className="text-sm text-gray-500">{strings.instructorDashboard.peerEvaluationDesc}</p>
               </div>
               <span className="px-3 py-1 bg-amber-100 text-amber-800 font-medium text-sm rounded-full">
-                {peerPendingCount} pending
+                {peerPendingCount} {t('instructorDashboard.pending')}
               </span>
             </div>
 
@@ -223,44 +245,61 @@ const InstructorDashboard = () => {
               <table className="min-w-full divide-y divide-gray-200">
                 <thead className="bg-gray-50">
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">Instructor</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">Deadline</th>
-                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">Action</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">{t('instructorDashboard.tableInstructor')}</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">{t('instructorDashboard.deadline')}</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">{t('instructorDashboard.action')}</th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
                   {peerLoading ? (
                     <tr>
-                      <td colSpan="3" className="px-4 py-8 text-center text-sm text-gray-500">Loading peer evaluations...</td>
+                      <td colSpan="3" className="px-4 py-8 text-center text-sm text-gray-500">{t('instructorDashboard.loadingPeer')}</td>
                     </tr>
                   ) : peerError ? (
                     <tr>
                       <td colSpan="3" className="px-4 py-8 text-center text-sm text-red-600">{peerError}</td>
                     </tr>
+                  ) : peerPublished === false ? (
+                    <tr>
+                      <td colSpan="3" className="px-4 py-8 text-center text-sm text-gray-500">{t('instructorDashboard.notPublished')}</td>
+                    </tr>
                   ) : peerEvaluations.length ? (
                     peerEvaluations.map((row, index) => {
                       const isComplete = row.status === 'completed' || row.status === 'submitted' || row.is_evaluated || row.evaluation_status === 'submitted';
-                      const scoreValue = Number(row?.total_score ?? row?.score ?? row?.totalScore ?? row?.overall_score ?? 0) || 0;
+                      const targetLabel = row.target_role === 'dept_head' ? t('deptHeadDashboard.role') : t('instructorDashboard.tableInstructor');
+                      const rawScore = row?.raw_score ?? row?.total_score ?? row?.score ?? row?.totalScore ?? row?.overall_score;
+                      const numericRawScore = Number(rawScore);
+                      const hasRawScore = rawScore !== null
+                        && rawScore !== undefined
+                        && Number.isFinite(numericRawScore)
+                        && numericRawScore > 0;
 
                       return (
                         <tr key={`peer-${row.id}-${index}`} className="border-b border-gray-100">
-                          <td className="px-4 py-4 text-sm font-medium text-gray-900">{row.instructor_name || 'Instructor'}</td>
+                          <td className="px-4 py-4 text-sm font-medium text-gray-900">{row.instructor_name || 'Instructor'}<span className="ml-2 inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-600">{targetLabel}</span></td>
                           <td className="px-4 py-4 text-sm text-gray-600">{row.deadline || '-'}</td>
                           <td className="px-4 py-4 text-sm">
                             {isComplete ? (
                               <div className="flex items-center gap-2">
-                                <span className="text-sm font-semibold text-emerald-600">✓ Evaluated ({scoreValue}/100)</span>
+                                <span className="text-sm font-semibold text-emerald-600">✓ {t('instructorDashboard.completed')}{hasRawScore ? ` (${numericRawScore}/100)` : ''}</span>
                                 <button
                                   type="button"
                                   onClick={() => openPeerModal(row, 'view', row)}
                                   className="text-sm font-semibold text-blue-600 underline transition-colors hover:text-blue-800"
                                 >
-                                  View Details
+                                  {t('instructorDashboard.viewDetails')}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => openPeerModal(row, 'edit', row)}
+                                  className="text-sm font-semibold text-blue-600 underline transition-colors hover:text-blue-800"
+                                >
+                                  {t('instructorDashboard.editEvaluation')}
                                 </button>
                               </div>
                             ) : (
                               <button type="button" onClick={() => openPeerModal(row, 'create', null)} className="inline-flex items-center rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-sm font-bold text-indigo-600 transition-colors hover:bg-indigo-100 hover:text-indigo-700">
-                                <FaStar className="mr-1" /> Evaluate
+                                <FaStar className="mr-1" /> {t('instructorDashboard.evaluate')}
                               </button>
                             )}
                           </td>
@@ -269,7 +308,7 @@ const InstructorDashboard = () => {
                     })
                   ) : (
                     <tr>
-                      <td colSpan="3" className="px-4 py-8 text-center text-sm text-gray-500">No peer evaluations assigned yet.</td>
+                      <td colSpan="3" className="px-4 py-8 text-center text-sm text-gray-500">{t('instructorDashboard.emptyPeer')}</td>
                     </tr>
                   )}
                 </tbody>
@@ -284,34 +323,88 @@ const InstructorDashboard = () => {
       return <PerformanceDashboard />;
     }
 
+    // Overview with weighted evaluations
+    const totalWeightedScore = Number(report?.totalScore ?? report?.totalWeightedScore ?? 0);
+    const breakdown = report?.breakdown || {};
+    const hasAllEvaluations = [
+      breakdown.student?.rawPercentage,
+      breakdown.deptHead?.rawPercentage,
+      breakdown.peer?.rawPercentage,
+    ].every((score) => Number(score || 0) > 0);
+    const totalScoreLabel = reportLoading
+      ? '—'
+      : hasAllEvaluations
+        ? `${totalWeightedScore.toFixed(1)}%`
+        : t('instructorDashboard.pendingEvaluation');
+    const totalStatusLabel = reportLoading
+      ? 'Loading evaluation status'
+      : hasAllEvaluations
+        ? (totalWeightedScore >= 90 ? t('instructorDashboard.excellent') : totalWeightedScore >= 85 ? t('instructorDashboard.veryGood') : totalWeightedScore >= 70 ? t('instructorDashboard.satisfactory') : totalWeightedScore >= 50 ? t('instructorDashboard.needsImprovement') : t('instructorDashboard.unsatisfactory'))
+        : t('instructorDashboard.pendingAll');
+    const totalStatusClass = hasAllEvaluations
+      ? 'bg-blue-100 text-blue-700'
+      : 'bg-slate-100 text-slate-600';
+    
+    const evaluationCards = [
+      { 
+        label: 'Student Evaluation', 
+        weight: '50%', 
+        score: Number(breakdown.student?.rawPercentage ?? 0),
+        color: 'blue'
+      },
+      { 
+        label: 'Dept Head Evaluation', 
+        weight: '30%', 
+        score: Number(breakdown.deptHead?.rawPercentage ?? 0),
+        color: 'amber'
+      },
+      { 
+        label: 'Peer Evaluation', 
+        weight: '20%', 
+        score: Number(breakdown.peer?.rawPercentage ?? 0),
+        color: 'purple'
+      },
+    ];
+
+    const getColorStyles = (color) => {
+      const colors = {
+        blue: { bg: 'bg-blue-50', text: 'text-blue-600', badge: 'bg-blue-200 text-blue-700' },
+        amber: { bg: 'bg-amber-50', text: 'text-amber-600', badge: 'bg-amber-200 text-amber-700' },
+        purple: { bg: 'bg-purple-50', text: 'text-purple-600', badge: 'bg-purple-200 text-purple-700' },
+      };
+      return colors[color] || colors.blue;
+    };
+
     return (
       <div className="space-y-6">
-        <div className="grid gap-5 md:grid-cols-2">
-          <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <p className="text-sm text-gray-500">{strings.instructorDashboard.assignedCourses || 'My Courses'}</p>
-                <p className="mt-2 text-4xl font-bold text-ieps-blue-700">2</p>
-              </div>
-              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-ieps-blue-50 text-xl text-ieps-blue-600">
-                <FaBookOpen />
-              </div>
-            </div>
-          </div>
-
-          <div className="rounded-3xl border border-amber-200 bg-amber-50 p-6 shadow-sm">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <p className="text-sm text-amber-700">Peer Evaluations</p>
-                <p className="mt-2 text-4xl font-bold text-amber-600">19</p>
-              </div>
-              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-amber-100 text-xl text-amber-700">
-                <FaUsers />
-              </div>
-            </div>
-          </div>
+        {/* Total Weighted Score */}
+        <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+          <p className="text-sm font-medium text-gray-500 uppercase tracking-wide">{t('instructorDashboard.scoreTitle')}</p>
+          <p className={`mt-3 text-5xl font-bold ${hasAllEvaluations ? 'text-ieps-blue-700' : 'text-slate-500'}`}>{totalScoreLabel}</p>
+          <span className={`mt-3 inline-flex rounded-full px-3 py-1 text-xs font-semibold ${totalStatusClass}`}>
+            {totalStatusLabel}
+          </span>
         </div>
 
+        {/* Evaluation Cards */}
+        <div className="grid gap-4 md:grid-cols-3">
+          {evaluationCards.map((card, index) => {
+            const styles = getColorStyles(card.color);
+            return (
+              <div key={index} className={`rounded-2xl border border-gray-200 p-6 shadow-sm ${styles.bg}`}>
+                <div className="flex items-start justify-between mb-3">
+                  <div>
+                    <p className={`text-sm font-medium ${styles.text}`}>{card.label}</p>
+                    <span className={`inline-block mt-2 px-3 py-1 rounded-full text-xs font-semibold ${styles.badge}`}>
+                      {card.weight} {t('instructorDashboard.weight')}
+                    </span>
+                  </div>
+                </div>
+                <p className={`text-4xl font-bold ${styles.text} mt-4`}>{reportLoading ? '—' : `${Number(card.score).toFixed(1)}%`}</p>
+              </div>
+            );
+          })}
+        </div>
       </div>
     );
   };
@@ -322,21 +415,25 @@ const InstructorDashboard = () => {
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div>
             <p className="text-xs uppercase tracking-[0.2em] text-slate-600">Mekdela Amba University</p>
-            <h1 className="mt-2 text-2xl font-bold md:text-3xl text-slate-900">Welcome, {getInstructorFullName()}</h1>
+            <h1 className="mt-2 text-2xl font-bold md:text-3xl text-slate-900">{t('instructorDashboard.welcome')}, {getInstructorFullName()}</h1>
             <div className="mt-3 inline-flex rounded-full bg-white/70 px-3 py-1 text-sm font-medium text-slate-800 shadow-sm">
-              Department: {profile?.department_name || profile?.department || 'N/A'}
+              {t('instructorDashboard.department')}: {profile?.department_name || profile?.department || t('instructorDashboard.notAvailable')}
             </div>
           </div>
         </div>
       </div>
 
-      <div className="grid gap-6 lg:grid-cols-[240px_minmax(0,1fr)]">
+      <div className="mb-6">
+        <IPESAISmartInsights role="INSTRUCTOR" departmentId={profile?.department_id || authUser?.department_id} userId={profile?.id || authUser?.id} onActionClick={handleAiAction} />
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
         <aside className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
-          <h3 className="mb-4 text-sm font-semibold uppercase tracking-wide text-gray-500">{strings.instructorDashboard.menu}</h3>
+          <h3 className="mb-4 text-sm font-semibold uppercase tracking-wide text-gray-500">{t('instructorDashboard.menu')}</h3>
           <div className="space-y-2">
             {sidebarItems.map(({ label, icon: Icon, active, key }) => (
-              <button key={label} type="button" onClick={() => setActiveView(key)} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-sm transition ${active ? 'bg-ieps-blue-50 text-ieps-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}>
-                <Icon />
+              <button key={label} type="button" onClick={() => setActiveView(key)} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-sm transition ${active ? 'bg-ieps-blue-50 text-ieps-blue-600 ring-1 ring-inset ring-gray-300' : 'text-gray-600 hover:bg-gray-50'}`}>
+                <Icon className="h-4 w-4" />
                 {label}
               </button>
             ))}
@@ -353,7 +450,6 @@ const InstructorDashboard = () => {
           setPeerModalRecord(null);
         }}
         evaluation={selectedPeerEvaluation || {}}
-        sections={peerEvaluationSections}
         onSubmit={handlePeerEvaluationSubmit}
         isSubmitting={peerModalLoading}
         successMessage={peerModalSuccess}
@@ -361,6 +457,8 @@ const InstructorDashboard = () => {
         mode={peerModalMode}
         evaluationRecord={peerModalRecord}
       />
+      <SetGoalModal open={isGoalModalOpen} onClose={() => setIsGoalModalOpen(false)} onSave={saveGoal} isSaving={isGoalSaving} />
+      {goalMessage ? <p className="fixed bottom-6 right-6 z-[1101] rounded-xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-xl">{goalMessage}</p> : null}
     </div>
   );
 };

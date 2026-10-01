@@ -9,18 +9,13 @@ const InstructorsSection = ({ users, handleEditUser, handleDeleteUser }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
 
-  const instructors = useMemo(
-    () => users.filter((user) => user.role === 'Instructor'),
-    [users]
-  );
-
-  const instructorRecords = useMemo(() => {
-    return instructors.map((user) => ({
+  const allUserRecords = useMemo(() => {
+    return (users || []).map((user) => ({
       ...user,
       employeeId: user.employeeId || user.employee_id || '—',
       fullName: user.fullName || `${user.firstName || ''} ${user.lastName || ''}`.trim() || '—',
     }));
-  }, [instructors]);
+  }, [users]);
 
   useEffect(() => {
     setCurrentPage(1);
@@ -29,14 +24,14 @@ const InstructorsSection = ({ users, handleEditUser, handleDeleteUser }) => {
   const filteredInstructors = useMemo(() => {
     const term = searchTerm.trim().toLowerCase();
 
-    return instructorRecords.filter((instructor) => {
-      const fullName = String(instructor.fullName || '').toLowerCase();
-      const username = String(instructor.username || '').toLowerCase();
-      const email = String(instructor.email || '').toLowerCase();
-      const employeeId = String(instructor.employeeId || '').toLowerCase();
+    return allUserRecords.filter((user) => {
+      const fullName = String(user.fullName || '').toLowerCase();
+      const username = String(user.username || '').toLowerCase();
+      const email = String(user.email || '').toLowerCase();
+      const employeeId = String(user.employeeId || '').toLowerCase();
       return !term || fullName.includes(term) || username.includes(term) || email.includes(term) || employeeId.includes(term);
     });
-  }, [instructorRecords, searchTerm]);
+  }, [allUserRecords, searchTerm]);
 
   const totalPages = Math.max(1, Math.ceil(filteredInstructors.length / pageSize));
 
