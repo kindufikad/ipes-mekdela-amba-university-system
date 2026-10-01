@@ -38,6 +38,7 @@ const PROFILE_TABLE_BY_ROLE = {
   college_dean: 'instructors',
   academic_director: 'instructors',
   academic_directorate: 'instructors',
+  academic_vice_president: 'instructors',
   directorate: 'instructors',
   lab_assistant: 'lab_assistants',
 };

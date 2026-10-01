@@ -768,7 +768,7 @@ const getManagementRoleOccupant = async (req, res) => {
   const collegeId = Number(req.query.college_id || 0) || null;
   const departmentId = Number(req.query.department_id || 0) || null;
 
-  if (!['dept_head', 'college_dean', 'lab_assistant', 'academic_directorate'].includes(role)) {
+  if (!['dept_head', 'college_dean', 'lab_assistant', 'academic_directorate', 'academic_vice_president'].includes(role)) {
     return res.status(400).json({ message: 'Unsupported management role.' });
   }
   if (role === 'college_dean' && !collegeId) return res.status(400).json({ message: 'A college is required.' });
@@ -815,7 +815,7 @@ const getManagementRoleOccupant = async (req, res) => {
 };
 
 const assignRoleWithHierarchy = async (req, res) => {
-  const allowedRoles = ['dept_head', 'college_dean', 'lab_assistant', 'academic_directorate'];
+  const allowedRoles = ['dept_head', 'college_dean', 'lab_assistant', 'academic_directorate', 'academic_vice_president'];
   const role = normalizeManagementRole(req.body.role || '');
   const userId = Number(req.params.id);
   const collegeId = Number(req.body.college_id || 0) || null;
@@ -851,6 +851,7 @@ const assignRoleWithHierarchy = async (req, res) => {
       dept_head: ['instructor', 'lab_assistant'],
       college_dean: ['instructor', 'dept_head', 'lab_assistant'],
       academic_directorate: ['instructor', 'dept_head', 'college_dean', 'lab_assistant'],
+      academic_vice_president: ['instructor', 'dept_head', 'college_dean', 'academic_directorate', 'academic_director', 'directorate', 'lab_assistant'],
       lab_assistant: ['instructor', 'lab_assistant'],
     };
 
@@ -875,10 +876,11 @@ const assignRoleWithHierarchy = async (req, res) => {
       return res.status(400).json({ message: 'Only academic staff can receive this role.' });
     }
 
-    const scopeClause = role === 'academic_directorate'
+    const isInstitutionWideRole = ['academic_directorate', 'academic_vice_president'].includes(role);
+    const scopeClause = isInstitutionWideRole
       ? ''
       : role === 'college_dean' ? 'AND d.college_id = ?' : 'AND COALESCE(i.department_id, la.department_id) = ?';
-    const scopeParams = role === 'academic_directorate' ? [] : [role === 'college_dean' ? collegeId : departmentId];
+    const scopeParams = isInstitutionWideRole ? [] : [role === 'college_dean' ? collegeId : departmentId];
 
     if (role !== 'lab_assistant') {
       const [[occupant]] = await connection.query(`
@@ -892,10 +894,11 @@ const assignRoleWithHierarchy = async (req, res) => {
           AND LOWER(COALESCE(u.status, 'active')) = 'active'
           ${scopeClause}
         LIMIT 1 FOR UPDATE
-      `, [role, role === 'college_dean' ? 'dean' : role === 'dept_head' ? 'department_head' : 'academic_director', ...scopeParams]);
+      `, [role, role === 'college_dean' ? 'dean' : role === 'dept_head' ? 'department_head' : role === 'academic_directorate' ? 'academic_director' : role, ...scopeParams]);
       if (occupant && Number(occupant.id) !== userId) {
         await connection.rollback();
-        return res.status(409).json({ message: `Current ${role === 'college_dean' ? 'College Dean' : role === 'dept_head' ? 'Department Head' : 'Academic Directorate'}: ${occupant.full_name}. Remove the current occupant first.` });
+        const roleLabel = role === 'college_dean' ? 'College Dean' : role === 'dept_head' ? 'Department Head' : role === 'academic_vice_president' ? 'Vice President' : 'Academic Directorate';
+        return res.status(409).json({ message: `Current ${roleLabel}: ${occupant.full_name}. Remove the current occupant first.` });
       }
     }
 
@@ -925,7 +928,7 @@ const resetManagementRole = async (req, res) => {
     
     // Verify user has a management role
     const [[user]] = await connection.query(
-      "SELECT u.id, u.role FROM users u WHERE u.id = ? AND u.role IN ('dept_head', 'college_dean', 'academic_directorate', 'lab_assistant')",
+      "SELECT u.id, u.role FROM users u WHERE u.id = ? AND u.role IN ('dept_head', 'college_dean', 'academic_directorate', 'academic_vice_president', 'lab_assistant')",
       [userId]
     );
     
@@ -1251,7 +1254,7 @@ const getRoleCandidates = async (req, res) => {
       INNER JOIN instructors i ON i.user_id = u.id
       LEFT JOIN departments d ON d.id = i.department_id
       LEFT JOIN colleges c ON c.id = d.college_id
-      WHERE u.role IN ('instructor', 'lab_assistant')
+      WHERE u.role IN ('instructor', 'dept_head', 'department_head', 'college_dean', 'dean', 'academic_directorate', 'academic_director', 'directorate')
         AND LOWER(COALESCE(u.status, 'active')) = 'active'
       UNION ALL
       SELECT la.user_id, la.first_name, la.last_name, u.email, la.employee_id,

@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS users (
   first_name VARCHAR(128) NULL,
   last_name VARCHAR(128) NULL,
     password_hash VARCHAR(255) NOT NULL,
-    role ENUM('admin', 'student', 'instructor', 'dept_head', 'department_head', 'college_dean', 'dean', 'academic_directorate', 'academic_director', 'directorate', 'lab_assistant') NOT NULL,
+    role ENUM('admin', 'student', 'instructor', 'dept_head', 'department_head', 'college_dean', 'dean', 'academic_directorate', 'academic_director', 'directorate', 'academic_vice_president', 'lab_assistant') NOT NULL,
     status VARCHAR(32) NOT NULL DEFAULT 'active',
     is_first_login BOOLEAN NOT NULL DEFAULT TRUE,
     must_change_password BOOLEAN NOT NULL DEFAULT TRUE,

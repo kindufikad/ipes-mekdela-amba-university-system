@@ -3,6 +3,7 @@ const pool = require('../config/db');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
 const { calculateLikertPercentage, getRatedLikertValues, isValidLikertResponse } = require('../utils/likertScoring');
 const { calculateAndSaveInstructorResult } = require('../utils/evaluationCalculator');
+const { getDirectoratePerformance } = require('../controllers/directoratePerformanceController');
 
 const router = express.Router();
 router.use(authenticateToken, authorizeRoles('academic_directorate', 'academic_director', 'directorate'));
@@ -82,106 +83,7 @@ router.get('/overview-stats', async (req, res) => {
   }
 });
 
-router.get('/my-performance', async (req, res) => {
-  const emptyResponse = {
-    totalScore: null,
-    isComplete: false,
-    status: 'Pending Complete Evaluation',
-    components: {
-      peer: { rawScore: null, weightedScore: 0, weight: 20, maxWeight: 20, count: 0 },
-      dean: { rawScore: null, weightedScore: 0, weight: 30, maxWeight: 30, count: 0 },
-      student: { rawScore: null, weightedScore: 0, weight: 50, maxWeight: 50, count: 0, isNA: true },
-    },
-    details: { peer: [], dean: [], student: [] },
-  };
-
-  try {
-    const directorUserId = Number(req.user?.id || 0);
-    if (!directorUserId) return res.json(emptyResponse);
-
-    const [[profile]] = await pool.query(
-      `SELECT i.id AS instructor_id, i.department_id,
-              TRIM(CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, ''))) AS name
-       FROM instructors i
-       WHERE i.user_id = ? LIMIT 1`,
-      [directorUserId]
-    );
-    if (!profile?.instructor_id) return res.json(emptyResponse);
-
-    const [peerRows] = await pool.query(
-      `SELECT pes.score, pes.strengths, pes.suggestions, pes.responses, pes.created_at
-       FROM peer_evaluation_submissions pes
-       INNER JOIN peer_evaluations pe ON pe.id = pes.peer_evaluation_id
-       WHERE pe.evaluatee_id = ?
-         AND LOWER(COALESCE(pes.status, 'submitted')) IN ('submitted', 'completed', 'approved')
-       ORDER BY pes.created_at DESC`,
-      [profile.instructor_id]
-    );
-    const [deanRows] = await pool.query(
-      `SELECT dhe.total_score AS score, dhe.criteria_scores, dhe.strengths, dhe.weaknesses,
-              dhe.created_at, evaluator.email AS evaluator_email
-       FROM dept_head_evaluations dhe
-       INNER JOIN users evaluator ON evaluator.id = dhe.evaluator_id
-       WHERE (dhe.evaluatee_id = ? OR dhe.instructor_id = ?)
-         AND LOWER(evaluator.role) IN ('college_dean', 'dean')
-         AND LOWER(COALESCE(dhe.status, 'pending')) IN ('submitted', 'completed', 'approved')
-       ORDER BY dhe.created_at DESC`,
-      [profile.instructor_id, profile.instructor_id]
-    );
-    const [studentRows] = await pool.query(
-      `SELECT ses.score, ses.feedback, ses.strengths, ses.improvements, ses.created_at
-       FROM student_evaluation_submissions ses
-       INNER JOIN evaluation_dispatches ed ON ed.id = ses.dispatch_id
-       INNER JOIN course_assignments ca ON ca.id = ed.assignment_id
-       WHERE ca.instructor_id = ?
-         AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved')
-       ORDER BY ses.created_at DESC`,
-      [profile.instructor_id]
-    );
-
-    const average = (rows) => rows.length
-      ? Number((rows.reduce((sum, row) => sum + Number(row.score || 0), 0) / rows.length).toFixed(2))
-      : null;
-    const peerRaw = average(peerRows);
-    const deanRaw = average(deanRows);
-    const studentRaw = average(studentRows);
-    const studentApplicable = studentRows.length > 0;
-    const weights = studentApplicable
-      ? { peer: 20, dean: 30, student: 50 }
-      : { peer: 40, dean: 60, student: 0 };
-    const weighted = (raw, weight) => raw == null ? 0 : Number((Math.min(Math.max(raw, 0), 100) * weight / 100).toFixed(2));
-    const peerWeighted = weighted(peerRaw, weights.peer);
-    const deanWeighted = weighted(deanRaw, weights.dean);
-    const studentWeighted = weighted(studentRaw, weights.student);
-    const isComplete = peerRows.length > 0 && deanRows.length > 0 && (!studentApplicable || studentRows.length > 0);
-    const parseJson = (value) => {
-      if (!value) return {};
-      if (typeof value === 'object') return value;
-      try { return JSON.parse(value); } catch { return {}; }
-    };
-
-    return res.json({
-      director: { id: profile.instructor_id, name: profile.name || req.user.email || 'Academic Director' },
-      totalScore: isComplete ? Number((peerWeighted + deanWeighted + studentWeighted).toFixed(2)) : null,
-      isComplete,
-      status: isComplete ? 'Completed' : 'Pending Complete Evaluation',
-      weights,
-      components: {
-        peer: { rawScore: peerRaw, weightedScore: peerWeighted, weight: weights.peer, maxWeight: 20, count: peerRows.length },
-        dean: { rawScore: deanRaw, weightedScore: deanWeighted, weight: weights.dean, maxWeight: 30, count: deanRows.length },
-        student: { rawScore: studentRaw, weightedScore: studentWeighted, weight: weights.student, maxWeight: 50, count: studentRows.length, isNA: !studentApplicable },
-      },
-      details: {
-        peer: peerRows.map((row) => ({ score: Number(row.score || 0), strengths: row.strengths || '', suggestions: row.suggestions || '', responses: parseJson(row.responses), createdAt: row.created_at })),
-        dean: deanRows.map((row) => ({ score: Number(row.score || 0), evaluator: row.evaluator_email || 'College Dean', strengths: row.strengths || '', weaknesses: row.weaknesses || '', criteria: parseJson(row.criteria_scores), createdAt: row.created_at })),
-        student: studentRows.map((row) => ({ score: Number(row.score || 0), feedback: row.feedback || '', strengths: row.strengths || '', improvements: row.improvements || '', createdAt: row.created_at })),
-      },
-    });
-  } catch (error) {
-    console.error('Director performance error:', error);
-    return res.status(500).json({ ...emptyResponse, message: 'Unable to load Director performance.' });
-  }
-});
+router.get('/my-performance', getDirectoratePerformance);
 
 router.get('/instructors', async (req, res) => {
   try {

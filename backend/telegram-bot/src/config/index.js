@@ -7,6 +7,7 @@ const ALLOWED_ROLES = new Set([
   'dept_head',
   'college_dean',
   'academic_director',
+  'academic_vice_president',
   'system_admin',
 ]);
 
@@ -17,6 +18,7 @@ const ROLE_LABELS = {
   dept_head: 'Department Head',
   college_dean: 'College Dean',
   academic_director: 'Academic Director',
+  academic_vice_president: 'Vice President',
   system_admin: 'System Admin',
 };
 

@@ -3,6 +3,139 @@ const { createNotifications } = require('./notificationController');
 const { validateEvaluationFeedbackPair } = require('../utils/validationUtility');
 const { calculateAndSaveInstructorResult } = require('../utils/evaluationCalculator');
 
+const ACADEMIC_DIRECTORATE_RATING_KEYS = [
+  'leadership',
+  'strategic_planning',
+  'academic_quality',
+  'stakeholder_engagement',
+  'accountability',
+];
+
+exports.getAcademicDirectorateCandidates = async (req, res) => {
+  try {
+    await pool.query(`CREATE TABLE IF NOT EXISTS evaluation_periods (
+      id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+      academic_year VARCHAR(64) NOT NULL,
+      semester VARCHAR(64) NOT NULL,
+      deadline DATETIME NULL,
+      status VARCHAR(32) NOT NULL DEFAULT 'active',
+      updated_by INT UNSIGNED NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uk_evaluation_period_term (academic_year, semester),
+      INDEX idx_evaluation_period_status (status, deadline)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    const [rows] = await pool.query(`
+      SELECT u.id AS academic_directorate_id,
+        COALESCE(NULLIF(TRIM(CONCAT_WS(' ', i.first_name, i.last_name)), ''), u.email) AS full_name,
+        u.email, u.role,
+        i.employee_id,
+        COALESCE(d.department_name, d.name) AS department_name,
+        c.name AS college_name,
+        active_period.academic_year,
+        active_period.semester,
+        active_period.deadline,
+        evaluation.id AS evaluation_id,
+        evaluation.status AS evaluation_status,
+        evaluation.score AS evaluation_score,
+        evaluation.weighted_score,
+        evaluation.ratings,
+        evaluation.strengths,
+        evaluation.weaknesses
+      FROM users u
+      LEFT JOIN instructors i ON i.user_id = u.id
+      LEFT JOIN departments d ON d.id = i.department_id
+      LEFT JOIN colleges c ON c.id = d.college_id
+      LEFT JOIN (
+        SELECT academic_year, semester, deadline
+        FROM evaluation_periods
+        WHERE LOWER(status) = 'active'
+        ORDER BY id DESC
+        LIMIT 1
+      ) active_period ON 1 = 1
+      LEFT JOIN vice_president_evaluations evaluation
+        ON evaluation.academic_directorate_id = u.id AND evaluation.evaluator_id = ?
+      WHERE LOWER(u.role) IN ('academic_directorate', 'academic_director', 'directorate')
+        AND LOWER(COALESCE(u.status, 'active')) = 'active'
+      ORDER BY full_name ASC
+    `, [req.user.id]);
+    return res.json(rows);
+  } catch (error) {
+    console.error('Unable to load Academic Directorate candidates:', error);
+    return res.status(500).json({ message: 'Unable to load Academic Directorate candidates.' });
+  }
+};
+
+exports.getVicePresidentAcademicDirectorateEvaluations = async (req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      SELECT e.id, e.academic_directorate_id, e.ratings, e.score, e.weighted_score,
+        e.strengths, e.weaknesses, e.status, e.created_at, e.updated_at,
+        COALESCE(NULLIF(TRIM(CONCAT_WS(' ', target_i.first_name, target_i.last_name)), ''), target.email) AS full_name,
+        target.email
+      FROM vice_president_evaluations e
+      INNER JOIN users target ON target.id = e.academic_directorate_id
+      LEFT JOIN instructors target_i ON target_i.user_id = target.id
+      WHERE e.evaluator_id = ?
+      ORDER BY e.updated_at DESC, e.id DESC
+    `, [req.user.id]);
+    return res.json(rows);
+  } catch (error) {
+    console.error('Unable to load Vice President evaluations:', error);
+    return res.status(500).json({ message: 'Unable to load previous evaluations.' });
+  }
+};
+
+exports.evaluateAcademicDirectorate = async (req, res) => {
+  const academicDirectorateId = Number(req.body?.academic_directorate_id || 0);
+  const ratings = req.body?.ratings;
+  const strengths = String(req.body?.strengths || '').trim();
+  const weaknesses = String(req.body?.weaknesses || '').trim();
+
+  if (!Number.isInteger(academicDirectorateId) || academicDirectorateId <= 0) {
+    return res.status(400).json({ message: 'Select an Academic Directorate candidate.' });
+  }
+  if (!ratings || typeof ratings !== 'object' || Array.isArray(ratings)
+    || ACADEMIC_DIRECTORATE_RATING_KEYS.some((key) => {
+      const value = ratings[key];
+      return value !== 'NA' && (!Number.isInteger(Number(value)) || Number(value) < 1 || Number(value) > 5);
+    })
+    || ACADEMIC_DIRECTORATE_RATING_KEYS.every((key) => ratings[key] === 'NA')) {
+    return res.status(400).json({ message: 'Rate each criterion from 1 to 5 or mark it NA; at least one criterion must have a numeric rating.' });
+  }
+
+  try {
+    const [[candidate]] = await pool.query(
+      `SELECT id FROM users
+       WHERE id = ? AND LOWER(role) IN ('academic_directorate', 'academic_director', 'directorate')
+         AND LOWER(COALESCE(status, 'active')) = 'active'
+       LIMIT 1`,
+      [academicDirectorateId]
+    );
+    if (!candidate) return res.status(404).json({ message: 'Active Academic Directorate candidate not found.' });
+
+    const values = ACADEMIC_DIRECTORATE_RATING_KEYS
+      .map((key) => ratings[key])
+      .filter((value) => value !== 'NA')
+      .map(Number);
+    const score = Number(((values.reduce((sum, value) => sum + value, 0) / (values.length * 5)) * 100).toFixed(2));
+    const weightedScore = Number((score * 0.3).toFixed(2));
+    await pool.query(
+      `INSERT INTO vice_president_evaluations
+        (evaluator_id, academic_directorate_id, ratings, score, weighted_score, strengths, weaknesses, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'COMPLETED')
+       ON DUPLICATE KEY UPDATE ratings = VALUES(ratings), score = VALUES(score),
+         weighted_score = VALUES(weighted_score), strengths = VALUES(strengths),
+         weaknesses = VALUES(weaknesses), status = 'COMPLETED', updated_at = CURRENT_TIMESTAMP`,
+      [req.user.id, academicDirectorateId, JSON.stringify(ratings), score, weightedScore, strengths, weaknesses]
+    );
+    return res.status(200).json({ success: true, score, weighted_score: weightedScore, weight: 30, status: 'COMPLETED' });
+  } catch (error) {
+    console.error('Academic Directorate evaluation submission failed:', error);
+    return res.status(500).json({ message: 'Unable to submit the evaluation.' });
+  }
+};
+
 /**
  * DEPARTMENT HEAD EVALUATION SUBMISSION
  * Supports flexible routing for both Instructors and Lab Assistants

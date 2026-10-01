@@ -8,11 +8,20 @@ const {
   autoExpireForms,
   getPerformanceWithStudentEvaluations,
   getInstructorEvaluationDetails,
+  getAcademicDirectorateCandidates,
+  getVicePresidentAcademicDirectorateEvaluations,
+  evaluateAcademicDirectorate,
 } = require('../controllers/evaluationController');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
 const { getConsolidatedStudentScore } = require('../controllers/studentEvalController');
+const { getDirectoratePerformance } = require('../controllers/directoratePerformanceController');
 
 const router = express.Router();
+
+router.get('/academic-directorate-list', authenticateToken, authorizeRoles('academic_vice_president'), getAcademicDirectorateCandidates);
+router.get('/academic-directorate-evaluations', authenticateToken, authorizeRoles('academic_vice_president'), getVicePresidentAcademicDirectorateEvaluations);
+router.post('/evaluate-academic-directorate', authenticateToken, authorizeRoles('academic_vice_president'), evaluateAcademicDirectorate);
+router.get('/directorate-performance', authenticateToken, authorizeRoles('academic_directorate', 'academic_director', 'directorate', 'academic_vice_president'), getDirectoratePerformance);
 
 /**
  * Department Head Evaluation Submission

@@ -105,7 +105,7 @@ const MESSAGES = {
     generic: '/start ለዋናው ማውጫ፣ /login መለያዎን ለማገናኘት ወይም /help ለትእዛዞች ይጠቀሙ።',
     dashboard: '🌐 አሁኑኑ ይመዝግቡ (Go to Dashboard)',
     peerReminder: '🔔 ማስታወሻ፦ በIPES {count} የእኩዮች ምዘናዎች ቀርተውዎታል። እባክዎ ከመጨረሻ ቀኑ በፊት ያጠናቁ።',
-    roleNames: { student: 'ተማሪ', lab_assistant: 'የላብራቶሪ ረዳት', instructor: 'መምህር', dept_head: 'የዲፓርትመንት ኃላፊ', college_dean: 'የኮሌጅ ዲን', academic_director: 'የአካዳሚክ ዳይሬክተር', system_admin: 'የሲስተም አስተዳዳሪ' },
+    roleNames: { student: 'ተማሪ', lab_assistant: 'የላብራቶሪ ረዳት', instructor: 'መምህር', dept_head: 'የዲፓርትመንት ኃላፊ', college_dean: 'የኮሌጅ ዲን', academic_director: 'የአካዳሚክ ዳይሬክተር', academic_vice_president: 'ምክትል ፕሬዝዳንት', system_admin: 'የሲስተም አስተዳዳሪ' },
   },
 };
 

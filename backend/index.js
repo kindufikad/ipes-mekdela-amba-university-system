@@ -754,7 +754,7 @@ const initializeSchema = async () => {
         first_name VARCHAR(128) NULL,
         last_name VARCHAR(128) NULL,
       password_hash VARCHAR(255) NOT NULL,
-      role ENUM('admin','student','instructor','dept_head','department_head','college_dean','dean','academic_directorate','academic_director','directorate','lab_assistant') NOT NULL DEFAULT 'student',
+      role ENUM('admin','student','instructor','dept_head','department_head','college_dean','dean','academic_directorate','academic_director','directorate','academic_vice_president','lab_assistant') NOT NULL DEFAULT 'student',
       status VARCHAR(32) NOT NULL DEFAULT 'active',
       is_first_login BOOLEAN NOT NULL DEFAULT TRUE,
       must_change_password BOOLEAN NOT NULL DEFAULT TRUE,
@@ -797,7 +797,7 @@ const initializeSchema = async () => {
     await pool.query("ALTER TABLE users ADD COLUMN language ENUM('en', 'am') NOT NULL DEFAULT 'am'");
   }
 
-  await pool.query("ALTER TABLE users MODIFY COLUMN role ENUM('admin','student','instructor','dept_head','department_head','college_dean','dean','academic_directorate','academic_director','directorate','lab_assistant') NOT NULL DEFAULT 'student'");
+  await pool.query("ALTER TABLE users MODIFY COLUMN role ENUM('admin','student','instructor','dept_head','department_head','college_dean','dean','academic_directorate','academic_director','directorate','academic_vice_president','lab_assistant') NOT NULL DEFAULT 'student'");
 
   if (!(await columnExists('users', 'active_system_admin_slot'))) {
     await pool.query(`ALTER TABLE users ADD COLUMN active_system_admin_slot TINYINT
@@ -1341,6 +1341,23 @@ const initializeSchema = async () => {
     UNIQUE KEY uk_directorate_eval (evaluator_id, dean_id),
     CONSTRAINT fk_directorate_eval_evaluator FOREIGN KEY (evaluator_id) REFERENCES users(id) ON DELETE CASCADE,
     CONSTRAINT fk_directorate_eval_dean FOREIGN KEY (dean_id) REFERENCES users(id) ON DELETE CASCADE
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  await pool.query(`CREATE TABLE IF NOT EXISTS vice_president_evaluations (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    evaluator_id INT UNSIGNED NOT NULL,
+    academic_directorate_id INT UNSIGNED NOT NULL,
+    ratings JSON NOT NULL,
+    score DECIMAL(5,2) NOT NULL DEFAULT 0.00,
+    weighted_score DECIMAL(5,2) NOT NULL DEFAULT 0.00,
+    strengths TEXT NULL,
+    weaknesses TEXT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'COMPLETED',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_vice_president_eval (evaluator_id, academic_directorate_id),
+    CONSTRAINT fk_vice_president_eval_evaluator FOREIGN KEY (evaluator_id) REFERENCES users(id) ON DELETE CASCADE,
+    CONSTRAINT fk_vice_president_eval_directorate FOREIGN KEY (academic_directorate_id) REFERENCES users(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
 
   const [adminRows] = await pool.query('SELECT id FROM users WHERE email = ? LIMIT 1', ['admin.k@system.local']);
