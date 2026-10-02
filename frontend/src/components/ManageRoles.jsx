@@ -7,12 +7,14 @@ const ROLE_OPTIONS = [
   { value: 'college_dean', label: 'College Dean' },
   { value: 'dept_head', label: 'Department Head' },
   { value: 'academic_directorate', label: 'Academic Directorate' },
+  { value: 'academic_vice_president', label: 'Vice President' },
 ];
 
 const ROLE_LABELS = {
   college_dean: 'College Dean',
   dept_head: 'Department Head',
   academic_directorate: 'Academic Directorate',
+  academic_vice_president: 'Vice President',
 };
 
 const getRoleDisplayLabel = (value) => ROLE_LABELS[String(value || '').trim().toLowerCase()] || 'Role';
@@ -82,6 +84,7 @@ const ManageRoles = ({ onRoleAssigned }) => {
   const filteredCandidates = useMemo(() => {
     if (role === 'college_dean') return candidates.filter((user) => ['instructor', 'dept_head'].includes(String(user.role).toLowerCase()) && String(user.college_id) === String(collegeId));
     if (role === 'dept_head') return candidates.filter((user) => ['instructor'].includes(String(user.role).toLowerCase()) && String(user.college_id) === String(collegeId) && String(user.department_id) === String(departmentId));
+    if (role === 'academic_vice_president') return candidates.filter((user) => ['instructor', 'dept_head', 'department_head', 'college_dean', 'dean', 'academic_directorate', 'academic_director', 'directorate', 'lab_assistant'].includes(String(user.role).toLowerCase()));
     return candidates.filter((user) => ['instructor', 'dept_head', 'college_dean'].includes(String(user.role).toLowerCase()));
   }, [candidates, collegeId, departmentId, role]);
 
@@ -146,7 +149,7 @@ const ManageRoles = ({ onRoleAssigned }) => {
             <label className="text-sm font-medium text-slate-700">Target College<select value={collegeId} onChange={(event) => { setCollegeId(event.target.value); setDepartmentId(''); setUserId(''); }} className="mt-2 w-full rounded-xl border border-slate-300 px-3 py-3" required><option value="">Select college</option>{colleges.map((college) => <option key={college.id} value={college.id}>{college.name}</option>)}</select></label>
             <label className="text-sm font-medium text-slate-700">Target Department<select value={departmentId} onChange={(event) => { setDepartmentId(event.target.value); setUserId(''); }} className="mt-2 w-full rounded-xl border border-slate-300 px-3 py-3" disabled={!collegeId || departmentsLoading} required><option value="">{departmentsLoading ? 'Loading departments...' : 'Select department'}</option>{departments.map((department) => <option key={department.id} value={department.id}>{department.name || department.department_name}</option>)}</select></label>
           </>}
-          <label className="text-sm font-medium text-slate-700">Candidate<select value={userId} onChange={(event) => setUserId(event.target.value)} className="mt-2 w-full rounded-xl border border-slate-300 px-3 py-3" disabled={loading || Boolean(occupant) || (role !== 'academic_directorate' && !(collegeId || departmentId))} required><option value="">{loading ? 'Loading candidates...' : 'Select candidate'}</option>{filteredCandidates.map((user) => <option key={user.user_id || user.id} value={user.user_id || user.id}>{user.full_name || `${user.first_name || ''} ${user.last_name || ''}`.trim()}{user.department_name ? ` - ${user.department_name}` : ''}</option>)}</select></label>
+          <label className="text-sm font-medium text-slate-700">Candidate<select value={userId} onChange={(event) => setUserId(event.target.value)} className="mt-2 w-full rounded-xl border border-slate-300 px-3 py-3" disabled={loading || Boolean(occupant) || (!['academic_directorate', 'academic_vice_president'].includes(role) && !(collegeId || departmentId))} required><option value="">{loading ? 'Loading candidates...' : 'Select candidate'}</option>{filteredCandidates.map((user) => <option key={user.user_id || user.id} value={user.user_id || user.id}>{user.full_name || `${user.first_name || ''} ${user.last_name || ''}`.trim()}{user.department_name ? ` - ${user.department_name}` : ''}</option>)}</select></label>
         </div>
         <button type="submit" disabled={loading || saving || Boolean(occupant)} className="mt-6 inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-3 font-semibold text-white disabled:bg-slate-300"><ShieldCheck size={17} />{saving ? 'Assigning...' : 'Assign Role'}</button>
       </form>

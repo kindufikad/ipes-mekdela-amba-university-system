@@ -5,6 +5,8 @@ const path = require('path');
 const { getSystemHealthSnapshot, triggerDatabaseBackup } = require('../middleware/systemHealth');
 const { SYSTEM_ADMIN_CONFLICT_MESSAGE, getActiveSystemAdmin, isActiveSystemAdminUniqueError, isSystemAdminRole } = require('../utils/systemAdminPolicy');
 const { getInstitutionalEvaluationMetrics } = require('./aiInsightsController');
+const { ASSET_KEYS, getLandingPageSettings, saveLandingPageSettings } = require('../services/landingPageSettings');
+const { updateSecurityControlSettings } = require('../services/securityControlService');
 const DEFAULT_USER_PASSWORD = '12345678';
 
 const landingSettingKeys = new Set(['home_hero_images', 'about_page_image', 'system_logo', 'university_logo']);
@@ -210,6 +212,155 @@ const deleteLandingContent = async (req, res) => {
   } catch (error) {
     console.error('Unable to delete landing content setting:', error);
     return res.status(500).json({ success: false, message: 'Unable to remove landing page image.' });
+  }
+};
+
+const makeLandingAnnouncement = (announcement = {}) => ({
+  id: String(announcement.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
+  title_en: String(announcement.title_en || '').trim().slice(0, 180),
+  title_am: String(announcement.title_am || '').trim().slice(0, 180),
+  message_en: String(announcement.message_en || '').trim().slice(0, 2000),
+  message_am: String(announcement.message_am || '').trim().slice(0, 2000),
+  active: announcement.active !== false,
+  updated_at: new Date().toISOString(),
+});
+
+const getLandingPageSettingsAdmin = async (_req, res) => {
+  try {
+    const settings = await getLandingPageSettings();
+    return res.status(200).json({ success: true, data: settings });
+  } catch (error) {
+    console.error('Unable to retrieve landing page settings:', error);
+    return res.status(500).json({ success: false, message: 'Unable to retrieve landing page settings.' });
+  }
+};
+
+const createLandingPageSetting = async (req, res) => {
+  const uploadedFiles = req.files || (req.file ? [req.file] : []);
+  try {
+    const settings = await getLandingPageSettings();
+    if (uploadedFiles.length) {
+      const settingKey = String(req.body?.key || '').trim();
+      if (!ASSET_KEYS.includes(settingKey)) {
+        uploadedFiles.forEach((file) => fs.unlink(file.path, () => {}));
+        return res.status(400).json({ success: false, message: 'Unsupported landing page asset.' });
+      }
+      const uploadedPaths = uploadedFiles.map((file) => `/uploads/landing/${file.filename}`);
+      const previousAssets = settingKey === 'home_hero_images'
+        ? []
+        : [settings.assets[settingKey]].filter(Boolean);
+      settings.assets[settingKey] = settingKey === 'home_hero_images'
+        ? [...settings.assets.home_hero_images, ...uploadedPaths]
+        : uploadedPaths[uploadedPaths.length - 1];
+      await saveLandingPageSettings(settings);
+      previousAssets.filter((asset) => asset.startsWith('/uploads/landing/')).forEach((asset) => {
+        fs.unlink(path.join(__dirname, '..', asset.slice(1)), () => {});
+      });
+      return res.status(201).json({ success: true, data: settings });
+    }
+
+    const announcement = makeLandingAnnouncement(req.body?.announcement);
+    if (!announcement.title_en && !announcement.title_am) {
+      return res.status(400).json({ success: false, message: 'An announcement title is required.' });
+    }
+    settings.announcements = [...settings.announcements, announcement];
+    await saveLandingPageSettings(settings);
+    return res.status(201).json({ success: true, data: settings, announcement });
+  } catch (error) {
+    uploadedFiles.forEach((file) => fs.unlink(file.path, () => {}));
+    console.error('Unable to create landing page content:', error);
+    return res.status(500).json({ success: false, message: 'Unable to create landing page content.' });
+  }
+};
+
+const updateLandingPageSettings = async (req, res) => {
+  try {
+    const current = await getLandingPageSettings();
+    const patch = req.body?.settings && typeof req.body.settings === 'object' ? req.body.settings : req.body;
+    const settings = {
+      ...current,
+      ...patch,
+      assets: { ...current.assets, ...(patch.assets || {}) },
+      contact: { ...current.contact, ...(patch.contact || {}) },
+      vision: { ...current.vision, ...(patch.vision || {}) },
+      mission: { ...current.mission, ...(patch.mission || {}) },
+      objectives: { ...current.objectives, ...(patch.objectives || {}) },
+      social_links: { ...current.social_links, ...(patch.social_links || {}) },
+      announcements: Array.isArray(patch.announcements)
+        ? patch.announcements.map((announcement) => makeLandingAnnouncement(announcement))
+        : current.announcements,
+    };
+
+    if (settings.contact.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(settings.contact.email)) {
+      return res.status(400).json({ success: false, message: 'Please provide a valid contact email.' });
+    }
+    const hasUnsafeSocialUrl = Object.values(settings.social_links).some((value) => {
+      if (typeof value !== 'string') return true;
+      if (!value.trim()) return false;
+      try {
+        return !['http:', 'https:'].includes(new URL(value).protocol);
+      } catch (_error) {
+        return true;
+      }
+    });
+    if (hasUnsafeSocialUrl) {
+      return res.status(400).json({ success: false, message: 'Social links must use a valid HTTP or HTTPS URL.' });
+    }
+    for (const field of ['en', 'am']) {
+      if (typeof settings.vision[field] !== 'string' || typeof settings.mission[field] !== 'string') {
+        return res.status(400).json({ success: false, message: 'Vision and mission text must be strings.' });
+      }
+      if (!Array.isArray(settings.objectives[field]) || settings.objectives[field].some((item) => typeof item !== 'string')) {
+        return res.status(400).json({ success: false, message: 'Objectives must be lists of text.' });
+      }
+    }
+
+    const savedSettings = await saveLandingPageSettings(settings);
+    return res.status(200).json({ success: true, data: savedSettings });
+  } catch (error) {
+    console.error('Unable to update landing page settings:', error);
+    return res.status(500).json({ success: false, message: 'Unable to update landing page settings.' });
+  }
+};
+
+const deleteLandingPageSetting = async (req, res) => {
+  try {
+    const settings = await getLandingPageSettings();
+    const key = String(req.body?.key || '').trim();
+    const filesToRemove = [];
+
+    if (key === 'announcements') {
+      const id = String(req.body?.id || '');
+      if (!id) return res.status(400).json({ success: false, message: 'An announcement ID is required.' });
+      settings.announcements = settings.announcements.filter((announcement) => String(announcement.id) !== id);
+    } else if (ASSET_KEYS.includes(key)) {
+      const hasIndex = req.body?.index !== undefined && req.body?.index !== null && req.body?.index !== '';
+      if (key === 'home_hero_images' && hasIndex) {
+        const index = Number(req.body.index);
+        if (!Number.isInteger(index) || index < 0 || index >= settings.assets.home_hero_images.length) {
+          return res.status(400).json({ success: false, message: 'A valid hero image index is required.' });
+        }
+        const [removed] = settings.assets.home_hero_images.splice(index, 1);
+        if (removed) filesToRemove.push(removed);
+      } else if (key === 'home_hero_images') {
+        filesToRemove.push(...settings.assets.home_hero_images);
+        settings.assets.home_hero_images = [];
+      } else {
+        filesToRemove.push(settings.assets[key]);
+        settings.assets[key] = null;
+      }
+    } else {
+      return res.status(400).json({ success: false, message: 'Unsupported landing page content.' });
+    }
+
+    const savedSettings = await saveLandingPageSettings(settings);
+    filesToRemove.filter((file) => typeof file === 'string' && file.startsWith('/uploads/landing/')).forEach((file) => {
+      fs.unlink(path.join(__dirname, '..', file.slice(1)), () => {});
+    });
+    return res.status(200).json({ success: true, data: savedSettings });
+  } catch (error) {
+    console.error('Unable to delete landing page content:', error);
+    return res.status(500).json({ success: false, message: 'Unable to delete landing page content.' });
   }
 };
 
@@ -635,12 +786,7 @@ const getDatabaseHealth = async (req, res) => {
 const updateSystemLock = async (req, res) => {
   const enabled = req.body?.enabled === true || String(req.body?.enabled).toLowerCase() === 'true' || Number(req.body?.enabled) === 1;
   try {
-    await pool.query(
-      `INSERT INTO system_settings (setting_key, setting_value)
-       VALUES ('system_lock_enabled', ?)
-       ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_at = CURRENT_TIMESTAMP`,
-      [enabled ? '1' : '0']
-    );
+    await updateSecurityControlSettings({ systemLockEnabled: enabled });
     return res.json({ success: true, enabled, message: enabled ? 'Global system lock enabled.' : 'Global system lock disabled.' });
   } catch (error) {
     console.error('Unable to update global system lock:', error);
@@ -1310,6 +1456,10 @@ module.exports = {
   getLandingContentAdmin,
   updateLandingContent,
   deleteLandingContent,
+  getLandingPageSettingsAdmin,
+  createLandingPageSetting,
+  updateLandingPageSettings,
+  deleteLandingPageSetting,
   getContactSettings,
   updateContactSetting,
 };

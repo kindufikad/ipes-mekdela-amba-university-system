@@ -215,6 +215,8 @@ CREATE TABLE IF NOT EXISTS dept_head_evaluations (
 CREATE TABLE IF NOT EXISTS system_settings (
   setting_key VARCHAR(128) PRIMARY KEY,
   setting_value TEXT NULL,
+  is_system_locked TINYINT(1) NOT NULL DEFAULT 0,
+  lock_reason VARCHAR(500) NOT NULL DEFAULT 'System temporarily locked by System Admin',
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -242,6 +244,10 @@ CREATE TABLE IF NOT EXISTS evaluation_deadline_history (
 
 INSERT INTO system_settings (setting_key, setting_value)
 VALUES ('system_lock_enabled', '0')
+ON DUPLICATE KEY UPDATE setting_key = VALUES(setting_key);
+
+INSERT INTO system_settings (setting_key, setting_value, is_system_locked, lock_reason)
+VALUES ('system_access_control', NULL, 0, 'System temporarily locked by System Admin')
 ON DUPLICATE KEY UPDATE setting_key = VALUES(setting_key);
 
 INSERT INTO system_settings (setting_key, setting_value)

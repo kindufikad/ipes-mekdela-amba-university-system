@@ -113,6 +113,89 @@
 .official-report__cc { margin-top: 0.35in; font-size: 9.5pt; }
 .official-report__footer { display: flex; justify-content: space-between; margin-top: 0.6in; padding-top: 0.08in; border-top: 2px solid #111827; font-size: 9pt; }
 
+.vice-president-report-shell {
+  display: none;
+}
+
+.academic-directorate-report-print-shell {
+  display: none;
+}
+
+.vice-president-report {
+  max-width: 8.27in;
+  margin: 0 auto;
+  padding: 0.3in 0.42in;
+  color: #111827;
+  background: #fff;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 9.5pt;
+  line-height: 1.25;
+}
+
+.vice-president-report__header { display: grid; grid-template-columns: 0.65in minmax(0, 1fr); align-items: center; gap: 0.12in; }
+.vice-president-report__crest { width: 0.58in; height: 0.58in; object-fit: contain; }
+.vice-president-report__university { text-align: center; }
+.vice-president-report__university h1 { margin: 0; font-size: 13pt; text-transform: uppercase; }
+.vice-president-report__university p { margin: 0.02in 0; font-size: 9pt; }
+.vice-president-report__reference { display: flex; justify-content: space-between; gap: 0.15in; margin-top: 0.08in; font-size: 8.5pt; }
+.vice-president-report__rule { margin: 0.1in 0; border-top: 2px solid #111827; border-bottom: 1px solid #111827; height: 3px; }
+.vice-president-report__subject { margin: 0.12in 0 !important; font-size: 10pt !important; text-decoration: none !important; }
+.vice-president-report__recipient { margin: 0.08in 0; }
+.vice-president-report__candidate { display: grid; grid-template-columns: 1fr 1fr; gap: 0.02in 0.2in; padding: 0.08in 0.1in; border: 1px solid #9ca3af; }
+.vice-president-report__candidate p { margin: 0.02in 0; }
+.vice-president-report h2 { margin: 0.12in 0 0.06in; font-size: 10.5pt; }
+.vice-president-report__table { width: 100%; border-collapse: collapse; }
+.vice-president-report__table th, .vice-president-report__table td { border: 1px solid #4b5563; padding: 3px 4px; text-align: left; }
+.vice-president-report__table th { background: #f3f4f6; }
+.vice-president-report__table th:nth-child(n+2), .vice-president-report__table td:nth-child(n+2) { text-align: center; }
+.vice-president-report__subtotal td { font-weight: 700; background: #f3f4f6; }
+.vice-president-report__final-result { margin: 0.1in 0; padding: 0.08in 0.1in; border-top: 2px solid #111827; border-bottom: 2px solid #111827; font-size: 11pt; }
+.vice-president-report__footer { display: grid; grid-template-columns: 1fr 1fr 1in; align-items: end; gap: 0.2in; margin-top: 0.28in; }
+.vice-president-report__signature { display: flex; flex-direction: column; gap: 0.025in; font-size: 8.5pt; }
+.vice-president-report__line { width: 2.3in; margin-top: 0.28in; border-bottom: 1px solid #111827; }
+.vice-president-report__seal { display: flex; width: 0.95in; height: 0.95in; align-items: center; justify-content: center; justify-self: end; border: 1.5px dashed #4b5563; border-radius: 50%; color: #4b5563; font-size: 6.5pt; text-align: center; }
+.vice-president-report__cc { margin-top: 0.18in; padding-top: 0.06in; border-top: 1px solid #9ca3af; font-size: 8pt; }
+
+@media print {
+  @page { size: A4; margin: 0.35in; }
+
+  html,
+  body,
+  body.printing-vice-president-report,
+  body.printing-vice-president-report #root {
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #fff !important;
+  }
+
+  body.printing-vice-president-report * { visibility: hidden !important; }
+  body.printing-vice-president-report #printable-academic-report,
+  body.printing-vice-president-report #printable-academic-report * { visibility: visible !important; }
+  body.printing-vice-president-report #printable-academic-report {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    display: block !important;
+    visibility: visible !important;
+    width: 100% !important;
+    background: #fff !important;
+    z-index: 99999 !important;
+  }
+  body.printing-vice-president-report #printable-academic-report .vice-president-report { display: block !important; visibility: visible !important; }
+  body.printing-vice-president-report .vice-president-report { width: 100%; height: auto; max-width: none; min-height: 0; box-sizing: border-box; margin: 0; padding: 0.05in; font-size: 9pt; line-height: 1.25; overflow: visible; }
+  body.printing-vice-president-report .vice-president-report__table { margin: 0.12in 0; font-size: 7.5pt; }
+  body.printing-vice-president-report .vice-president-report__reference { font-size: 8pt; }
+  body.printing-vice-president-report .vice-president-report__footer { margin-top: 0.18in; }
+  body.printing-vice-president-report .vice-president-report__cc { margin-top: 0.12in; font-size: 7.5pt; }
+  body.printing-vice-president-report .vice-president-report > * { break-inside: avoid; }
+  body.printing-vice-president-report .vice-president-report__table tr,
+  body.printing-vice-president-report .vice-president-report__signature,
+  body.printing-vice-president-report .vice-president-report__identity { break-inside: avoid; }
+}
+
 @media print {
   .printing-evaluation-letter #root > div > *:not(.evaluation-letter-modal) {
     display: none !important;

@@ -172,7 +172,7 @@ export const deanApi = {
 
 export const directorateApi = {
   getOverviewStats: () => request('/directorate/overview-stats'),
-  getMyPerformance: () => request('/directorate/my-performance'),
+  getMyPerformance: () => request('/evaluations/directorate-performance'),
   getInstructors: () => request('/directorate/instructors'),
   getDeans: () => request('/directorate/deans'),
   getReports: () => request('/directorate/reports'),
@@ -182,6 +182,13 @@ export const directorateApi = {
   getEvaluationTracking: (params = {}) => request('/directorate/evaluation-tracking', { method: 'GET', params }),
   calculatePublishFinalResults: (payload = {}) => request('/directorate/calculate-publish', { method: 'POST', data: payload }),
   submitPeerEvaluation: (payload) => request('/directorate/peer-evaluations', { method: 'POST', data: payload }),
+};
+
+export const vicePresidentApi = {
+  getAcademicDirectorateCandidates: () => request('/evaluations/academic-directorate-list'),
+  getAcademicDirectorateEvaluations: () => request('/evaluations/academic-directorate-evaluations'),
+  evaluateAcademicDirectorate: (payload) => request('/evaluations/evaluate-academic-directorate', { method: 'POST', data: payload }),
+  getDirectoratePerformance: (academicDirectorateId) => request('/evaluations/directorate-performance', { params: { academic_directorate_id: academicDirectorateId } }),
 };
 
 export const departmentApi = {

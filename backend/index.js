@@ -27,12 +27,15 @@ const { bulkUploadStudents, registerStudent } = require('./controllers/studentCo
 const { batchAssignMatrix } = require('./controllers/courseController');
 const { createDepartment } = require('./controllers/departmentController');
 const { me } = require('./controllers/authController');
-const { getUserNotifications, markAllRead, clearAllNotifications, sendNotification, sendTelegramReminders, createNotifications, setRealtimeServer } = require('./controllers/notificationController');
+const { getUserNotifications, markAllRead, clearAllNotifications, markNotificationRead, deleteNotification, sendNotification, sendTelegramReminders, createNotifications, setRealtimeServer } = require('./controllers/notificationController');
 const { getAiInsightsSummary } = require('./controllers/aiInsightsController');
 const { sendDeptHeadEvaluationReminder } = require('./controllers/trackingController');
 const { authenticateToken: mwAuthenticateToken, authorizeRoles: mwAuthorizeRoles } = require('./middleware/auth');
 const { auditRequest } = require('./middleware/auditLogger');
+const securityGate = require('./middleware/securityGate');
+const systemAccessLock = require('./middleware/systemAccessLock');
 const { responseTimeMiddleware } = require('./middleware/systemHealth');
+const { clearLocalDevelopmentBlockedIps } = require('./controllers/securityAdminController');
 const { SYSTEM_ADMIN_CONFLICT_MESSAGE, getActiveSystemAdmin, isActiveSystemAdminUniqueError, isSystemAdminRole } = require('./utils/systemAdminPolicy');
 const { autoExpireFormsMiddleware, initFormExpirationScheduler } = require('./middleware/formExpirationMiddleware');
 const { createEmailTransporter, verifyEmailTransporter } = require('./services/emailService');
@@ -91,11 +94,19 @@ const getDefaultDeptHeadPerformance = (warning = '') => ({
   warning,
 });
 
+if (process.env.NODE_ENV === 'development') {
+  clearLocalDevelopmentBlockedIps().catch((error) => {
+    console.warn('Unable to clear localhost blocklist in development mode:', error?.message || error);
+  });
+}
+
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(responseTimeMiddleware);
 app.use(auditRequest);
+app.use(systemAccessLock);
+app.use(securityGate);
 app.use(session({
   store: sessionStore,
   secret: process.env.SESSION_SECRET || 'ipes-session-secret',
@@ -350,6 +361,8 @@ app.get('/api/colleges', mwAuthenticateToken, mwAuthorizeRoles('admin', 'systema
 app.post('/api/departments', mwAuthenticateToken, mwAuthorizeRoles('admin', 'systemadmin'), createDepartment);
 app.get('/api/notifications', mwAuthenticateToken, getUserNotifications);
 app.get('/api/notifications/unread-count', mwAuthenticateToken, getUserNotifications);
+app.put('/api/notifications/:notificationId/read', mwAuthenticateToken, markNotificationRead);
+app.delete('/api/notifications/:notificationId', mwAuthenticateToken, deleteNotification);
 app.put('/api/notifications/mark-all-read/:userId', mwAuthenticateToken, markAllRead);
 app.delete('/api/notifications/clear-all/:userId', mwAuthenticateToken, clearAllNotifications);
 app.post('/api/notifications/send', mwAuthenticateToken, mwAuthorizeRoles('admin', 'systemadmin'), sendNotification);
@@ -972,8 +985,18 @@ const initializeSchema = async () => {
   await pool.query(`CREATE TABLE IF NOT EXISTS system_settings (
     setting_key VARCHAR(128) PRIMARY KEY,
     setting_value TEXT NULL,
+    is_system_locked TINYINT(1) NOT NULL DEFAULT 0,
+    lock_reason VARCHAR(500) NOT NULL DEFAULT 'System temporarily locked by System Admin',
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+  await pool.query(`ALTER TABLE system_settings
+    ADD COLUMN IF NOT EXISTS is_system_locked TINYINT(1) NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS lock_reason VARCHAR(500) NOT NULL DEFAULT 'System temporarily locked by System Admin'`);
+  await pool.query(
+    `INSERT INTO system_settings (setting_key, setting_value, is_system_locked, lock_reason)
+     VALUES ('system_access_control', NULL, 0, 'System temporarily locked by System Admin')
+     ON DUPLICATE KEY UPDATE setting_key = VALUES(setting_key)`
+  );
 
   // Course assignments (connections between course, instructor, optional student)
   await pool.query(`CREATE TABLE IF NOT EXISTS course_assignments (
@@ -1712,6 +1735,8 @@ app.post('/api/evaluations/send-reminder', authenticate, authorizeRoles('dept_he
 });
 
 app.put('/api/notifications/read', mwAuthenticateToken, markAllRead);
+app.put('/api/notifications/:notificationId/read', mwAuthenticateToken, markNotificationRead);
+app.delete('/api/notifications/:notificationId', mwAuthenticateToken, deleteNotification);
 app.put('/api/notifications/mark-all-read/:userId', mwAuthenticateToken, markAllRead);
 app.delete('/api/notifications/clear-all/:userId', mwAuthenticateToken, clearAllNotifications);
 app.post('/api/notifications/send-telegram-reminders', mwAuthenticateToken, mwAuthorizeRoles('dept_head'), sendTelegramReminders);
@@ -3997,9 +4022,46 @@ app.get(['/api/evaluations/publish-assignments', '/api/dept-head/publish-list'],
     const departmentId = await resolveDepartmentId(req.query.department || req.user.department_id || req.user.department);
     const requestedStaffType = String(req.query.staff_type || 'all').trim().toLowerCase();
     const staffType = ['instructor', 'lab_assistant'].includes(requestedStaffType) ? requestedStaffType : 'all';
+    const hasPagination = req.query.page !== undefined || req.query.limit !== undefined;
+    const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+    const requestedLimit = Number.parseInt(req.query.limit, 10) || 10;
+    const limit = [5, 10, 20, 50].includes(requestedLimit) ? requestedLimit : 10;
     if (!departmentId) return res.status(404).json({ message: 'Department was not found.' });
     if (!await canManagePublishedDepartment(req, departmentId)) return res.status(403).json({ message: 'You cannot manage evaluation publishing for this department.' });
 
+    const filters = [
+      ['program_type', 'ca.program_type'],
+      ['year_level', 'ca.year_level'],
+      ['semester', 'ca.semester'],
+      ['section', 'ca.section'],
+    ];
+    const filterConditions = [];
+    const filterParams = [];
+    for (const [key, column] of filters) {
+      const value = String(req.query[key] || '').trim();
+      if (value) {
+        filterConditions.push(`${column} = ?`);
+        filterParams.push(value);
+      }
+    }
+    const search = String(req.query.search || '').trim();
+    if (search) {
+      filterConditions.push(`(
+        c.code LIKE ? OR c.name LIKE ?
+        OR CONCAT(COALESCE(i.first_name, la.first_name, ''), ' ', COALESCE(i.last_name, la.last_name, '')) LIKE ?
+        OR ca.program_type LIKE ? OR ca.year_level LIKE ? OR ca.semester LIKE ? OR ca.section LIKE ?
+      )`);
+      const searchTerm = `%${search}%`;
+      filterParams.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
+    }
+    const whereClause = `ca.department_id = ?
+      AND (? = 'all' OR CASE WHEN LOWER(COALESCE(ca.assigned_role, 'instructor')) = 'lab_assistant' THEN 'lab_assistant' ELSE 'instructor' END = ?)
+      ${filterConditions.map((condition) => `AND ${condition}`).join('\n      ')}`;
+    const baseParams = [departmentId, staffType, staffType, ...filterParams];
+    const paginationClause = hasPagination ? ' LIMIT ? OFFSET ?' : '';
+    const queryParams = hasPagination
+      ? [...baseParams, limit, (page - 1) * limit]
+      : baseParams;
     const [courseRows] = await pool.query(
       `SELECT ca.id, ca.course_id, ca.instructor_id, ca.program_type, ca.year_level, ca.semester, ca.section,
         ca.staff_id, ca.assigned_role, ca.is_student_published, ca.is_peer_published,
@@ -4014,10 +4076,9 @@ app.get(['/api/evaluations/publish-assignments', '/api/dept-head/publish-list'],
        LEFT JOIN instructors i ON i.id = ca.instructor_id
        LEFT JOIN lab_assistants la ON LOWER(COALESCE(ca.assigned_role, 'instructor')) = 'lab_assistant' AND la.id = ca.staff_id
        LEFT JOIN users staff_user ON staff_user.id = COALESCE(i.user_id, la.user_id)
-       WHERE ca.department_id = ?
-         AND (? = 'all' OR CASE WHEN LOWER(COALESCE(ca.assigned_role, 'instructor')) = 'lab_assistant' THEN 'lab_assistant' ELSE 'instructor' END = ?)
-       ORDER BY ca.created_at DESC`,
-      [departmentId, staffType, staffType]
+       WHERE ${whereClause}
+       ORDER BY ca.created_at DESC${paginationClause}`,
+      queryParams
     );
 
     const rows = [
@@ -4027,6 +4088,27 @@ app.get(['/api/evaluations/publish-assignments', '/api/dept-head/publish-list'],
         target_role: row.target_type,
       })),
     ];
+
+    if (hasPagination) {
+      const [[{ total }]] = await pool.query(
+        `SELECT COUNT(*) AS total
+         FROM course_assignments ca
+         INNER JOIN courses c ON c.id = ca.course_id
+         LEFT JOIN instructors i ON i.id = ca.instructor_id
+         LEFT JOIN lab_assistants la ON LOWER(COALESCE(ca.assigned_role, 'instructor')) = 'lab_assistant' AND la.id = ca.staff_id
+         WHERE ${whereClause}`,
+        baseParams
+      );
+      const totalItems = Number(total || 0);
+      const totalPages = Math.max(1, Math.ceil(totalItems / limit));
+      return res.json({
+        success: true,
+        data: {
+          rows,
+          pagination: { currentPage: Math.min(page, totalPages), itemsPerPage: limit, totalItems, totalPages },
+        },
+      });
+    }
 
     return res.json(rows);
   } catch (error) {

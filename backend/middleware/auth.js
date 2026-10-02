@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const dotenv = require('dotenv');
 const pool = require('../config/db');
+const { isTokenRevoked } = require('../services/securityControlService');
 
 dotenv.config();
 
@@ -19,7 +20,7 @@ const authenticateToken = (req, res, next) => {
 
   const token = match[1];
   try {
-    jwt.verify(token, process.env.JWT_SECRET || 'change-this-secret', (err, user) => {
+    jwt.verify(token, process.env.JWT_SECRET || 'change-this-secret', async (err, user) => {
       if (err) {
         return res.status(401).json({
           success: false,
@@ -33,6 +34,14 @@ const authenticateToken = (req, res, next) => {
           success: false,
           message: 'Unauthorized: invalid access token.',
         });
+      }
+      try {
+        if (await isTokenRevoked(token)) {
+          return res.status(401).json({ success: false, message: 'Unauthorized: session has been revoked.' });
+        }
+      } catch (error) {
+        console.error('Unable to validate token revocation state:', error?.message || error);
+        return res.status(503).json({ success: false, message: 'Unable to validate session security.' });
       }
       const rawRole = String(user.role || user.user_role || '').trim().toLowerCase();
       const normalizedRole = rawRole === 'department_head'

@@ -20,7 +20,7 @@ const Navbar = () => {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const landingContent = useLandingContent();
 
-  const isDashboardPath = ['/student-dashboard', '/instructor-dashboard', '/depthead-dashboard', '/admin-dashboard', '/system-admin-dashboard'].includes(location.pathname);
+  const isDashboardPath = ['/student-dashboard', '/instructor-dashboard', '/depthead-dashboard', '/admin-dashboard', '/system-admin-dashboard', '/vice-president-dashboard'].includes(location.pathname);
   const hidePublicNav = isDashboardPath || role === 'depthead';
 
   const toggleMenu = () => {
@@ -132,6 +132,11 @@ const Navbar = () => {
                       {role === 'depthead' && (
                         <Link to="/depthead-dashboard" onClick={() => setIsOpen(false)} className="flex items-center gap-3 px-4 py-2 text-gray-700 hover:bg-gray-50 transition-colors">
                           <FaSitemap /> {strings.common.deptHeadPanel}
+                        </Link>
+                      )}
+                      {role === 'academic_vice_president' && (
+                        <Link to="/vice-president-dashboard" onClick={() => setIsOpen(false)} className="flex items-center gap-3 px-4 py-2 text-gray-700 hover:bg-gray-50 transition-colors">
+                          <FaUserShield /> Vice President Dashboard
                         </Link>
                       )}
                       

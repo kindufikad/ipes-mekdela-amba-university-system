@@ -45,6 +45,8 @@ const ProtectedRoute = ({ children, allowedRoles = [] }) => {
           ? '/dean/dashboard'
           : ['academic_directorate', 'academic_director', 'directorate'].includes(normalizedRole)
             ? '/directorate/dashboard'
+            : normalizedRole === 'academic_vice_president'
+              ? '/vice-president-dashboard'
         : normalizedRole === 'instructor'
           ? '/instructor-dashboard'
           : normalizedRole === 'lab_assistant'

@@ -280,6 +280,7 @@ const Login = () => {
     if (normalizedValue === 'system_admin' || normalizedValue === 'systemadmin' || normalizedValue === 'admin') return 'systemadmin';
     if (normalizedValue === 'college_dean' || normalizedValue === 'dean') return 'college_dean';
     if (normalizedValue === 'academic_directorate' || normalizedValue === 'academic_director' || normalizedValue === 'directorate') return 'academic_directorate';
+    if (['academic_vice_president', 'vice_president', 'vice-president', 'vice president'].includes(normalizedValue)) return 'academic_vice_president';
     if (normalizedValue === 'lab_assistant') return 'lab_assistant';
     if (normalizedValue === 'student' || normalizedValue === 'instructor') return normalizedValue;
 
@@ -295,6 +296,7 @@ const Login = () => {
     if (normalizedRole === 'systemadmin') return '/system-admin-dashboard';
     if (normalizedRole === 'college_dean') return '/dean/dashboard';
     if (normalizedRole === 'academic_directorate') return '/directorate/dashboard';
+    if (normalizedRole === 'academic_vice_president') return '/vice-president-dashboard';
 
     return '/student-dashboard';
   };
@@ -318,6 +320,8 @@ const Login = () => {
       navigate('/dean/dashboard');
     } else if (normalizedRole === 'academic_directorate') {
       navigate('/directorate/dashboard');
+    } else if (normalizedRole === 'academic_vice_president') {
+      navigate('/vice-president-dashboard');
     }
   }, [isAuthenticated, isFirstLogin, navigate, role]);
 

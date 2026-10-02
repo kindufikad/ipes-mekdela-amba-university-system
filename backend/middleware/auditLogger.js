@@ -80,7 +80,10 @@ const describeAction = async (req) => {
   if (path.includes('submit-peer') || path.includes('peer-evaluations')) return { title: 'Peer evaluation changed', description: 'A peer evaluation was submitted or updated.', target: getSafeValue(body.evaluatee_id || body.target_user_id) };
   if (path.includes('dept-head/evaluations') || path.includes('dept-head-evaluations')) return { title: 'Department Head evaluation changed', description: 'A Department Head evaluation was submitted or updated.', target: getSafeValue(body.evaluatee_id || body.target_user_id) };
   if (path.includes('calculate-publish') || path.includes('publish-instructor-scores')) return { title: 'Final results published', description: 'Final evaluation results were calculated and published.', target: getSafeValue(body.department_id) };
-  if (path.includes('system-lock')) return { title: 'Global system lock changed', description: `The global system lock was ${body.enabled ? 'enabled' : 'disabled'}.`, target: 'Global system' };
+  if (path.includes('system-lock')) {
+    const enabled = body.isSystemLocked ?? body.is_system_locked ?? body.enabled;
+    return { title: 'Global system lock changed', description: `The global system lock was ${enabled ? 'enabled' : 'disabled'}.`, target: 'Global system' };
+  }
   if (path.includes('password') || path.includes('change-password')) return { title: 'Password changed', description: 'A user password was changed or reset.', target: getSafeValue(req.params?.id) };
   if (path.includes('register') || path.includes('/users')) return { title: 'User account changed', description: `A user account was ${method === 'POST' ? 'created' : method === 'DELETE' ? 'removed' : 'updated'}.`, target: getSafeValue(req.params?.id || body.email || body.identifier) };
   if (path.includes('/login')) return { title: 'Login attempt', description: 'A user attempted to sign in.', target: getSafeValue(body.identifier || body.email || body.username) };

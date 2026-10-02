@@ -1,4 +1,5 @@
 const pool = require('../config/db');
+const { getLandingPageSettings } = require('../services/landingPageSettings');
 
 const fallbackContactInfo = {
   email: 'kindufikad085@gmail.com',
@@ -13,31 +14,33 @@ const landingContentDefaults = {
   about_page_image: null,
   system_logo: null,
   university_logo: null,
-};
-
-const parseLandingSetting = (key, value) => {
-  if (key === 'home_hero_images') {
-    try {
-      const parsed = JSON.parse(value);
-      return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string' && item.trim()) : [];
-    } catch (_error) {
-      return [];
-    }
-  }
-  return typeof value === 'string' && value.trim() ? value : null;
+  contact: fallbackContactInfo,
+  vision: { en: '', am: '' },
+  mission: { en: '', am: '' },
+  objectives: { en: [], am: [] },
+  announcements: [],
+  social_links: {
+    facebook: 'https://www.facebook.com/MekdelaAmbaUniversityOfficial',
+    telegram: 'https://t.me/MekdelaAmbaUniversity_MAU',
+    linkedin: 'https://www.linkedin.com/school/mekdela-amba-university/',
+    youtube: 'https://www.youtube.com/@mekdelaambauniversity',
+  },
 };
 
 const getLandingContent = async (_req, res) => {
   try {
-    const [rows] = await pool.query(`
-      SELECT setting_key, setting_value
-      FROM system_settings
-      WHERE setting_key IN ('home_hero_images', 'about_page_image', 'system_logo', 'university_logo')
-    `);
-    const content = { ...landingContentDefaults };
-    (rows || []).forEach((row) => {
-      content[row.setting_key] = parseLandingSetting(row.setting_key, row.setting_value);
-    });
+    const settings = await getLandingPageSettings();
+    const content = {
+      ...landingContentDefaults,
+      ...settings.assets,
+      assets: settings.assets,
+      contact: settings.contact,
+      vision: settings.vision,
+      mission: settings.mission,
+      objectives: settings.objectives,
+      announcements: settings.announcements,
+      social_links: settings.social_links,
+    };
     return res.status(200).json({ success: true, data: content });
   } catch (error) {
     const message = error?.code === 'ER_NO_SUCH_TABLE' || error?.code === 'ER_BAD_TABLE_ERROR'
@@ -99,27 +102,11 @@ const getSystemStats = async (req, res) => {
 
 const getContactInfo = async (req, res) => {
   try {
-    let rows = [];
-
-    try {
-      [rows] = await pool.query(`
-        SELECT setting_key, setting_value
-        FROM system_settings
-        WHERE setting_key IN ('contact_email', 'contact_phone', 'contact_office_hours', 'office_hours')
-      `);
-    } catch (settingsError) {
-      console.warn('system_settings lookup failed or table is missing. Falling back to hardcoded contact info.', settingsError);
-      rows = [];
-    }
-
-    const settingMap = Object.fromEntries(
-      (rows || []).map((row) => [row.setting_key, row.setting_value])
-    );
-
+    const settings = await getLandingPageSettings();
     const contactInfo = {
-      email: settingMap.contact_email || fallbackContactInfo.email,
-      phone: settingMap.contact_phone || fallbackContactInfo.phone,
-      officeHours: settingMap.contact_office_hours || settingMap.office_hours || fallbackContactInfo.officeHours,
+      email: settings.contact.email || fallbackContactInfo.email,
+      phone: settings.contact.phone || fallbackContactInfo.phone,
+      officeHours: settings.contact.office_hours || fallbackContactInfo.officeHours,
     };
 
     return res.status(200).json({

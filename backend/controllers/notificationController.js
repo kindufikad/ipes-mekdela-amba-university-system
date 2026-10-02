@@ -12,19 +12,6 @@ const createNotifications = async ({ userIds, title, message, type = 'reminder' 
   if (!recipients.length) return [];
 
   const notificationTime = new Date();
-  if (realtimeServer) {
-    recipients.forEach((userId) => {
-      realtimeServer.to(`user_${userId}`).emit('new_notification', {
-        user_id: userId,
-        title,
-        message,
-        type,
-        is_read: false,
-        created_at: notificationTime.toISOString(),
-      });
-    });
-  }
-
   const values = recipients.flatMap((userId) => [userId, title, message, type, 0, notificationTime]);
   const placeholders = recipients.map(() => '(?, ?, ?, ?, ?, ?)').join(', ');
   let result;
@@ -48,6 +35,14 @@ const createNotifications = async ({ userIds, title, message, type = 'reminder' 
     is_read: 0,
     created_at: notificationTime.toISOString(),
   }));
+  if (realtimeServer) {
+    notifications.forEach((notification) => {
+      realtimeServer.to(`user_${notification.user_id}`).emit('new_notification', {
+        ...notification,
+        is_read: false,
+      });
+    });
+  }
   return notifications;
 };
 
@@ -83,6 +78,10 @@ const normalizeAudienceValue = (audience) => {
     academic_directors: 'academic_directorate',
     academic_directorate: 'academic_directorate',
     directorate: 'academic_directorate',
+    vice_president: 'academic_vice_president',
+    vice_presidents: 'academic_vice_president',
+    academic_vice_president: 'academic_vice_president',
+    academic_vice_presidents: 'academic_vice_president',
   };
 
   return aliases[normalized] || null;
@@ -100,7 +99,7 @@ const getUserNotifications = async (req, res) => {
 
     try {
       const [rows] = await pool.query(
-        `SELECT id, title, message, is_read, created_at
+        `SELECT id, title, message, type, is_read, created_at
          FROM notifications
          WHERE user_id = ?
          ORDER BY created_at DESC
@@ -138,6 +137,50 @@ const getUserNotifications = async (req, res) => {
 };
 
 const getNotifications = getUserNotifications;
+
+const markNotificationRead = async (req, res) => {
+  const userId = Number(req.user?.id);
+  const notificationId = Number(req.params.notificationId);
+  if (!Number.isInteger(userId) || userId <= 0) {
+    return res.status(401).json({ success: false, message: 'Authenticated user is required.' });
+  }
+  if (!Number.isInteger(notificationId) || notificationId <= 0) {
+    return res.status(400).json({ success: false, message: 'A valid notification ID is required.' });
+  }
+
+  try {
+    const [result] = await pool.query(
+      'UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?',
+      [notificationId, userId]
+    );
+    return res.status(200).json({ success: true, updated: Number(result?.affectedRows || 0) });
+  } catch (error) {
+    console.error('Mark notification read failed:', error);
+    return res.status(500).json({ success: false, message: 'Unable to mark notification as read.' });
+  }
+};
+
+const deleteNotification = async (req, res) => {
+  const userId = Number(req.user?.id);
+  const notificationId = Number(req.params.notificationId);
+  if (!Number.isInteger(userId) || userId <= 0) {
+    return res.status(401).json({ success: false, message: 'Authenticated user is required.' });
+  }
+  if (!Number.isInteger(notificationId) || notificationId <= 0) {
+    return res.status(400).json({ success: false, message: 'A valid notification ID is required.' });
+  }
+
+  try {
+    const [result] = await pool.query(
+      'DELETE FROM notifications WHERE id = ? AND user_id = ?',
+      [notificationId, userId]
+    );
+    return res.status(200).json({ success: true, deleted: Number(result?.affectedRows || 0) });
+  } catch (error) {
+    console.error('Delete notification failed:', error);
+    return res.status(500).json({ success: false, message: 'Unable to delete notification.' });
+  }
+};
 
 const markAllRead = async (req, res) => {
   try {
@@ -196,9 +239,14 @@ const sendNotification = async (req, res) => {
         );
         recipients = activeUsers.map((user) => user.id);
       } else if (!recipients.length && normalizedAudience) {
+        const audienceRoles = normalizedAudience === 'academic_vice_president'
+          ? ['academic_vice_president', 'vice_president', 'vice_presidents']
+          : [normalizedAudience];
         const [audienceUsers] = await pool.query(
-          "SELECT id FROM users WHERE LOWER(COALESCE(role, '')) = ? AND LOWER(COALESCE(status, 'active')) = 'active'",
-          [normalizedAudience]
+          `SELECT id FROM users
+           WHERE LOWER(TRIM(COALESCE(role, ''))) IN (${audienceRoles.map(() => '?').join(', ')})
+             AND LOWER(COALESCE(status, 'active')) = 'active'`,
+          audienceRoles
         );
         recipients = audienceUsers.map((user) => user.id);
       } else if (!recipients.length && (department_id || year_level || section || program_type)) {
@@ -343,6 +391,8 @@ const sendTelegramReminders = async (req, res) => {
 module.exports = {
   getUserNotifications,
   getNotifications,
+  markNotificationRead,
+  deleteNotification,
   markAllRead,
   clearAllNotifications,
   sendNotification,

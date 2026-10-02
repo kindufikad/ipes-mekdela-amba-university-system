@@ -5,9 +5,28 @@ const formatPercent = (value) => value == null ? 'N/A' : `${Number(value).toFixe
 
 const componentMeta = [
   { key: 'peer', label: 'Peer Evaluation', color: 'emerald' },
-  { key: 'dean', label: 'College Deans Evaluation', color: 'blue' },
-  { key: 'student', label: 'Student Evaluation', color: 'amber' },
+  { key: 'vicePresident', label: 'Vice President Evaluation', color: 'blue' },
+  { key: 'student', label: 'Student / Institutional Evaluation', color: 'amber' },
 ];
+
+export const calculateDirectorateTotalScore = (components = {}) => {
+  const peerRaw = components.peer?.rawScore;
+  const vicePresidentRaw = components.vicePresident?.rawScore;
+  if (peerRaw == null || vicePresidentRaw == null) return null;
+
+  const asPercentage = (value) => Math.min(Math.max(Number(value) || 0, 0), 100);
+  const peerContribution = asPercentage(peerRaw) * 0.2;
+  const vicePresidentContribution = asPercentage(vicePresidentRaw) * 0.3;
+  const weightedSubtotal = peerContribution + vicePresidentContribution;
+
+  if (components.student?.isNA) {
+    return Number(((weightedSubtotal / 50) * 100).toFixed(2));
+  }
+
+  const studentRaw = components.student?.rawScore;
+  if (studentRaw == null) return null;
+  return Number((weightedSubtotal + asPercentage(studentRaw) * 0.5).toFixed(2));
+};
 
 const MyPerformancePanel = () => {
   const [report, setReport] = useState(null);
@@ -41,7 +60,8 @@ const MyPerformancePanel = () => {
   const components = report?.components || {};
   const details = report?.details || {};
   const isComplete = report?.isComplete === true;
-  const totalScore = report?.totalScore;
+  const studentNotApplicable = components.student?.isNA === true;
+  const totalScore = report?.totalScore ?? calculateDirectorateTotalScore(components);
 
   return (
     <section className="space-y-6" aria-labelledby="director-performance-title">
@@ -64,10 +84,12 @@ const MyPerformancePanel = () => {
         </div>
       </section>
 
+      {studentNotApplicable && <p role="status" className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm font-medium text-sky-900">Re-scaled to 100% (Non-Teaching Role)</p>}
+
       <div className="grid gap-4 md:grid-cols-3">
         {componentMeta.map(({ key, label, color }) => {
           const component = components[key] || {};
-          const maxWeight = component.maxWeight || (key === 'peer' ? 20 : key === 'dean' ? 30 : 50);
+          const maxWeight = component.maxWeight || (key === 'peer' ? 20 : key === 'vicePresident' ? 30 : 50);
           const tone = color === 'emerald' ? 'text-emerald-700' : color === 'amber' ? 'text-amber-700' : 'text-blue-700';
           return (
             <article key={key} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">

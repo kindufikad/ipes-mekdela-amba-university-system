@@ -11,6 +11,7 @@ const dashboardRoutes = {
   academic_directorate: '/directorate-dashboard',
   academic_director: '/directorate-dashboard',
   directorate: '/directorate-dashboard',
+  academic_vice_president: '/vice-president-dashboard',
   admin: '/admin/dashboard',
   systemadmin: '/admin/dashboard',
 };

@@ -14,7 +14,10 @@ const DashboardLayout = ({
 	const { t } = useTranslation();
 	const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 	const roleTitle = t(`roles.${role}`, t('roles.user'));
-	const hasMobileNavigation = role === 'depthead' || ['academic_directorate', 'college_dean', 'lab_assistant'].includes(role);
+	const dashboardSubtitle = role === 'academic_vice_president'
+		? t('vicePresidentDashboard.subtitle', subtitle)
+		: subtitle;
+	const hasMobileNavigation = role === 'depthead' || ['academic_directorate', 'academic_vice_president', 'college_dean', 'lab_assistant'].includes(role);
 	const dashboardContent = role === 'depthead' && isValidElement(children)
 		? cloneElement(children, { isMobileMenuOpen, setIsMobileMenuOpen })
 		: children;
@@ -31,7 +34,7 @@ const DashboardLayout = ({
 							{subtitle ? (
 								<div className="rounded-3xl border border-slate-200 bg-white/90 p-4 shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-900 sm:p-5">
 									<p className="text-sm font-semibold uppercase tracking-[0.3em] text-blue-600">{roleTitle}</p>
-									<p className="mt-2 text-sm text-slate-600">{subtitle}</p>
+									<p className="mt-2 text-sm text-slate-600">{dashboardSubtitle}</p>
 								</div>
 							) : null}
 

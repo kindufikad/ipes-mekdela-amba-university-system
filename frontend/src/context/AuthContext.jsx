@@ -9,6 +9,7 @@ const normalizeRole = (value) => {
   if (normalizedValue === 'system_admin' || normalizedValue === 'systemadmin' || normalizedValue === 'admin') return 'systemadmin';
   if (normalizedValue === 'college_dean' || normalizedValue === 'dean') return 'college_dean';
   if (normalizedValue === 'academic_directorate' || normalizedValue === 'academic_director' || normalizedValue === 'directorate') return 'academic_directorate';
+  if (['academic_vice_president', 'vice_president', 'vice-president', 'vice president'].includes(normalizedValue)) return 'academic_vice_president';
   if (normalizedValue === 'lab_assistant') return 'lab_assistant';
   if (normalizedValue === 'instructor') return 'instructor';
   return 'student';

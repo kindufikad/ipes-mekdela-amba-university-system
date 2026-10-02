@@ -17,6 +17,7 @@ import SettingsPage from './pages/SettingsPage';
 import CollegeDeanDashboard from './pages/CollegeDeanDashboard';
 import DirectorateDashboard from './pages/DirectorateDashboard';
 import LabAssistantDashboard from './pages/LabAssistantDashboard';
+import VicePresidentDashboard from './pages/VicePresidentDashboard';
 import Unauthorized from './pages/Unauthorized';
 import { LanguageProvider } from './context/LanguageContext';
 import { AuthProvider } from './context/AuthContext';
@@ -84,6 +85,7 @@ function App() {
             <Route path="/directorate/dashboard" element={<DirectorateDashboard />} />
             <Route path="/directorate-dashboard" element={<DirectorateDashboard />} />
           </Route>
+          <Route path="/vice-president-dashboard" element={<ProtectedRoute allowedRoles={['academic_vice_president']}><DashboardLayout role="academic_vice_president" title="Vice President Dashboard" subtitle="Evaluate Academic Directorate performance and review submitted evaluations."><VicePresidentDashboard /></DashboardLayout></ProtectedRoute>} />
         </Routes>
       </main>
     </div>

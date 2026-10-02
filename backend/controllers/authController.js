@@ -2,6 +2,8 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const pool = require('../config/db');
 const { createEmailTransporter, verifyEmailTransporter } = require('../services/emailService');
+const { getSecurityControlSettings, getSystemAccessLock } = require('../services/securityControlService');
+const { isSystemAdminRole } = require('../utils/systemAdminPolicy');
 
 const passwordRecoveryEmailMessage = 'Unable to send the verification code. Email service is not configured.';
 const isDatabaseConnectionError = (error) => ['ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'PROTOCOL_CONNECTION_LOST'].includes(error?.code);
@@ -171,17 +173,40 @@ const login = async (req, res) => {
       });
     }
 
-    let systemLock;
+    let systemAccessLock;
     try {
-      [[systemLock]] = await pool.query(
-        `SELECT setting_value FROM system_settings
-         WHERE setting_key = 'system_lock_enabled' LIMIT 1`
-      );
+      systemAccessLock = await getSystemAccessLock(true);
+    } catch (settingsError) {
+      console.error('System access lock setting lookup failed:', settingsError);
+      return res.status(503).json({
+        success: false,
+        code: 'SYSTEM_ACCESS_STATUS_UNAVAILABLE',
+        message: 'Unable to verify system access. Please try again later.',
+      });
+    }
+    if (systemAccessLock.isSystemLocked && !isSystemAdminRole(user.role)) {
+      return res.status(503).json({
+        success: false,
+        code: 'SYSTEM_ACCESS_LOCKED',
+        message: systemAccessLock.lockReason,
+      });
+    }
+
+    let securityControls;
+    try {
+      securityControls = await getSecurityControlSettings(true);
     } catch (settingsError) {
       console.warn('System lock setting lookup failed; continuing login:', settingsError.message);
     }
-    const isSystemAdmin = ['admin', 'systemadmin'].includes(String(user.role || '').toLowerCase());
-    if (String(systemLock?.setting_value || '0') === '1' && !isSystemAdmin) {
+    const isSystemAdmin = isSystemAdminRole(user.role);
+    if (securityControls?.maintenanceModeEnabled && !isSystemAdmin) {
+      return res.status(503).json({
+        success: false,
+        code: 'MAINTENANCE_MODE',
+        message: 'The system is temporarily unavailable for scheduled maintenance.',
+      });
+    }
+    if (securityControls?.systemLockEnabled && !isSystemAdmin) {
       return res.status(423).json({
         success: false,
         code: 'SYSTEM_LOCKED',
@@ -209,10 +234,17 @@ const login = async (req, res) => {
       req.session.user = {
         id: user.user_id,
         email: user.email,
+        name: fullName,
         student_id: user.student_id,
         role: user.role,
       };
       req.session.token = token;
+      req.session.security = {
+        ipAddress: req.ip || req.socket?.remoteAddress || 'Unknown',
+        userAgent: String(req.headers?.['user-agent'] || '').slice(0, 500),
+        location: 'Unavailable',
+        lastActivity: new Date().toISOString(),
+      };
     }
 
     return res.status(200).json({
