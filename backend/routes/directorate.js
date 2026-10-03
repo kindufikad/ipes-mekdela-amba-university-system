@@ -3,10 +3,52 @@ const pool = require('../config/db');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
 const { calculateLikertPercentage, getRatedLikertValues, isValidLikertResponse } = require('../utils/likertScoring');
 const { calculateAndSaveInstructorResult } = require('../utils/evaluationCalculator');
+const { calculateDeanPerformanceScore } = require('../utils/deanPerformanceScore');
 const { getDirectoratePerformance } = require('../controllers/directoratePerformanceController');
 
 const router = express.Router();
 router.use(authenticateToken, authorizeRoles('academic_directorate', 'academic_director', 'directorate'));
+
+const getAcademicYearTokens = (academicYear) => {
+  const tokens = String(academicYear || '').match(/(?:19|20)\d{2}/g);
+  return [...new Set(tokens?.length ? tokens : [String(academicYear || '').trim()].filter(Boolean))];
+};
+const getSemesterTokens = (semester) => {
+  const normalized = String(semester || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^semester\s*/, '')
+    .replace(/^sem\s*/, '')
+    .replace(/\s+/g, '');
+  if (['1', 'i', 'first'].includes(normalized)) return ['i', '1'];
+  if (['2', 'ii', 'second'].includes(normalized)) return ['ii', '2'];
+  if (['3', 'iii', 'third'].includes(normalized)) return ['iii', '3'];
+  return normalized ? [normalized] : [];
+};
+const buildTermFilter = (academicYearExpression, semesterExpression, academicYearTokens, semesterTokens) => {
+  const yearPlaceholders = academicYearTokens.map(() => '?').join(', ');
+  const semesterPlaceholders = semesterTokens.map(() => '?').join(', ');
+  const normalizedYear = `REPLACE(REPLACE(TRIM(${academicYearExpression}), '-', '/'), ' ', '')`;
+  const normalizedSemester = `LOWER(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(${semesterExpression}), 'semester', ''), 'sem', ''), ' ', ''), '-', ''))`;
+  return {
+    sql: `AND (
+        ${academicYearExpression} IS NULL
+        OR ${normalizedYear} IN (${yearPlaceholders})
+        OR SUBSTRING_INDEX(${normalizedYear}, '/', 1) IN (${yearPlaceholders})
+        OR SUBSTRING_INDEX(${normalizedYear}, '/', -1) IN (${yearPlaceholders})
+      )
+      AND (
+        ${semesterExpression} IS NULL
+        OR ${normalizedSemester} IN (${semesterPlaceholders})
+      )`,
+    values: [
+      ...academicYearTokens,
+      ...academicYearTokens,
+      ...academicYearTokens,
+      ...semesterTokens,
+    ],
+  };
+};
 
 const normalizeWeightedScore = ({ student, peer, deptHead }) => {
   const categories = [
@@ -148,17 +190,22 @@ router.get('/deans', async (req, res) => {
 
 router.get('/reports', async (req, res) => {
   try {
+    const [[activePeriod]] = await pool.query(
+      `SELECT academic_year, semester
+       FROM evaluation_periods
+       WHERE LOWER(status) = 'active'
+       ORDER BY id DESC
+       LIMIT 1`
+    );
+    const academicYear = String(activePeriod?.academic_year || '').trim();
+    const semester = String(activePeriod?.semester || '').trim();
+    const academicYearTokens = getAcademicYearTokens(academicYear);
+    const semesterTokens = getSemesterTokens(semester);
     const [rows] = await pool.query(
       `SELECT u.id AS user_id, dean_instructor.id AS instructor_id, u.role,
         COALESCE(NULLIF(CONCAT_WS(' ', dean_instructor.first_name, dean_instructor.last_name), ''), u.email) AS name,
         COALESCE(NULLIF(d.department_name, ''), d.name) AS department_name,
         c.id AS college_id, c.name AS college_name,
-        (SELECT COUNT(*) FROM course_assignments ca WHERE ca.instructor_id = dean_instructor.id) AS course_count,
-        (SELECT COALESCE(AVG(ses.score), 0)
-         FROM student_evaluation_submissions ses
-         INNER JOIN evaluation_dispatches ed ON ed.id = ses.dispatch_id
-         INNER JOIN course_assignments ca ON ca.course_id = ed.course_id AND ca.instructor_id = dean_instructor.id
-         WHERE LOWER(ses.status) = 'submitted') AS student_score,
         (SELECT COALESCE(AVG(pes.score), 0)
          FROM peer_evaluation_submissions pes
          INNER JOIN peer_evaluations pe ON pe.id = pes.peer_evaluation_id
@@ -179,31 +226,99 @@ router.get('/reports', async (req, res) => {
        ) de ON de.dean_id = u.id
        WHERE LOWER(u.role) = 'college_dean'
          AND LOWER(COALESCE(u.status, 'active')) = 'active'
-       ORDER BY college_name ASC, name ASC`
+       ORDER BY college_name ASC, name ASC`,
     );
-    return res.json(rows.map((row) => {
-      const hasAssignedCourses = Number(row.course_count || 0) > 0;
-      const studentScore = hasAssignedCourses ? Number(row.student_score || 0) : 0;
+    const reports = await Promise.all(rows.map(async (row) => {
+      const yearPlaceholders = academicYearTokens.map(() => '?').join(', ');
+      const semesterPlaceholders = semesterTokens.map(() => '?').join(', ');
+      const normalizedYear = "REPLACE(REPLACE(TRIM(ca.academic_year), '-', '/'), ' ', '')";
+      const normalizedSemester = "LOWER(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(ca.semester), 'semester', ''), 'sem', ''), ' ', ''), '-', ''))";
+      const academicYearFilter = academicYearTokens.length
+        ? `AND (
+            ca.academic_year IS NULL
+            OR ${normalizedYear} IN (${yearPlaceholders})
+            OR SUBSTRING_INDEX(${normalizedYear}, '/', 1) IN (${yearPlaceholders})
+            OR SUBSTRING_INDEX(${normalizedYear}, '/', -1) IN (${yearPlaceholders})
+          )`
+        : '';
+      const [assignmentTerms] = await pool.query(
+        `SELECT ca.academic_year, ca.semester,
+                COUNT(DISTINCT ca.id) AS course_count,
+                COUNT(DISTINCT ses.id) AS student_evaluation_count,
+                COALESCE(AVG(ses.score), 0) AS student_score,
+                MAX(ca.id) AS latest_assignment_id
+         FROM course_assignments ca
+         LEFT JOIN evaluation_dispatches ed
+           ON ed.assignment_id = ca.id
+           OR (
+             ed.assignment_id IS NULL
+             AND ed.course_id = ca.course_id
+             AND COALESCE(ed.academic_year, ca.academic_year) = ca.academic_year
+             AND COALESCE(ed.semester, ca.semester) = ca.semester
+           )
+         LEFT JOIN student_evaluation_submissions ses
+           ON ses.dispatch_id = ed.id
+           AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved')
+         WHERE (
+             CAST(ca.instructor_id AS CHAR) = CAST(? AS CHAR)
+             OR (
+               LOWER(COALESCE(ca.assigned_role, 'instructor')) <> 'lab_assistant'
+               AND CAST(ca.staff_id AS CHAR) IN (CAST(? AS CHAR), CAST(? AS CHAR))
+             )
+           )
+           AND LOWER(COALESCE(ca.status, 'assigned')) NOT IN ('unassigned', 'cancelled', 'inactive')
+           ${academicYearFilter}
+         GROUP BY ca.academic_year, ca.semester
+         ORDER BY
+           CASE WHEN ${semesterTokens.length
+             ? `${normalizedSemester} IN (${semesterPlaceholders})`
+             : 'FALSE'} THEN 0 ELSE 1 END,
+           student_evaluation_count DESC,
+           latest_assignment_id DESC`,
+        [
+          row.instructor_id,
+          row.instructor_id,
+          row.user_id,
+          ...academicYearTokens,
+          ...academicYearTokens,
+          ...academicYearTokens,
+          ...semesterTokens,
+        ]
+      );
+      const assignmentTerm = assignmentTerms[0] || {};
+      const courseCount = Number(assignmentTerm.course_count || 0);
+      const hasAssignedCourses = courseCount > 0;
+      const studentScore = hasAssignedCourses ? Number(assignmentTerm.student_score || 0) : 0;
       const peerScore = Number(row.peer_score || 0);
       const directorateScore = Number(row.directorate_score || 0);
-      const studentWeight = hasAssignedCourses ? 50 : 0;
-      const directorateWeight = hasAssignedCourses ? 30 : 60;
-      const peerWeight = hasAssignedCourses ? 20 : 40;
-      const studentWeighted = Number((studentScore * studentWeight / 100).toFixed(2));
-      const directorateWeighted = Number((directorateScore * directorateWeight / 100).toFixed(2));
-      const peerWeighted = Number((peerScore * peerWeight / 100).toFixed(2));
+      const calculatedScore = calculateDeanPerformanceScore({
+        student: studentScore,
+        directorate: directorateScore,
+        peer: peerScore,
+        hasAssignedCourses,
+      });
+      const studentWeight = calculatedScore.studentWeight;
+      const directorateWeight = calculatedScore.directorateWeight;
+      const peerWeight = calculatedScore.peerWeight;
+      const studentWeighted = calculatedScore.studentWeighted;
+      const directorateWeighted = calculatedScore.directorateWeighted;
+      const peerWeighted = calculatedScore.peerWeighted;
       const isComplete = (!hasAssignedCourses || studentScore > 0) && peerScore > 0 && directorateScore > 0;
-      const finalScore = isComplete
-        ? Number((studentWeighted + directorateWeighted + peerWeighted).toFixed(2))
-        : 0;
+      const finalScore = calculatedScore.totalScore;
 
       return {
         ...row,
         user_role: 'College Dean',
+        course_count: courseCount,
         has_assigned_courses: hasAssignedCourses,
         hasCourseAssigned: hasAssignedCourses,
+        isTeaching: hasAssignedCourses,
+        role_status: hasAssignedCourses ? 'Role: Teaching (100% Weight)' : 'Role: Non-Teaching (Re-scaled to 100%)',
+        academic_year: assignmentTerm.academic_year || academicYear,
+        semester: assignmentTerm.semester || semester,
         student_score: studentScore,
         student_average: studentScore,
+        student_evaluation_count: Number(assignmentTerm.student_evaluation_count || 0),
         peer_score: peerScore,
         peer_average: peerScore,
         directorate_score: directorateScore,
@@ -214,10 +329,12 @@ router.get('/reports', async (req, res) => {
         directorate_weight: directorateWeight,
         peer_weight: peerWeight,
         final_score: finalScore,
+        is_rescaled: !hasAssignedCourses,
         isComplete,
         can_print: isComplete && finalScore > 0,
       };
     }));
+    return res.json(reports);
   } catch (error) {
     return sendServerError(res, error, 'reports query error');
   }

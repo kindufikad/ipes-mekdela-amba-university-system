@@ -5,6 +5,72 @@ const toNumber = (value) => {
   return Number.isFinite(number) ? number : 0;
 };
 
+const getInstructorRoleStatus = async (instructorId, academicYear, semester, database = pool) => {
+  const resolvedInstructorId = Number(instructorId);
+  if (!Number.isInteger(resolvedInstructorId) || resolvedInstructorId <= 0) {
+    throw new TypeError('A valid instructorId is required to determine teaching status.');
+  }
+
+  const resolvedAcademicYear = String(academicYear || '').trim();
+  const resolvedSemester = String(semester || '').trim();
+  const filters = ['instructor_id = ?'];
+  const params = [resolvedInstructorId];
+
+  if (resolvedAcademicYear) {
+    const academicYearStart = resolvedAcademicYear.split('/')[0];
+    filters.push('(academic_year IS NULL OR academic_year = ? OR academic_year = ?)');
+    params.push(resolvedAcademicYear, academicYearStart);
+  }
+  if (resolvedSemester) {
+    filters.push('(semester IS NULL OR LOWER(TRIM(semester)) = LOWER(TRIM(?)))');
+    params.push(resolvedSemester);
+  }
+
+  const [[assignmentStatus]] = await database.query(
+    `SELECT COUNT(*) AS assigned_course_count
+     FROM course_assignments
+     WHERE ${filters.join(' AND ')}`,
+    params
+  );
+  const assignedCourseCount = Number(assignmentStatus?.assigned_course_count || 0);
+
+  return {
+    isTeaching: assignedCourseCount > 0,
+    assignedCourseCount,
+  };
+};
+
+const calculateInstructorFinalScore = ({ studentRawScore = 0, peerRawScore = 0, directorateRawScore = 0, isTeaching }) => {
+  const student = Math.min(Math.max(toNumber(studentRawScore), 0), 100);
+  const peer = Math.min(Math.max(toNumber(peerRawScore), 0), 100);
+  const directorate = Math.min(Math.max(toNumber(directorateRawScore), 0), 100);
+  const studentContribution = isTeaching ? student * 0.5 : 0;
+  const peerContribution = peer * 0.2;
+  const directorateContribution = directorate * 0.3;
+  const rawSubtotal = Number((peerContribution + directorateContribution).toFixed(2));
+
+  if (isTeaching) {
+    return {
+      finalScore: Number((studentContribution + rawSubtotal).toFixed(2)),
+      role: 'Teaching',
+      activeWeight: 100,
+      studentContribution: Number(studentContribution.toFixed(2)),
+      peerContribution: Number(peerContribution.toFixed(2)),
+      directorateContribution: Number(directorateContribution.toFixed(2)),
+    };
+  }
+
+  return {
+    finalScore: Number((rawSubtotal / 50 * 100).toFixed(2)),
+    role: 'Non-Teaching',
+    activeWeight: 50,
+    rawSubtotal,
+    studentContribution: 0,
+    peerContribution: Number(peerContribution.toFixed(2)),
+    directorateContribution: Number(directorateContribution.toFixed(2)),
+  };
+};
+
 const calculateAndSaveInstructorResult = async (instructorId, academicYear, semester, database = pool) => {
   const resolvedInstructorId = Number(instructorId);
   const resolvedAcademicYear = String(academicYear || new Date().getFullYear());
@@ -17,6 +83,12 @@ const calculateAndSaveInstructorResult = async (instructorId, academicYear, seme
     [resolvedInstructorId]
   );
   if (!instructor) return null;
+  const roleStatus = await getInstructorRoleStatus(
+    resolvedInstructorId,
+    resolvedAcademicYear,
+    resolvedSemester,
+    database
+  );
 
   const [[studentRow]] = await database.query(
         `SELECT COALESCE(AVG(ses.score), 0) AS student_average,
@@ -65,7 +137,13 @@ const calculateAndSaveInstructorResult = async (instructorId, academicYear, seme
   const deptHeadPercentage = deptHeadScore > 0 && deptHeadScore <= 30
     ? (deptHeadScore / 30) * 100
     : deptHeadScore;
-  const totalScore = Number((studentAverage * 0.5 + deptHeadPercentage * 0.3 + peerAverage * 0.2).toFixed(2));
+  const score = calculateInstructorFinalScore({
+    studentRawScore: studentAverage,
+    peerRawScore: peerAverage,
+    directorateRawScore: deptHeadPercentage,
+    isTeaching: roleStatus.isTeaching,
+  });
+  const totalScore = score.finalScore;
 
   await database.query(
     `INSERT INTO evaluation_results
@@ -106,11 +184,14 @@ const calculateAndSaveInstructorResult = async (instructorId, academicYear, seme
     academic_year: resolvedAcademicYear,
     semester: resolvedSemester,
     student_average: studentAverage,
-    student_weighted: Number((studentAverage * 0.5).toFixed(2)),
+    student_weighted: score.studentContribution,
     dept_head_score: deptHeadScore,
-    dept_head_weighted: Number((deptHeadPercentage * 0.3).toFixed(2)),
+    dept_head_weighted: score.directorateContribution,
     peer_average: peerAverage,
-    peer_weighted: Number((peerAverage * 0.2).toFixed(2)),
+    peer_weighted: score.peerContribution,
+    role: score.role,
+    active_weight: score.activeWeight,
+    raw_subtotal: score.rawSubtotal,
     total_students_evaluated_count: totalStudentsEvaluatedCount,
     total_peers_evaluated_count: totalPeersEvaluatedCount,
     total_dept_head_evaluated_count: Number(deptHeadRow?.total_dept_head_evaluated_count || 0),
@@ -119,4 +200,8 @@ const calculateAndSaveInstructorResult = async (instructorId, academicYear, seme
   };
 };
 
-module.exports = { calculateAndSaveInstructorResult };
+module.exports = {
+  calculateAndSaveInstructorResult,
+  getInstructorRoleStatus,
+  calculateInstructorFinalScore,
+};

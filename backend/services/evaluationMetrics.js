@@ -1,4 +1,5 @@
 const pool = require('../config/db');
+const { getInstructorRoleStatus } = require('../utils/evaluationCalculator');
 
 const COMPLETED = "('submitted', 'completed', 'approved', 'published')";
 
@@ -12,13 +13,17 @@ const calculateWeightedPerformance = ({ student = 0, peer = 0, deptHead = 0, has
   const peerRaw = Number(Math.min(Math.max(number(peer), 0), 100).toFixed(2));
   const deptHeadRaw = normalizeDeptHead(deptHead);
   const studentWeight = hasAssignedCourse ? 0.5 : 0;
-  const peerWeight = hasAssignedCourse ? 0.2 : 0.4;
-  const deptHeadWeight = hasAssignedCourse ? 0.3 : 0.6;
+  const peerWeight = 0.2;
+  const deptHeadWeight = 0.3;
   const studentWeighted = Number((studentRaw * studentWeight).toFixed(2));
   const peerWeighted = Number((peerRaw * peerWeight).toFixed(2));
   const deptHeadWeighted = Number((deptHeadRaw * deptHeadWeight).toFixed(2));
-  const totalScore = Number((studentWeighted + deptHeadWeighted + peerWeighted).toFixed(2));
-  const warning = hasAssignedCourse ? '' : 'No course was assigned; student evaluation is excluded and the remaining categories are reweighted.';
+  const rawSubtotal = Number((studentWeighted + deptHeadWeighted + peerWeighted).toFixed(2));
+  const activeWeight = hasAssignedCourse ? 100 : 50;
+  const totalScore = hasAssignedCourse
+    ? rawSubtotal
+    : Number((rawSubtotal / 50 * 100).toFixed(2));
+  const warning = hasAssignedCourse ? '' : 'No course was assigned; student evaluation is excluded and the active 50% is rescaled to 100%.';
   return {
     studentRaw,
     peerRaw,
@@ -29,6 +34,8 @@ const calculateWeightedPerformance = ({ student = 0, peer = 0, deptHead = 0, has
     studentWeight: studentWeight * 100,
     peerWeight: peerWeight * 100,
     deptHeadWeight: deptHeadWeight * 100,
+    activeWeight,
+    rawSubtotal,
     totalScore,
     totalWeightedScore: totalScore,
     hasAssignedCourse: Boolean(hasAssignedCourse),
@@ -61,29 +68,24 @@ const calculateWeightedPerformance = ({ student = 0, peer = 0, deptHead = 0, has
   };
 };
 
-const getDeptHeadLivePerformanceMetrics = async ({ instructorId, departmentId }) => {
+const getDeptHeadLivePerformanceMetrics = async ({ instructorId, departmentId, academicYear = '', semester = '' }) => {
   const id = Number(instructorId);
   const deptId = Number(departmentId);
   if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(deptId) || deptId <= 0) {
     throw new Error('A valid Department Head instructor and department are required.');
   }
 
-  const [[assignmentCount]] = await pool.query(
-    `SELECT COUNT(*) AS total FROM course_assignments
-     WHERE instructor_id = ?
-       AND (is_published = 1 OR is_student_published = 1 OR is_peer_published = 1)
-       AND (semester IS NULL OR semester <> '')
-       AND (academic_year IS NULL OR academic_year <> '')`,
-    [id]
-  );
-  const hasAssignedCourse = Number(assignmentCount?.total || 0) > 0;
+  const roleStatus = await getInstructorRoleStatus(id, academicYear, semester);
+  const hasAssignedCourse = roleStatus.isTeaching;
   const [deanRows] = await pool.query(
     `SELECT dhe.total_score AS score, COALESCE(AVG(dhe.total_score) OVER (), 0) AS average_score,
        dhe.criteria_scores, dhe.strengths, dhe.weaknesses
      FROM dept_head_evaluations dhe
      WHERE dhe.instructor_id = ? AND LOWER(dhe.status) IN ('submitted', 'completed', 'approved')
+       AND (? = '' OR dhe.academic_year = ? OR dhe.academic_year = SUBSTRING_INDEX(?, '/', 1) OR dhe.academic_year IS NULL)
+       AND (? = '' OR dhe.semester = ? OR dhe.semester IS NULL)
      ORDER BY dhe.updated_at DESC`,
-    [id]
+    [id, academicYear, academicYear, academicYear, semester, semester]
   );
   const [studentRows] = await pool.query(
     `SELECT COALESCE(ses.score, 0) AS score, COALESCE(AVG(ses.score) OVER (), 0) AS average_score, ses.feedback
@@ -91,16 +93,22 @@ const getDeptHeadLivePerformanceMetrics = async ({ instructorId, departmentId })
      INNER JOIN evaluation_dispatches ed ON ed.id = ses.dispatch_id
      INNER JOIN course_assignments ca ON ca.id = ed.assignment_id
      WHERE ca.instructor_id = ? AND ca.department_id = ?
-       AND ses.status = 'submitted'`,
-    [id, deptId]
+       AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved')
+       AND (? = '' OR ed.academic_year = ? OR ed.academic_year = SUBSTRING_INDEX(?, '/', 1) OR ed.academic_year IS NULL)
+       AND (? = '' OR ed.semester = ? OR ed.semester IS NULL)`,
+    [id, deptId, academicYear, academicYear, academicYear, semester, semester]
   );
   const [peerRows] = await pool.query(
     `SELECT COALESCE(pes.score, 0) AS score, COALESCE(AVG(pes.score) OVER (), 0) AS average_score,
        pes.strengths, pes.suggestions
      FROM peer_evaluation_submissions pes
      INNER JOIN peer_evaluations pe ON pe.id = pes.peer_evaluation_id
-     WHERE pe.evaluatee_id = ?`,
-    [id]
+     LEFT JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id
+     WHERE pe.evaluatee_id = ?
+       AND LOWER(COALESCE(pes.status, 'submitted')) IN ('submitted', 'completed', 'approved')
+       AND (? = '' OR ed.id IS NULL OR ed.academic_year = ? OR ed.academic_year = SUBSTRING_INDEX(?, '/', 1) OR ed.academic_year IS NULL)
+       AND (? = '' OR ed.id IS NULL OR ed.semester = ? OR ed.semester IS NULL)`,
+    [id, academicYear, academicYear, academicYear, semester, semester]
   );
   const [[activePeriod]] = await pool.query(
     `SELECT deadline FROM evaluation_periods
@@ -150,7 +158,7 @@ const getDeptHeadLivePerformanceMetrics = async ({ instructorId, departmentId })
   };
 };
 const termClause = (yearColumn, semesterColumn) => `
-  AND (? = '' OR LOWER(COALESCE(${yearColumn}, '')) = LOWER(?) OR LOWER(COALESCE(${yearColumn}, '')) LIKE CONCAT('%', LOWER(?), '%'))
+  AND (? = '' OR LOWER(COALESCE(${yearColumn}, '')) = LOWER(?) OR LOWER(COALESCE(${yearColumn}, '')) = LOWER(SUBSTRING_INDEX(?, '/', 1)))
   AND (? = '' OR LOWER(REPLACE(COALESCE(${semesterColumn}, ''), 'semester', '')) = LOWER(REPLACE(?, 'semester', '')))`;
 
 const getInstructorOverallPerformance = async ({ instructorId, academicYear = '', semester = '' }) => {
@@ -168,10 +176,7 @@ const getInstructorOverallPerformance = async ({ instructorId, academicYear = ''
     WHERE i.id = ? LIMIT 1
   `, [id]);
   if (!profile) throw new Error('Instructor not found.');
-  const [[assignmentSummary]] = await pool.query(
-    'SELECT COUNT(*) AS total FROM course_assignments WHERE instructor_id = ?',
-    [id]
-  );
+  const roleStatus = await getInstructorRoleStatus(id, academicYear, semester);
 
   const [studentRows] = await pool.query(`
     SELECT AVG(ses.score) AS score, COUNT(DISTINCT ses.id) AS submission_count
@@ -224,7 +229,7 @@ const getInstructorOverallPerformance = async ({ instructorId, academicYear = ''
   const studentRaw = Number((studentSource.length ? average(studentSource) : fallbackMetrics?.studentRaw || 0).toFixed(2));
   const peerRaw = Number((peerSource.length ? average(peerSource) : fallbackMetrics?.peerRaw || 0).toFixed(2));
   const deptHeadRaw = normalizeDeptHead(deptSource.length ? average(deptSource) : fallbackMetrics?.deptHeadRaw || 0);
-  const hasAssignedCourse = number(assignmentSummary?.total) > 0;
+  const hasAssignedCourse = roleStatus.isTeaching;
   const weighted = calculateWeightedPerformance({ student: studentRaw, peer: peerRaw, deptHead: deptHeadRaw, hasAssignedCourse });
   const { studentWeighted, peerWeighted, deptHeadWeighted } = weighted;
   const isStudentComplete = !hasAssignedCourse || Number(studentRows[0]?.submission_count || fallbackMetrics?.student?.count || 0) > 0;

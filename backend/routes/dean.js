@@ -3,9 +3,50 @@ const pool = require('../config/db');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
 const { calculateLikertPercentage, isValidLikertResponse } = require('../utils/likertScoring');
 const { calculateAndSaveInstructorResult } = require('../utils/evaluationCalculator');
+const { calculateDeanPerformanceScore } = require('../utils/deanPerformanceScore');
 const { getDeptHeadLivePerformanceMetrics } = require('../services/evaluationMetrics');
 
 const router = express.Router();
+const getAcademicYearTokens = (academicYear) => {
+  const tokens = String(academicYear || '').match(/(?:19|20)\d{2}/g);
+  return [...new Set(tokens?.length ? tokens : [String(academicYear || '').trim()].filter(Boolean))];
+};
+const getSemesterTokens = (semester) => {
+  const normalized = String(semester || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^semester\s*/, '')
+    .replace(/\s+/g, '');
+  if (['1', 'i', 'first'].includes(normalized)) return ['i', '1'];
+  if (['2', 'ii', 'second'].includes(normalized)) return ['ii', '2'];
+  if (['3', 'iii', 'third'].includes(normalized)) return ['iii', '3'];
+  return [normalized];
+};
+const buildTermAssignmentFilters = (academicYearExpression, semesterExpression, academicYearTokens, semesterTokens) => {
+  const yearPlaceholders = academicYearTokens.map(() => '?').join(', ');
+  const semesterPlaceholders = semesterTokens.map(() => '?').join(', ');
+  const normalizedYear = `REPLACE(REPLACE(TRIM(${academicYearExpression}), '-', '/'), ' ', '')`;
+  const normalizedSemester = `LOWER(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(${semesterExpression}), 'semester', ''), 'sem', ''), ' ', ''), '-', ''))`;
+  return {
+    sql: `AND (
+        ${academicYearExpression} IS NULL
+        OR ${normalizedYear} IN (${yearPlaceholders})
+        OR SUBSTRING_INDEX(${normalizedYear}, '/', 1) IN (${yearPlaceholders})
+        OR SUBSTRING_INDEX(${normalizedYear}, '/', -1) IN (${yearPlaceholders})
+      )
+      AND (
+        ${semesterExpression} IS NULL
+        OR ${normalizedSemester} IN (${semesterPlaceholders})
+      )`,
+    values: [
+      ...academicYearTokens,
+      ...academicYearTokens,
+      ...academicYearTokens,
+      ...semesterTokens,
+    ],
+  };
+};
+
 const getCollegeId = async (req) => {
   const userId = Number(req.user?.id || req.user?.user_id || 0);
   if (!userId) return 0;
@@ -69,85 +110,232 @@ router.use(authenticateToken, authorizeRoles('college_dean', 'dean'));
 
 router.get('/my-performance', async (req, res) => {
   try {
+    const authenticatedUserId = req.user?.id ?? req.user?.user_id;
+    if (authenticatedUserId == null) {
+      return sendError(res, 401, 'Authenticated Dean profile was not found.');
+    }
     const [[instructor]] = await pool.query(
-      'SELECT id FROM instructors WHERE user_id = ? LIMIT 1',
-      [req.user.id]
+      `SELECT i.id, i.user_id
+       FROM instructors i
+       LEFT JOIN users u ON CAST(u.id AS CHAR) = CAST(i.user_id AS CHAR)
+       WHERE CAST(i.user_id AS CHAR) = CAST(? AS CHAR)
+          OR CAST(i.id AS CHAR) = CAST(? AS CHAR)
+          OR (? <> '' AND LOWER(TRIM(u.email)) = LOWER(TRIM(?)))
+       ORDER BY CASE
+         WHEN CAST(i.user_id AS CHAR) = CAST(? AS CHAR) THEN 0
+         WHEN (? <> '' AND LOWER(TRIM(u.email)) = LOWER(TRIM(?))) THEN 1
+         ELSE 2
+       END
+       LIMIT 1`,
+      [
+        authenticatedUserId,
+        authenticatedUserId,
+        String(req.user?.email || ''),
+        String(req.user?.email || ''),
+        authenticatedUserId,
+        String(req.user?.email || ''),
+        String(req.user?.email || ''),
+      ]
     );
-    const instructorId = instructor?.id || null;
+    const instructorId = instructor?.id == null ? null : Number(instructor.id);
+    const instructorUserId = instructor?.user_id ?? authenticatedUserId;
     
-    // Check if dean has course assignments
-    const [[courseRow]] = instructorId
-      ? await pool.query(
-        'SELECT COUNT(*) AS course_count FROM course_assignments WHERE instructor_id = ? LIMIT 1',
-        [instructorId]
-      )
-      : [[{ course_count: 0 }]];
+    const [[activePeriod]] = await pool.query(
+      `SELECT academic_year, semester FROM evaluation_periods
+       WHERE LOWER(status) = 'active' ORDER BY id DESC LIMIT 1`
+    );
+    let academicYear = String(activePeriod?.academic_year || '2026').trim();
+    let semester = String(activePeriod?.semester || 'Semester II').trim();
+    const academicYearTokens = getAcademicYearTokens(academicYear);
+    const [[assignedTerm]] = await pool.query(
+      `SELECT ca.academic_year, ca.semester,
+              COUNT(DISTINCT ca.id) AS course_count,
+              COUNT(DISTINCT ses.id) AS evaluation_count,
+              MAX(ca.id) AS latest_assignment_id
+       FROM course_assignments ca
+       LEFT JOIN evaluation_dispatches ed ON ed.assignment_id = ca.id
+       LEFT JOIN student_evaluation_submissions ses
+         ON ses.dispatch_id = ed.id
+         AND LOWER(COALESCE(ses.status, '')) IN ('submitted', 'completed', 'approved')
+       WHERE (
+           CAST(ca.instructor_id AS CHAR) IN (CAST(? AS CHAR), CAST(? AS CHAR))
+           OR (
+             LOWER(COALESCE(ca.assigned_role, 'instructor')) <> 'lab_assistant'
+             AND CAST(ca.staff_id AS CHAR) IN (CAST(? AS CHAR), CAST(? AS CHAR))
+           )
+         )
+         AND LOWER(COALESCE(ca.status, 'assigned')) NOT IN ('unassigned', 'cancelled', 'inactive')
+         AND (
+           ca.academic_year IS NULL
+           OR REPLACE(REPLACE(TRIM(ca.academic_year), '-', '/'), ' ', '') IN (${academicYearTokens.map(() => '?').join(', ')})
+           OR SUBSTRING_INDEX(REPLACE(REPLACE(TRIM(ca.academic_year), '-', '/'), ' ', ''), '/', 1) IN (${academicYearTokens.map(() => '?').join(', ')})
+           OR SUBSTRING_INDEX(REPLACE(REPLACE(TRIM(ca.academic_year), '-', '/'), ' ', ''), '/', -1) IN (${academicYearTokens.map(() => '?').join(', ')})
+         )
+       GROUP BY ca.academic_year, ca.semester
+       ORDER BY evaluation_count DESC, latest_assignment_id DESC`,
+      [
+        instructorId,
+        authenticatedUserId,
+        instructorId,
+        authenticatedUserId,
+        ...academicYearTokens,
+        ...academicYearTokens,
+        ...academicYearTokens,
+      ]
+    );
+    const [[currentTermAssignment]] = await pool.query(
+      `SELECT COUNT(DISTINCT ca.id) AS course_count
+       FROM course_assignments ca
+       WHERE (
+           CAST(ca.instructor_id AS CHAR) IN (CAST(? AS CHAR), CAST(? AS CHAR))
+           OR (
+             LOWER(COALESCE(ca.assigned_role, 'instructor')) <> 'lab_assistant'
+             AND CAST(ca.staff_id AS CHAR) IN (CAST(? AS CHAR), CAST(? AS CHAR))
+           )
+         )
+         AND LOWER(COALESCE(ca.status, 'assigned')) NOT IN ('unassigned', 'cancelled', 'inactive')
+         AND (
+           ca.academic_year IS NULL
+           OR REPLACE(REPLACE(TRIM(ca.academic_year), '-', '/'), ' ', '') IN (${academicYearTokens.map(() => '?').join(', ')})
+           OR SUBSTRING_INDEX(REPLACE(REPLACE(TRIM(ca.academic_year), '-', '/'), ' ', ''), '/', 1) IN (${academicYearTokens.map(() => '?').join(', ')})
+           OR SUBSTRING_INDEX(REPLACE(REPLACE(TRIM(ca.academic_year), '-', '/'), ' ', ''), '/', -1) IN (${academicYearTokens.map(() => '?').join(', ')})
+         )
+         AND (
+           ca.semester IS NULL
+           OR LOWER(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(ca.semester), 'semester', ''), 'sem', ''), ' ', ''), '-', '')) =
+              LOWER(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(?), 'semester', ''), 'sem', ''), ' ', ''), '-', ''))
+         )`,
+      [
+        instructorId,
+        authenticatedUserId,
+        instructorId,
+        authenticatedUserId,
+        ...academicYearTokens,
+        ...academicYearTokens,
+        ...academicYearTokens,
+        semester,
+      ]
+    );
+    if (Number(currentTermAssignment?.course_count || 0) === 0 && assignedTerm) {
+      academicYear = String(assignedTerm.academic_year || academicYear).trim();
+      semester = String(assignedTerm.semester || semester).trim();
+    }
+    const semesterTokens = getSemesterTokens(semester);
+    const assignmentTermFilters = buildTermAssignmentFilters(
+      'ca.academic_year',
+      'ca.semester',
+      academicYearTokens,
+      semesterTokens
+    );
+    const [[courseRow]] = await pool.query(
+      `SELECT COUNT(DISTINCT ca.id) AS course_count
+       FROM course_assignments ca
+       LEFT JOIN instructors assigned_instructor
+         ON CAST(assigned_instructor.id AS CHAR) = CAST(ca.instructor_id AS CHAR)
+       WHERE (
+           CAST(assigned_instructor.user_id AS CHAR) IN (CAST(? AS CHAR), CAST(? AS CHAR))
+           OR CAST(ca.instructor_id AS CHAR) IN (CAST(? AS CHAR), CAST(? AS CHAR))
+           OR (LOWER(COALESCE(ca.assigned_role, 'instructor')) <> 'lab_assistant'
+             AND CAST(ca.staff_id AS CHAR) IN (CAST(? AS CHAR), CAST(? AS CHAR)))
+         )
+         AND LOWER(COALESCE(ca.status, 'assigned')) NOT IN ('unassigned', 'cancelled', 'inactive')
+         ${assignmentTermFilters.sql}`,
+      [
+        authenticatedUserId,
+        instructorUserId,
+        instructorId,
+        authenticatedUserId,
+        instructorId,
+        authenticatedUserId,
+        ...assignmentTermFilters.values,
+      ]
+    );
     const hasCourseAssigned = Number(courseRow?.course_count || 0) > 0;
     
-    const [[studentRow]] = instructorId && hasCourseAssigned
+    const [[studentRow]] = hasCourseAssigned
       ? await pool.query(
-        `SELECT COALESCE(AVG(ses.score), 0) AS score
+        `SELECT COALESCE(AVG(ses.score), 0) AS score, COUNT(DISTINCT ses.id) AS evaluation_count
          FROM student_evaluation_submissions ses
          INNER JOIN evaluation_dispatches ed ON ed.id = ses.dispatch_id
-         INNER JOIN course_assignments ca ON ca.course_id = ed.course_id AND ca.instructor_id = ?
-         WHERE LOWER(ses.status) = 'submitted'`,
-        [instructorId]
+         WHERE EXISTS (
+           SELECT 1
+           FROM course_assignments ca
+           LEFT JOIN instructors assigned_instructor
+             ON CAST(assigned_instructor.id AS CHAR) = CAST(ca.instructor_id AS CHAR)
+           WHERE (
+               ca.id = ed.assignment_id
+               OR (
+                 ed.assignment_id IS NULL
+                 AND ca.course_id = ed.course_id
+                 AND COALESCE(ed.academic_year, ca.academic_year) = ca.academic_year
+                 AND COALESCE(ed.semester, ca.semester) = ca.semester
+               )
+             )
+             AND (
+               CAST(assigned_instructor.user_id AS CHAR) IN (CAST(? AS CHAR), CAST(? AS CHAR))
+               OR CAST(ca.instructor_id AS CHAR) = CAST(? AS CHAR)
+               OR CAST(ca.instructor_id AS CHAR) = CAST(? AS CHAR)
+               OR (LOWER(COALESCE(ca.assigned_role, 'instructor')) <> 'lab_assistant'
+                 AND CAST(ca.staff_id AS CHAR) IN (CAST(? AS CHAR), CAST(? AS CHAR)))
+             )
+             AND LOWER(COALESCE(ca.status, 'assigned')) NOT IN ('unassigned', 'cancelled', 'inactive')
+             ${assignmentTermFilters.sql}
+         )
+           AND LOWER(ses.status) IN ('submitted', 'completed', 'approved')`,
+        [
+          authenticatedUserId,
+          instructorUserId,
+          instructorId,
+          authenticatedUserId,
+          instructorId,
+          authenticatedUserId,
+          ...assignmentTermFilters.values,
+        ]
       )
-      : [[{ score: 0 }]];
-    const [[peerRow]] = instructorId
-      ? await pool.query(
-        `SELECT COALESCE(AVG(pes.score), 0) AS score
+      : [[{ score: 0, evaluation_count: 0 }]];
+    const [[peerRow]] = await pool.query(
+        `SELECT COALESCE(AVG(pes.score), 0) AS score, COUNT(*) AS evaluation_count
          FROM peer_evaluation_submissions pes
          INNER JOIN peer_evaluations pe ON pe.id = pes.peer_evaluation_id
-         WHERE pe.evaluatee_id = ? AND LOWER(pes.status) IN ('submitted', 'completed', 'approved')`,
-        [instructorId]
-      )
-      : [[{ score: 0 }]];
-    const [[directorateRow]] = instructorId
-      ? await pool.query(
-        `SELECT COALESCE(AVG(total_score), 0) AS score,
+         WHERE CAST(pe.evaluatee_id AS CHAR) IN (CAST(? AS CHAR), CAST(? AS CHAR))
+           AND LOWER(pes.status) IN ('submitted', 'completed', 'approved')`,
+        [instructorId, authenticatedUserId]
+      );
+    const [[directorateRow]] = await pool.query(
+        `SELECT COALESCE(AVG(total_score), 0) AS score, COUNT(*) AS evaluation_count,
                 MAX(strengths) AS strengths, MAX(weaknesses) AS weaknesses
          FROM directorate_evaluations
-         WHERE dean_id = ? AND LOWER(status) = 'completed'
-         GROUP BY dean_id`,
-        [req.user.id]
-      )
-      : [[{ score: 0, strengths: null, weaknesses: null }]];
+         WHERE CAST(dean_id AS CHAR) = CAST(? AS CHAR) AND LOWER(status) IN ('submitted', 'completed', 'approved')`,
+        [authenticatedUserId]
+      );
 
-    // Extract raw scores
     const studentScore = Number(studentRow?.score || 0);
     const peerScore = Number(peerRow?.score || 0);
     const directorateScore = Number(directorateRow?.score || 0);
-    
-    // CASE A: NO COURSE ASSIGNED
-    // Student: Weight = 0%, Contribution = 0%
-    // Peer: Weight = 40%, Contribution = Peer Raw Score * 0.40
-    // Directorate: Weight = 60%, Contribution = Directorate Raw Score * 0.60
-    // Total = Peer Contribution + Directorate Contribution (100% split between peer & directorate)
-    
-    // CASE B: HAS COURSE ASSIGNED
-    // Student: Weight = 50%, Contribution = Student Raw Score * 0.50
-    // Peer: Weight = 20%, Contribution = Peer Raw Score * 0.20
-    // Directorate: Weight = 30%, Contribution = Directorate Raw Score * 0.30
-    // Total = Student Contribution + Peer Contribution + Directorate Contribution (100%)
-    
-    // Assign weights based on course assignment status
-    const studentWeight = hasCourseAssigned ? 50 : 0;
-    const directorateWeight = hasCourseAssigned ? 30 : 60;
-    const peerWeight = hasCourseAssigned ? 20 : 40;
-    
-    // Calculate contributions (multiply raw score by weight percentage / 100)
-    const studentContribution = hasCourseAssigned ? (studentScore * studentWeight / 100) : 0;
-    const directorateContribution = directorateScore * directorateWeight / 100;
-    const peerContribution = peerScore * peerWeight / 100;
+    const calculatedScore = calculateDeanPerformanceScore({
+      student: studentScore,
+      directorate: directorateScore,
+      peer: peerScore,
+      hasAssignedCourses: hasCourseAssigned,
+    });
     const completion = {
-      isStudentComplete: !hasCourseAssigned || Number(studentRow?.score || 0) > 0,
-      isDeptHeadOrDirectorComplete: Number(directorateRow?.score || 0) > 0,
-      isPeerComplete: Number(peerRow?.score || 0) > 0,
+      isStudentComplete: !hasCourseAssigned || Number(studentRow?.evaluation_count || 0) > 0,
+      isDeptHeadOrDirectorComplete: Number(directorateRow?.evaluation_count || 0) > 0,
+      isPeerComplete: Number(peerRow?.evaluation_count || 0) > 0,
     };
     const isComplete = completion.isStudentComplete && completion.isDeptHeadOrDirectorComplete && completion.isPeerComplete;
-    const calculatedTotal = Number((studentContribution + directorateContribution + peerContribution).toFixed(2));
-    const totalWeightedScore = isComplete ? calculatedTotal : null;
+    const hasSubmittedEvaluations = Number(studentRow?.evaluation_count || 0) > 0
+      || Number(directorateRow?.evaluation_count || 0) > 0
+      || Number(peerRow?.evaluation_count || 0) > 0;
+    const totalWeightedScore = calculatedScore.totalScore;
+    const {
+      studentWeight,
+      directorateWeight,
+      peerWeight,
+      studentWeighted,
+      directorateWeighted,
+      peerWeighted,
+    } = calculatedScore;
     
     const strengths = directorateRow?.strengths ? [directorateRow.strengths] : [];
     const improvements = directorateRow?.weaknesses ? [directorateRow.weaknesses] : [];
@@ -156,24 +344,36 @@ router.get('/my-performance', async (req, res) => {
       totalWeightedScore,
       totalScore: totalWeightedScore,
       isComplete,
-      statusBadge: isComplete ? (calculatedTotal >= 90 ? 'Excellent' : calculatedTotal >= 75 ? 'Satisfactory' : 'At Risk') : 'Pending Complete Evaluation',
+      hasSubmittedEvaluations,
+      statusBadge: isComplete ? (calculatedScore.totalScore >= 90 ? 'Excellent' : calculatedScore.totalScore >= 75 ? 'Satisfactory' : 'At Risk') : 'Pending Complete Evaluation',
       completion,
       hasCourseAssigned,
+      hasAssignedCourses: hasCourseAssigned,
+      isTeaching: hasCourseAssigned,
+      assignedCourseCount: Number(courseRow?.course_count || 0),
+      studentEvaluationCount: Number(studentRow?.evaluation_count || 0),
+      academicYear,
+      semester,
+      activeWeight: calculatedScore.activeWeight,
+      weightedSubtotal: calculatedScore.weightedSubtotal,
+      isRescaled: !hasCourseAssigned,
       breakdown: {
         student: { 
-          rawPercentage: hasCourseAssigned ? Number(studentScore.toFixed(2)) : 0, 
-          weightedContribution: Number(studentContribution.toFixed(2)), 
+          rawPercentage: hasCourseAssigned ? Number(studentScore.toFixed(2)) : null,
+          weightedContribution: studentWeighted,
           weight: studentWeight,
-          isNA: !hasCourseAssigned
+          evaluationCount: Number(studentRow?.evaluation_count || 0),
+          isNA: !hasCourseAssigned,
+          status: hasCourseAssigned ? undefined : 'N/A - Non-Teaching Role',
         },
         directorate: { 
           rawPercentage: Number(directorateScore.toFixed(2)), 
-          weightedContribution: Number(directorateContribution.toFixed(2)), 
+          weightedContribution: directorateWeighted,
           weight: directorateWeight 
         },
         peer: { 
           rawPercentage: Number(peerScore.toFixed(2)), 
-          weightedContribution: Number(peerContribution.toFixed(2)), 
+          weightedContribution: peerWeighted,
           weight: peerWeight 
         },
       },
@@ -181,7 +381,7 @@ router.get('/my-performance', async (req, res) => {
       // >= 90%: "Excellent" (Green/Blue badge)
       // 75% - 89.9%: "Satisfactory" (Blue badge)
       // < 75%: "At Risk" (Amber/Red badge)
-      status: isComplete ? (calculatedTotal >= 90 ? 'Excellent' : calculatedTotal >= 75 ? 'Satisfactory' : 'At Risk') : 'Pending Complete Evaluation',
+      status: isComplete ? (calculatedScore.totalScore >= 90 ? 'Excellent' : calculatedScore.totalScore >= 75 ? 'Satisfactory' : 'At Risk') : 'Pending Complete Evaluation',
       feedback: { strengths, improvements },
     });
   } catch (error) {
@@ -493,6 +693,8 @@ router.get('/reports', async (req, res) => {
       const metrics = await getDeptHeadLivePerformanceMetrics({
         instructorId: row.instructor_id,
         departmentId: row.department_id,
+        academicYear: row.academic_year,
+        semester: row.semester,
       });
       const weighted = metrics.weighted;
       const hasCourseAssigned = metrics.hasAssignedCourse;
@@ -558,10 +760,16 @@ router.get('/evaluation-tracking', async (req, res) => {
        ORDER BY department ASC, department_head_name ASC`,
       [collegeId]
     );
+    const [[activePeriod]] = await pool.query(
+      `SELECT academic_year, semester FROM evaluation_periods
+       WHERE LOWER(status) = 'active' ORDER BY id DESC LIMIT 1`
+    );
     const trackingRows = await Promise.all(rows.map(async (row) => {
       const metrics = await getDeptHeadLivePerformanceMetrics({
         instructorId: row.instructor_id,
         departmentId: row.department_id,
+        academicYear: activePeriod?.academic_year || '',
+        semester: activePeriod?.semester || '',
       });
       const weighted = metrics.weighted;
       const hasCourseAssigned = metrics.hasAssignedCourse;

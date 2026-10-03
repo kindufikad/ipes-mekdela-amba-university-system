@@ -1,4 +1,5 @@
 const pool = require('../config/db');
+const { calculateDirectorateScore } = require('../utils/directorateScoreCalculator');
 
 const EMPTY_PERFORMANCE = {
   totalScore: null,
@@ -18,10 +19,6 @@ const EMPTY_PERFORMANCE = {
 const averageScore = (rows) => rows.length
   ? Number((rows.reduce((sum, row) => sum + Number(row.score || 0), 0) / rows.length).toFixed(2))
   : null;
-
-const weightedScore = (score, weight) => score == null
-  ? 0
-  : Number((Math.min(Math.max(Number(score), 0), 100) * weight / 100).toFixed(2));
 
 const parseJson = (value) => {
   if (!value) return {};
@@ -127,15 +124,23 @@ const getDirectoratePerformance = async (req, res) => {
     const vicePresidentRaw = averageScore(vicePresidentRows);
     const studentRaw = averageScore(studentRows);
     const studentApplicable = Number(assignmentStats?.assignment_count || 0) > 0;
-    const peerWeighted = weightedScore(peerRaw, 20);
-    const vicePresidentWeighted = weightedScore(vicePresidentRaw, 30);
-    const studentWeighted = weightedScore(studentRaw, 50);
     const isComplete = peerRows.length > 0 && vicePresidentRows.length > 0
       && (!studentApplicable || studentRows.length > 0);
-    const weightedSubtotal = peerWeighted + vicePresidentWeighted + (studentApplicable ? studentWeighted : 0);
-    const totalScore = isComplete
-      ? Number((studentApplicable ? weightedSubtotal : (weightedSubtotal / 50) * 100).toFixed(2))
-      : null;
+    const calculatedScore = calculateDirectorateScore({
+      peerRaw,
+      vicePresidentRaw,
+      studentRaw,
+      studentApplicable,
+    });
+    const {
+      peerWeighted,
+      vicePresidentWeighted,
+      studentWeighted,
+      totalWeight,
+      weightedSubtotal,
+      totalScore: calculatedTotalScore,
+    } = calculatedScore;
+    const totalScore = isComplete ? calculatedTotalScore : null;
 
     const components = {
       peer: { rawScore: peerRaw, weightedScore: peerWeighted, weight: 20, maxWeight: 20, count: peerRows.length },
@@ -161,7 +166,7 @@ const getDirectoratePerformance = async (req, res) => {
       totalScore,
       weightedSubtotal: Number(weightedSubtotal.toFixed(2)),
       scoreScale: {
-        availableWeight: studentApplicable ? 100 : 50,
+        availableWeight: totalWeight,
         finalWeight: 100,
         isRescaled: !studentApplicable,
       },

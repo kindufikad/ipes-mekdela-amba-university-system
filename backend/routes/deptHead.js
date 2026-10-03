@@ -288,7 +288,11 @@ router.get('/evaluation-deadline', authenticateToken, authorizeRoles('dept_head'
     const [[period]] = await pool.query('SELECT deadline FROM evaluation_periods WHERE status = \'active\' ORDER BY id DESC LIMIT 1');
     await pool.query(`CREATE TABLE IF NOT EXISTS evaluation_deadline_settings (department_id INT UNSIGNED PRIMARY KEY, deadline_at DATETIME NULL, auto_lock TINYINT(1) NOT NULL DEFAULT 1, updated_by INT UNSIGNED NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)`);
     const [[settings]] = await pool.query('SELECT department_id, deadline_at, auto_lock, updated_at FROM evaluation_deadline_settings WHERE department_id = ?', [departmentId]);
-    return res.json({ deadlineAt: period?.deadline || settings?.deadline_at || null, autoLock: period?.deadline ? new Date(period.deadline).getTime() > Date.now() : settings?.auto_lock !== 0, updatedAt: settings?.updated_at || null });
+    return res.json({
+      deadlineAt: period?.deadline || settings?.deadline_at || null,
+      autoLock: settings ? settings.auto_lock !== 0 : period?.deadline ? new Date(period.deadline).getTime() > Date.now() : true,
+      updatedAt: settings?.updated_at || null,
+    });
   } catch (error) {
     console.error('Evaluation deadline settings fetch failed:', error);
     return res.status(500).json({ message: 'Unable to load evaluation deadline settings.' });
@@ -302,7 +306,11 @@ router.put('/evaluation-deadline', authenticateToken, authorizeRoles('dept_head'
   const semester = String(req.body?.semester || 'Semester I').trim();
   const autoLock = req.body?.autoLock !== false;
   if (!departmentId) return res.status(403).json({ message: 'Your department is not defined.' });
-  if (deadlineAt && Number.isNaN(new Date(deadlineAt).getTime())) return res.status(400).json({ message: 'A valid deadline is required.' });
+  if (deadlineAt) {
+    const parsedDeadline = new Date(deadlineAt);
+    if (Number.isNaN(parsedDeadline.getTime())) return res.status(400).json({ message: 'A valid deadline is required.' });
+    if (parsedDeadline.getTime() <= Date.now()) return res.status(400).json({ message: 'The evaluation deadline must be in the future.' });
+  }
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
@@ -338,10 +346,14 @@ router.put('/evaluation-deadline', authenticateToken, authorizeRoles('dept_head'
     await connection.commit();
 
     if (deadlineAt) {
-      const [students] = await pool.query(`SELECT DISTINCT s.user_id FROM students s INNER JOIN evaluation_dispatches ed ON ed.student_id = s.id LEFT JOIN student_evaluation_submissions ses ON ses.dispatch_id = ed.id WHERE s.department_id = ? AND LOWER(COALESCE(ed.status, 'pending')) IN ('pending', 'active', 'published') AND (ses.id IS NULL OR LOWER(COALESCE(ses.status, 'pending')) NOT IN ('submitted', 'completed', 'approved'))`, [departmentId]);
-      const [peers] = await pool.query(`SELECT DISTINCT pe.evaluator_id AS user_id FROM peer_evaluations pe INNER JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id LEFT JOIN peer_evaluation_submissions pes ON pes.peer_evaluation_id = pe.id WHERE ed.department_id = ? AND LOWER(COALESCE(pe.status, 'pending')) IN ('pending', 'active') AND (pes.id IS NULL OR LOWER(COALESCE(pes.status, 'pending')) NOT IN ('submitted', 'completed', 'approved'))`, [departmentId]);
-      const userIds = [...new Set([...students, ...peers].map((row) => row.user_id).filter(Boolean))];
-      if (userIds.length) await createNotifications({ userIds, title: 'Evaluation Deadline Extended', message: `Evaluation deadline extended to ${new Date(deadlineAt).toLocaleString('en-US')}.`, type: 'evaluation_deadline' });
+      try {
+        const [students] = await pool.query(`SELECT DISTINCT s.user_id FROM students s INNER JOIN evaluation_dispatches ed ON ed.student_id = s.id LEFT JOIN student_evaluation_submissions ses ON ses.dispatch_id = ed.id WHERE s.department_id = ? AND LOWER(COALESCE(ed.status, 'pending')) IN ('pending', 'active', 'published') AND (ses.id IS NULL OR LOWER(COALESCE(ses.status, 'pending')) NOT IN ('submitted', 'completed', 'approved'))`, [departmentId]);
+        const [peers] = await pool.query(`SELECT DISTINCT pe.evaluator_id AS user_id FROM peer_evaluations pe INNER JOIN evaluation_dispatches ed ON ed.id = pe.dispatch_id LEFT JOIN peer_evaluation_submissions pes ON pes.peer_evaluation_id = pe.id WHERE ed.department_id = ? AND LOWER(COALESCE(pe.status, 'pending')) IN ('pending', 'active') AND (pes.id IS NULL OR LOWER(COALESCE(pes.status, 'pending')) NOT IN ('submitted', 'completed', 'approved'))`, [departmentId]);
+        const userIds = [...new Set([...students, ...peers].map((row) => row.user_id).filter(Boolean))];
+        if (userIds.length) await createNotifications({ userIds, title: 'Evaluation Deadline Extended', message: `Evaluation deadline extended to ${new Date(deadlineAt).toLocaleString('en-US')}.`, type: 'evaluation_deadline' });
+      } catch (notificationError) {
+        console.error('Evaluation deadline saved, but pending evaluators could not be notified:', notificationError);
+      }
     }
     return res.json({ success: true, deadlineAt, autoLock, message: 'Evaluation deadline updated.' });
   } catch (error) {

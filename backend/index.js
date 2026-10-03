@@ -2266,9 +2266,15 @@ const getDeptHeadPerformance = async (req, res) => {
     }
 
     const instructorId = instructorRows[0].id;
+    const [[activeEvaluationPeriod]] = await pool.query(
+      `SELECT academic_year, semester FROM evaluation_periods
+       WHERE LOWER(status) = 'active' ORDER BY id DESC LIMIT 1`
+    );
     const performance = await getDeptHeadLivePerformanceMetrics({
       instructorId,
       departmentId: instructorRows[0].department_id,
+      academicYear: activeEvaluationPeriod?.academic_year || '',
+      semester: activeEvaluationPeriod?.semester || '',
     });
     const {
       studentRows,
@@ -4315,12 +4321,15 @@ app.get('/api/evaluations/publish-statuses/:deptId', authenticate, authorizeRole
 const findPublishedEvaluationTerm = async (departmentId, yearLevel, semester, academicYear, programType = null, section = null, staffType = 'all') => {
   const filters = [
     'ca.department_id = ?',
-    'ca.year_level = ?',
     'ca.semester = ?',
     'ca.academic_year = ?',
     'ca.is_published = 1',
   ];
-  const params = [departmentId, yearLevel, semester, academicYear];
+  const params = [departmentId, semester, academicYear];
+  if (yearLevel) {
+    filters.push(`REGEXP_REPLACE(LOWER(TRIM(COALESCE(ca.year_level, ''))), '[^0-9]', '') = REGEXP_REPLACE(LOWER(TRIM(?)), '[^0-9]', '')`);
+    params.push(yearLevel);
+  }
   if (programType) {
     filters.push('LOWER(TRIM(ca.program_type)) = LOWER(TRIM(?))');
     params.push(programType);
@@ -4351,47 +4360,6 @@ const validateEvaluationPublishTerm = async (res, departmentId, yearLevel, semes
   }
   return true;
 };
-
-app.post('/api/evaluations/publish', authenticate, authorizeRoles('dept_head', 'admin'), async (req, res) => {
-  const connection = await pool.getConnection();
-  try {
-    const { department_id, program_type, year_level, semester, section, academic_year } = req.body;
-    const departmentId = await resolveDepartmentId(department_id || req.user.department_id || req.user.department);
-    const academicYear = String(academic_year || new Date().getFullYear());
-    if (!departmentId) return res.status(404).json({ message: 'Department was not found.' });
-    if (!await validateEvaluationPublishTerm(res, departmentId, year_level, semester, academicYear, program_type, section)) return;
-
-    const filters = ['ca.department_id = ?', 'ca.year_level = ?', 'ca.semester = ?', 'ca.academic_year = ?'];
-    const params = [departmentId, year_level, semester, academicYear];
-    if (program_type) { filters.push('LOWER(TRIM(ca.program_type)) = LOWER(TRIM(?))'); params.push(program_type); }
-    if (section) { filters.push('LOWER(TRIM(ca.section)) = LOWER(TRIM(?))'); params.push(normalizeSectionValue(section)); }
-    const [assignments] = await connection.query(`SELECT ca.id, ca.course_id, c.name FROM course_assignments ca INNER JOIN courses c ON c.id = ca.course_id WHERE ${filters.join(' AND ')}`, params);
-    await connection.beginTransaction();
-    for (const assignment of assignments) {
-      await connection.query("UPDATE course_assignments SET is_published = 1, is_student_published = 1, is_peer_published = 1, publish_target = 'both' WHERE id = ?", [assignment.id]);
-    }
-    await connection.commit();
-    const [departmentUsers] = await pool.query(
-      `SELECT DISTINCT u.id AS user_id
-       FROM users u
-       LEFT JOIN students s ON s.user_id = u.id
-       LEFT JOIN instructors i ON i.user_id = u.id
-       WHERE LOWER(COALESCE(u.status, 'active')) = 'active'
-         AND ((u.role = 'student' AND s.department_id = ?) OR (u.role IN ('instructor', 'dept_head') AND i.department_id = ?))`,
-      [departmentId, departmentId]
-    );
-    await createNotifications({
-      userIds: departmentUsers.map((user) => user.user_id),
-      title: 'Evaluation form published',
-      message: `A new ${academicYear} ${semester} evaluation form is available.`,
-      type: 'evaluation_published',
-    });
-    return res.json({ message: `Published student and peer evaluations for ${assignments.length} assignments.` });
-  } catch (error) {
-    try { await connection.rollback(); } catch (rollbackError) { console.error('Publish rollback failed:', rollbackError); }
-    return res.status(500).json({ message: 'Unable to publish evaluations.', error: error.message });
-  } finally { connection.release(); }
-});
 
 app.get('/api/evaluations/student-list', authenticate, authorizeRoles('student'), async (req, res) => {
   try {
@@ -4424,9 +4392,19 @@ app.get('/api/evaluations/student-list', authenticate, authorizeRoles('student')
   }
 });
 
-app.post('/api/evaluations/publish-student', authenticate, authorizeRoles('dept_head', 'college_dean', 'dean', 'academic_directorate', 'academic_director', 'directorate', 'admin'), async (req, res) => {
+app.post(['/api/evaluations/publish', '/api/evaluations/publish-student'], authenticate, authorizeRoles('dept_head', 'college_dean', 'dean', 'academic_directorate', 'academic_director', 'directorate', 'admin'), async (req, res) => {
   try {
-    const { department_id, program_type, year_level, semester, section } = req.body;
+    const { department_id, program_type, semester, section } = req.body;
+    const requestedBatch = String(req.body.batchYear || '').trim();
+    if (requestedBatch && !['3rd Year', '4th Year', 'All Batches'].includes(requestedBatch)) {
+      return res.status(400).json({ success: false, message: 'batchYear must be 3rd Year, 4th Year, or All Batches.' });
+    }
+    const batchYear = ['3rd Year', '4th Year', 'All Batches'].includes(requestedBatch) ? requestedBatch : '';
+    const year_level = batchYear && batchYear !== 'All Batches'
+      ? batchYear
+      : batchYear === 'All Batches'
+        ? ''
+        : String(req.body.year_level || '').trim();
     const requestedStaffType = String(req.body.staff_type || 'all').trim().toLowerCase();
     const staffType = ['instructor', 'lab_assistant'].includes(requestedStaffType) ? requestedStaffType : 'all';
     const departmentId = await resolveDepartmentId(department_id || req.user.department_id || req.user.department);
@@ -4437,9 +4415,13 @@ app.post('/api/evaluations/publish-student', authenticate, authorizeRoles('dept_
     const duplicateParams = [departmentId, academicYear];
     duplicateFilters.push("(? = 'all' OR CASE WHEN LOWER(COALESCE(ca.assigned_role, 'instructor')) = 'lab_assistant' THEN 'lab_assistant' ELSE 'instructor' END = ?)");
     duplicateParams.push(staffType, staffType);
-    [['ca.program_type', program_type], ['ca.year_level', year_level], ['ca.semester', semester], ['ca.section', normalizeSectionValue(section)]].forEach(([column, value]) => {
+    [['ca.program_type', program_type], ['ca.semester', semester], ['ca.section', normalizeSectionValue(section)]].forEach(([column, value]) => {
       if (value) { duplicateFilters.push(`LOWER(TRIM(${column})) = LOWER(TRIM(?))`); duplicateParams.push(value); }
     });
+    if (year_level) {
+      duplicateFilters.push(`REGEXP_REPLACE(LOWER(TRIM(COALESCE(ca.year_level, ''))), '[^0-9]', '') = REGEXP_REPLACE(LOWER(TRIM(?)), '[^0-9]', '')`);
+      duplicateParams.push(year_level);
+    }
     const [[existingBatch]] = await pool.query(`SELECT COUNT(*) AS total FROM course_assignments ca WHERE ${duplicateFilters.join(' AND ')}`, duplicateParams);
     if (Number(existingBatch?.total || 0) > 0) {
       return res.status(400).json({ success: false, isAlreadyPublished: true, message: 'Evaluation form has already been published for this section/batch.' });
@@ -4448,12 +4430,19 @@ app.post('/api/evaluations/publish-student', authenticate, authorizeRoles('dept_
 
     const filters = ['ca.department_id = ?', 'ca.academic_year = ?'];
     const params = [departmentId, academicYear];
-    [['ca.program_type', program_type], ['ca.year_level', year_level], ['ca.semester', semester], ['ca.section', normalizeSectionValue(section)]].forEach(([column, value]) => {
+    [['ca.program_type', program_type], ['ca.semester', semester], ['ca.section', normalizeSectionValue(section)]].forEach(([column, value]) => {
       if (value) { filters.push(`LOWER(TRIM(${column})) = LOWER(TRIM(?))`); params.push(value); }
     });
+    if (year_level) {
+      filters.push(`REGEXP_REPLACE(LOWER(TRIM(COALESCE(ca.year_level, ''))), '[^0-9]', '') = REGEXP_REPLACE(LOWER(TRIM(?)), '[^0-9]', '')`);
+      params.push(year_level);
+    }
     filters.push("(? = 'all' OR CASE WHEN LOWER(COALESCE(ca.assigned_role, 'instructor')) = 'lab_assistant' THEN 'lab_assistant' ELSE 'instructor' END = ?)");
     params.push(staffType, staffType);
     const [assignments] = await pool.query(`SELECT ca.id, ca.course_id, ca.instructor_id, ca.staff_id, ca.assigned_role, ca.year_level, ca.semester, c.code AS course_code, c.name FROM course_assignments ca JOIN courses c ON c.id = ca.course_id WHERE ${filters.join(' AND ')}`, params);
+    if (!assignments.length) {
+      return res.status(404).json({ success: false, message: `No course assignments were found for ${batchYear || year_level || 'the selected'} target batch.` });
+    }
 
     const [students] = await pool.query(
       `SELECT s.id, s.user_id, s.program_type, s.year_level, s.semester, s.section
@@ -4489,7 +4478,11 @@ app.post('/api/evaluations/publish-student', authenticate, authorizeRoles('dept_
 
     await createNotifications({ userIds: [...notificationUserIds], title: 'Evaluation form published', message: `A new ${academicYear} ${semester || ''} evaluation form is available.`, type: 'evaluation_published' });
     const publishedCount = assignments.length;
-    return res.json({ message: `Published student evaluations for ${publishedCount} target group(s).` });
+    return res.json({
+      message: `Published student evaluations for ${publishedCount} target group(s).`,
+      batchYear: batchYear || year_level || 'All Batches',
+      publishedCount,
+    });
   } catch (error) { console.error('Student evaluation publish failed:', error); return res.status(500).json({ message: 'Unable to publish student evaluations.' }); }
 });
 
