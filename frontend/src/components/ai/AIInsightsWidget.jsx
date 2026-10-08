@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronUp,
   Lightbulb,
+  RefreshCw,
   Sparkles,
   XCircle,
 } from 'lucide-react';
@@ -63,15 +64,15 @@ const getTopKeywords = (data) => {
 };
 
 const LoadingState = () => (
-  <div className="grid gap-6 p-5 lg:grid-cols-2 lg:p-6" aria-live="polite" aria-label="Loading AI insights">
-    <div className="space-y-4">
+  <div className="grid grid-cols-1 gap-4 p-5 lg:grid-cols-3 lg:p-6" aria-live="polite" aria-label="Loading AI insights">
+    <div className="space-y-4 lg:col-span-2">
       <div className="h-3 w-32 animate-pulse rounded bg-white/15" />
       <div className="h-4 w-full animate-pulse rounded bg-white/10" />
       <div className="h-4 w-5/6 animate-pulse rounded bg-white/10" />
       <div className="h-4 w-4/6 animate-pulse rounded bg-white/10" />
       <div className="h-3 w-full animate-pulse rounded-full bg-white/10" />
     </div>
-    <div className="space-y-3">
+    <div className="space-y-3 lg:col-span-1">
       <div className="h-3 w-36 animate-pulse rounded bg-white/15" />
       <div className="h-28 animate-pulse rounded-2xl bg-white/10" />
       <div className="h-28 animate-pulse rounded-2xl bg-white/10" />
@@ -101,6 +102,8 @@ const AIInsightsWidget = ({
   isLoading = false,
   isEnabled = true,
   onActionClick = () => {},
+  onRefresh = () => {},
+  isRefreshing = false,
   defaultExpanded = false,
 }) => {
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
@@ -137,28 +140,42 @@ const AIInsightsWidget = ({
       className="overflow-hidden rounded-2xl border border-indigo-500/40 bg-gradient-to-br from-slate-900 via-indigo-950 to-blue-900 text-white shadow-2xl shadow-indigo-950/30 backdrop-blur-md"
       aria-labelledby="ipes-ai-insights-title"
     >
-      <button
-        type="button"
-        onClick={() => setIsExpanded((expanded) => !expanded)}
-        aria-expanded={isExpanded}
-        aria-controls="ipes-ai-insights-panel"
-        className="flex w-full items-center justify-between gap-3 border border-indigo-500/30 bg-slate-900 p-3 text-left text-white transition-all duration-300 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-300 sm:px-4"
-      >
-        <span className="flex min-w-0 items-center gap-3">
-          <span className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-emerald-300/30 bg-indigo-400/20 text-emerald-200">
-            <Sparkles className="animate-pulse" size={18} aria-hidden="true" />
+      <div className="flex items-center gap-2 border border-indigo-500/30 bg-slate-900 p-2 text-white sm:gap-3 sm:p-3">
+        <button
+          type="button"
+          onClick={() => setIsExpanded((expanded) => !expanded)}
+          aria-expanded={isExpanded}
+          aria-controls="ipes-ai-insights-panel"
+          className="flex min-w-0 flex-1 items-center justify-between gap-3 rounded-lg p-1 text-left transition-colors hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-300 sm:px-2"
+        >
+          <span className="flex min-w-0 items-center gap-3">
+            <span className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-emerald-300/30 bg-indigo-400/20 text-emerald-200">
+              <Sparkles className="animate-pulse" size={18} aria-hidden="true" />
+            </span>
+            <span className="min-w-0">
+              <span id="ipes-ai-insights-title" className="block truncate text-sm font-bold sm:text-base">IPES AI Smart Insights</span>
+              <span className="mt-0.5 block truncate text-[10px] font-semibold uppercase tracking-[0.14em] text-indigo-200/70">{ROLE_LABELS[roleKey]}</span>
+            </span>
+            <span className={`hidden shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-semibold sm:inline-flex ${completionTone}`}>Completion Rate: {isLoading ? '--' : `${completionRate.toFixed(1)}%`}</span>
           </span>
-          <span className="min-w-0">
-            <span id="ipes-ai-insights-title" className="block truncate text-sm font-bold sm:text-base">✨ IPES AI Smart Insights</span>
-            <span className="mt-0.5 block truncate text-[10px] font-semibold uppercase tracking-[0.14em] text-indigo-200/70">{ROLE_LABELS[roleKey]}</span>
+          <span className="flex shrink-0 items-center gap-2 text-indigo-100">
+            <span className={`rounded-full border px-2 py-1 text-[10px] font-semibold sm:hidden ${completionTone}`}>{isLoading ? '--' : `${completionRate.toFixed(1)}%`}</span>
+            {isExpanded ? <ChevronUp size={19} aria-hidden="true" /> : <ChevronDown size={19} aria-hidden="true" />}
           </span>
-          <span className={`hidden shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-semibold sm:inline-flex ${completionTone}`}>Completion Rate: {isLoading ? '--' : `${completionRate.toFixed(1)}%`}</span>
-        </span>
-        <span className="flex shrink-0 items-center gap-2 text-indigo-100">
-          <span className={`rounded-full border px-2 py-1 text-[10px] font-semibold sm:hidden ${completionTone}`}>{isLoading ? '--' : `${completionRate.toFixed(1)}%`}</span>
-          {isExpanded ? <ChevronUp size={19} aria-hidden="true" /> : <ChevronDown size={19} aria-hidden="true" />}
-        </span>
-      </button>
+        </button>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={isLoading || isRefreshing}
+          aria-label="Refresh AI Insights"
+          title="Refresh AI Insights"
+          className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-indigo-300/30 bg-indigo-400/10 px-2.5 py-2 text-xs font-semibold text-indigo-100 transition hover:bg-indigo-300/20 focus:outline-none focus:ring-2 focus:ring-indigo-200 disabled:cursor-wait disabled:opacity-60 sm:px-3"
+        >
+          <RefreshCw size={15} className={isRefreshing ? 'animate-spin' : ''} aria-hidden="true" />
+          <span className="hidden sm:inline">Refresh AI Insights</span>
+          <span className="sm:hidden">Refresh</span>
+        </button>
+      </div>
 
       <div
         id="ipes-ai-insights-panel"
@@ -179,9 +196,9 @@ const AIInsightsWidget = ({
           <p>Insights will appear here when evaluation data is available.</p>
         </div>
       ) : (
-        <div className="grid gap-6 p-5 lg:grid-cols-2 lg:p-6">
-          <div className="space-y-6">
-            <div className="grid gap-3 sm:grid-cols-3">
+        <div className="grid grid-cols-1 gap-4 p-5 lg:grid-cols-3 lg:p-6">
+          <div className="space-y-6 lg:col-span-2">
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
               <div className="rounded-xl border border-white/10 bg-white/[0.07] p-4"><p className="text-xs font-bold uppercase tracking-[0.16em] text-indigo-200/70">Average Evaluation Score</p><p className="mt-2 text-2xl font-bold text-white">{isLoading ? '--' : data.averageScore === undefined && data.average_score === undefined ? 'Awaiting data' : `${averageScore.toFixed(1)}%`}</p></div>
               <div className="rounded-xl border border-white/10 bg-white/[0.07] p-4"><p className="text-xs font-bold uppercase tracking-[0.16em] text-indigo-200/70">Completion Rate</p><p className="mt-2 text-2xl font-bold text-white">{isLoading ? '--' : `${completionRate.toFixed(1)}%`}</p><div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10" role="meter" aria-label="Evaluation completion rate" aria-valuemin={0} aria-valuemax={100} aria-valuenow={completionRate}><span className={`block h-full rounded-full transition-all duration-700 ${completionRate >= 80 ? 'bg-emerald-400' : completionRate >= 50 ? 'bg-amber-300' : 'bg-rose-400'}`} style={{ width: `${completionRate}%` }} /></div><p className="mt-2 text-xs text-indigo-100/70">{Number(data.totalSubmitted || 0)} of {Number(data.totalRequired || 0)} required</p></div>
               <div className="rounded-xl border border-white/10 bg-white/[0.07] p-4"><p className="text-xs font-bold uppercase tracking-[0.16em] text-indigo-200/70">Top Feedback Keywords</p>{topKeywords.length > 0 ? <div className="mt-2 flex flex-wrap gap-2">{topKeywords.map((keyword) => <span key={keyword} className="rounded-full bg-indigo-400/20 px-2.5 py-1 text-xs text-indigo-100">{keyword}</span>)}</div> : <p className="mt-2 text-sm text-indigo-100/70">Awaiting more written feedback</p>}</div>
@@ -230,7 +247,7 @@ const AIInsightsWidget = ({
           </div>
 
           {recommendations.length > 0 && (
-            <div>
+            <div className="lg:col-span-1">
               <p className="mb-3 text-xs font-bold uppercase tracking-[0.16em] text-indigo-200/70">Recommended actions</p>
               <div className="space-y-3">
                 {recommendations.map((recommendation, index) => (

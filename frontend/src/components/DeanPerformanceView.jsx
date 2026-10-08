@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { deanApi } from '../services/api';
+import { calculateDeanPerformanceScore } from '../utils/deanPerformanceScore';
 
-const formatScore = (value) => `${Number(value || 0).toFixed(1)}%`;
+const formatScore = (value) => `${Number(value || 0).toFixed(2)}%`;
 
 // Helper to get badge styling based on status
 const getStatusBadgeClass = (status) => {
@@ -35,9 +36,21 @@ const DeanPerformanceView = () => {
   // RENDERING LOGIC
   const feedback = report?.feedback || {};
   const breakdown = report?.breakdown || {};
-  const hasCourseAssigned = report?.hasCourseAssigned ?? true;
+  const assignedCourseCount = Number(report?.assignedCourseCount || 0);
+  const hasCourseAssigned = assignedCourseCount > 0
+    || report?.isTeaching === true
+    || report?.hasAssignedCourses === true
+    || report?.hasCourseAssigned === true;
   const isComplete = report?.isComplete === true;
-  const totalWeightedScore = report?.totalWeightedScore ?? 0;
+  const hasSubmittedEvaluations = report?.hasSubmittedEvaluations === true
+    || Number(report?.studentEvaluationCount || 0) > 0;
+  const locallyCalculatedScore = calculateDeanPerformanceScore({
+    student: breakdown.student?.rawPercentage || 0,
+    directorate: breakdown.directorate?.rawPercentage || 0,
+    peer: breakdown.peer?.rawPercentage || 0,
+    hasAssignedCourses: hasCourseAssigned,
+  });
+  const totalWeightedScore = locallyCalculatedScore.totalScore;
   const status = isComplete ? (report?.status || 'At Risk') : 'Pending Complete Evaluation';
   
   // Define evaluation cards in order: Student, Directorate, Peer
@@ -75,27 +88,47 @@ const DeanPerformanceView = () => {
           <div>
             <p className="text-sm font-medium text-slate-500">Total Weighted Evaluation Score</p>
             <p id="dean-performance-title" className="mt-1 text-5xl font-bold text-ieps-blue-700">
-              {isComplete ? formatScore(totalWeightedScore) : 'Pending Completion'}
+              {hasSubmittedEvaluations ? formatScore(totalWeightedScore) : 'Pending Completion'}
             </p>
             <p className="mt-1 text-xs text-slate-500">
-              100% total weight{!hasCourseAssigned ? ' (No Course Assigned - Special Weighting Applied)' : ''}
+              {!hasCourseAssigned
+                ? `Directorate and Peer subtotal: ${formatScore(report?.weightedSubtotal ?? locallyCalculatedScore.weightedSubtotal)} / 50% active weight, rescaled to 100%`
+                : '100% total weight'}
             </p>
           </div>
-          <span className={`rounded-full px-3 py-1 text-sm font-semibold ${isComplete ? getStatusBadgeClass(status) : 'bg-amber-100 text-amber-700'}`}>
-            {status}
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            {hasCourseAssigned ? (
+              <span className="rounded-full bg-emerald-50 px-3 py-1 text-sm font-semibold text-emerald-700">
+                Role: Teaching (100% Weight)
+              </span>
+            ) : (
+              <span className="rounded-full bg-blue-50 px-3 py-1 text-sm font-semibold text-blue-700">
+                Role: Non-Teaching (Re-scaled to 100%)
+              </span>
+            )}
+            <span className={`rounded-full px-3 py-1 text-sm font-semibold ${isComplete ? getStatusBadgeClass(status) : 'bg-amber-100 text-amber-700'}`}>
+              {status}
+            </span>
+          </div>
         </div>
-        {!isComplete && <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">Total score will be published after all evaluation categories (Student, Peer, and Directorate) complete their submissions.</div>}
+        {!isComplete && <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
+          {hasSubmittedEvaluations
+            ? `The displayed weighted score is provisional until ${hasCourseAssigned ? 'Student, Peer, and Directorate' : 'Peer and Directorate'} evaluations are complete.`
+            : `The weighted score will be available after the first ${hasCourseAssigned ? 'Student, Peer, or Directorate' : 'Peer or Directorate'} evaluation is submitted.`}
+        </div>}
       </div>
 
       {/* SECTION 2: EVALUATION CARDS - STUDENT, DIRECTORATE, PEER */}
       <div className="grid gap-4 md:grid-cols-3">
         {breakdownItems.map((item) => {
           const score = breakdown[item.key] || {};
-          const isNA = score.isNA && item.key === 'student';
-          const weight = score.weight || 0;
-          const rawPercentage = score.rawPercentage || 0;
-          const weightedContribution = score.weightedContribution || 0;
+          const isStudentEvaluation = item.key === 'student';
+          const isNA = isStudentEvaluation && !hasCourseAssigned;
+          const weight = isStudentEvaluation
+            ? (hasCourseAssigned ? 50 : 0)
+            : (score.weight ?? (item.key === 'directorate' ? 30 : 20));
+          const rawPercentage = Number(score.rawPercentage ?? 0);
+          const weightedContribution = Number((rawPercentage * weight / 100).toFixed(2));
 
           return (
             <section key={item.key} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -112,7 +145,7 @@ const DeanPerformanceView = () => {
                 // CASE A: NO COURSE ASSIGNED - Show N/A
                 <>
                   <p className="mt-4 text-3xl font-bold text-amber-600">N/A</p>
-                  <p className="mt-1 text-sm text-slate-500">Not Assigned</p>
+                  <p className="mt-1 text-sm text-slate-500">N/A - Non-Teaching Role</p>
                 </>
               ) : (
                 // CASE B: HAS COURSE OR NOT STUDENT CARD - Show Raw Percentage
@@ -126,7 +159,7 @@ const DeanPerformanceView = () => {
               <div className="mt-4 border-t border-slate-100 pt-3">
                 <p className="text-sm text-slate-500">Weighted contribution</p>
                 <p className="text-xl font-bold text-slate-900">
-                  {formatScore(weightedContribution)}
+                  {isNA ? 'N/A' : formatScore(weightedContribution)}
                 </p>
               </div>
             </section>

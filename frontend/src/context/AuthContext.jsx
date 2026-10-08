@@ -3,17 +3,24 @@ import { useNavigate } from 'react-router-dom';
 import { authApi } from '../services/api';
 import { AuthContext } from './authContextStore';
 
+const getRoleValues = (value) => (Array.isArray(value) ? value : [value])
+  .flatMap((role) => String(role || '').split(/[;,|]+/))
+  .map((role) => String(role || '').toLowerCase().replace(/[^a-z0-9]/g, ''))
+  .filter(Boolean);
+
 const normalizeRole = (value) => {
-  const normalizedValue = String(value || '').trim().toLowerCase();
-  if (normalizedValue === 'dept_head' || normalizedValue === 'depthead') return 'depthead';
-  if (normalizedValue === 'system_admin' || normalizedValue === 'systemadmin' || normalizedValue === 'admin') return 'systemadmin';
-  if (normalizedValue === 'college_dean' || normalizedValue === 'dean') return 'college_dean';
-  if (normalizedValue === 'academic_directorate' || normalizedValue === 'academic_director' || normalizedValue === 'directorate') return 'academic_directorate';
-  if (['academic_vice_president', 'vice_president', 'vice-president', 'vice president'].includes(normalizedValue)) return 'academic_vice_president';
-  if (normalizedValue === 'lab_assistant') return 'lab_assistant';
-  if (normalizedValue === 'instructor') return 'instructor';
+  const normalizedValue = getRoleValues(value)[0] || '';
+  if (['depthead', 'departmenthead', 'head'].includes(normalizedValue)) return 'depthead';
+  if (['systemadmin', 'admin'].includes(normalizedValue)) return 'systemadmin';
+  if (['collegedean', 'dean'].includes(normalizedValue)) return 'college_dean';
+  if (['academicdirectorate', 'academicdirector', 'directorate'].includes(normalizedValue)) return 'academic_directorate';
+  if (['academicvicepresident', 'vicepresident'].includes(normalizedValue)) return 'academic_vice_president';
+  if (normalizedValue === 'labassistant') return 'lab_assistant';
+  if (['instructor', 'teacher'].includes(normalizedValue)) return 'instructor';
   return 'student';
 };
+
+const normalizeRoles = (value) => [...new Set(getRoleValues(value).map(normalizeRole))];
 
 const normalizeProfilePhoto = (value) => {
   const candidate = String(value || '').trim();
@@ -30,19 +37,50 @@ const normalizeProfilePhoto = (value) => {
   return candidate;
 };
 
+const readStoredAuth = () => {
+  if (typeof window === 'undefined') return { token: null, user: null, role: null };
+
+  try {
+    const token = window.localStorage.getItem('ipesAuthToken') || window.localStorage.getItem('token');
+    const role = normalizeRole(window.localStorage.getItem('role'));
+    const storedUser = window.localStorage.getItem('user') || window.localStorage.getItem('userData');
+    if (!token || !storedUser) return { token, user: null, role };
+
+    const parsedUser = JSON.parse(storedUser);
+    if (!parsedUser || typeof parsedUser !== 'object') return { token, user: null, role };
+
+    const roles = normalizeRoles(parsedUser.roles || parsedUser.role || role);
+    const normalizedRole = normalizeRole(parsedUser.role || roles[0] || role);
+    const photo = normalizeProfilePhoto(parsedUser.profile_photo || parsedUser.profile_picture || parsedUser.avatar);
+    const name = parsedUser.full_name
+      || parsedUser.name
+      || `${parsedUser.first_name || ''} ${parsedUser.last_name || ''}`.trim()
+      || parsedUser.username;
+    return {
+      token,
+      role: normalizedRole,
+      user: name ? {
+        ...parsedUser,
+        name,
+        role: normalizedRole,
+        roles,
+        profile_photo: photo,
+        profile_picture: photo,
+        avatar: photo,
+        isFirstLogin: Boolean(parsedUser.isFirstLogin ?? parsedUser.is_first_login ?? false),
+      } : null,
+    };
+  } catch {
+    return { token: null, user: null, role: null };
+  }
+};
+
 export const AuthProvider = ({ children }) => {
-  const [session, setSession] = useState(null);
-  const [isAuthLoading, setIsAuthLoading] = useState(() => Boolean(typeof window !== 'undefined' && (window.localStorage.getItem('ipesAuthToken') || window.localStorage.getItem('token'))));
-
-  const [authToken, setAuthToken] = useState(() => {
-    if (typeof window === 'undefined') return null;
-    return window.localStorage.getItem('ipesAuthToken') || window.localStorage.getItem('token');
-  });
-
-  const [role, setRole] = useState(() => {
-    if (typeof window === 'undefined') return null;
-    return normalizeRole(window.localStorage.getItem('role'));
-  });
+  const [initialAuth] = useState(readStoredAuth);
+  const [session, setSession] = useState(initialAuth.user);
+  const [isAuthLoading, setIsAuthLoading] = useState(Boolean(initialAuth.token));
+  const [authToken, setAuthToken] = useState(initialAuth.token);
+  const [role, setRole] = useState(initialAuth.role);
 
   const [accounts, setAccounts] = useState([]);
 
@@ -63,12 +101,14 @@ export const AuthProvider = ({ children }) => {
       try {
         const profile = await authApi.me();
         const profilePhoto = normalizeProfilePhoto(profile.profile_photo || profile.profile_picture || profile.avatar);
-        const normalizedProfileRole = normalizeRole(profile.role);
+        const normalizedRoles = normalizeRoles(profile.roles || profile.role);
+        const normalizedProfileRole = normalizeRole(profile.role || normalizedRoles[0]);
         const hydratedUser = {
           ...profile,
           name: profile.full_name || profile.name || profile.username,
           username: profile.username || profile.email,
           role: normalizedProfileRole,
+          roles: normalizedRoles,
           profile_photo: profilePhoto,
           profile_picture: profilePhoto,
           avatar: profilePhoto,
@@ -84,6 +124,10 @@ export const AuthProvider = ({ children }) => {
         setAuthToken(null);
         setRole(null);
         setSession(null);
+        if (typeof window !== 'undefined') {
+          window.localStorage.removeItem('user');
+          window.localStorage.removeItem('userData');
+        }
       } finally {
         setIsAuthLoading(false);
       }
@@ -102,32 +146,6 @@ export const AuthProvider = ({ children }) => {
       window.localStorage.removeItem('token');
     }
   }, [authToken]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const storedUser = window.localStorage.getItem('user');
-    if (!storedUser) return;
-
-    try {
-      const parsedUser = JSON.parse(storedUser);
-      if (parsedUser && (parsedUser.username || parsedUser.first_name || parsedUser.last_name || parsedUser.full_name)) {
-        const storedPhoto = normalizeProfilePhoto(parsedUser.profile_photo || parsedUser.profile_picture || parsedUser.avatar);
-        const hydratedStoredUser = {
-          ...parsedUser,
-          role: normalizeRole(parsedUser.role),
-          profile_photo: storedPhoto,
-          profile_picture: storedPhoto,
-          avatar: storedPhoto,
-          isFirstLogin: Boolean(parsedUser.isFirstLogin ?? parsedUser.is_first_login ?? false),
-          name: parsedUser.full_name || `${parsedUser.first_name || ''} ${parsedUser.last_name || ''}`.trim() || parsedUser.username,
-        };
-        setSession(hydratedStoredUser);
-        setRole(normalizeRole(parsedUser.role));
-      }
-    } catch (error) {
-      console.warn('Unable to parse stored user profile:', error);
-    }
-  }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -161,7 +179,8 @@ export const AuthProvider = ({ children }) => {
 
   const setAuthSession = (token, user) => {
     if (!token || !user) return false;
-    const normalizedRole = normalizeRole(user.role);
+    const normalizedRoles = normalizeRoles(user.roles || user.role);
+    const normalizedRole = normalizeRole(user.role || normalizedRoles[0]);
     const photo = normalizeProfilePhoto(user.profile_photo || user.profile_picture || user.avatar);
     const fullUser = {
       ...user,
@@ -171,6 +190,7 @@ export const AuthProvider = ({ children }) => {
       last_name: user.last_name || user.lastName || null,
       full_name: user.full_name || [user.first_name || user.firstName, user.last_name || user.lastName].filter(Boolean).join(' ') || user.username || null,
       role: normalizedRole,
+      roles: normalizedRoles,
       profile_photo: photo,
       profile_picture: photo,
       avatar: photo,

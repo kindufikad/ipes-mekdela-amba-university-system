@@ -1,6 +1,7 @@
 import { io } from 'socket.io-client';
 
-const socketUrl = import.meta.env.VITE_SOCKET_URL || 'http://127.0.0.1:5005';
+const socketUrl = import.meta.env.VITE_SOCKET_URL
+  || (typeof window === 'undefined' ? 'http://127.0.0.1:5005' : window.location.origin);
 
 const getSocketAuthToken = () => {
   if (typeof window === 'undefined') return '';
@@ -10,7 +11,7 @@ const getSocketAuthToken = () => {
 const socket = io(socketUrl, {
   autoConnect: false,
   path: '/socket.io',
-  transports: ['websocket', 'polling'],
+  transports: ['polling', 'websocket'],
   rememberUpgrade: false,
   reconnection: true,
   reconnectionAttempts: Infinity,

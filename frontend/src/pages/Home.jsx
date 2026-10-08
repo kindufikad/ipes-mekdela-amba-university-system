@@ -4,6 +4,8 @@ import { LanguageContext } from '../context/LanguageContext';
 import { publicApi } from '../services/api';
 
 import ImageSlider from '../components/ImageSlider';
+import WorkflowHierarchy from '../components/WorkflowHierarchy';
+import './Home.css';
 
 const Home = () => {
   const { language } = useContext(LanguageContext);
@@ -34,14 +36,14 @@ const Home = () => {
       label: language === 'en' ? 'Evaluations Completed' : 'የተጠናቀቁ ግምገማዎች',
       value: systemStats?.evaluationsCompleted,
       icon: BarChart3,
-      color: 'blue',
+      color: 'navy',
     },
     {
       id: 2,
       label: language === 'en' ? 'Active Instructors' : 'ንቁ መምህራን',
       value: systemStats?.activeInstructors,
       icon: Users,
-      color: 'gold',
+      color: 'amber',
     },
     {
       id: 3,
@@ -55,59 +57,56 @@ const Home = () => {
       label: language === 'en' ? 'Student Participation' : 'የተማሪ ተሳትፎ',
       value: systemStats?.studentParticipation !== undefined ? `${systemStats.studentParticipation}%` : undefined,
       icon: TrendingUp,
-      color: 'gold',
+      color: 'amber',
     },
   ];
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <section className="w-full px-4 sm:px-6 lg:px-8 py-6">
-        <ImageSlider />
+    <div className="landing-page">
+      <section className="landing-hero" aria-label={language === 'en' ? 'University highlights' : 'የዩኒቨርሲቲ ዋና ዋና ዜናዎች'}>
+        <div className="landing-container">
+          <ImageSlider />
+        </div>
       </section>
 
-      {/* 2. Dashboard Stats Section */}
-      <section className="py-12 bg-white">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="text-center mb-12">
-            <h2 className="text-3xl md:text-4xl font-bold text-blue-900 mb-2">
+      <section className="landing-overview" aria-labelledby="landing-overview-title">
+        <div className="landing-container landing-overview__inner">
+          <header className="landing-section-heading">
+            <span className="landing-section-heading__eyebrow">IPES · MEKDELA AMBA UNIVERSITY</span>
+            <h2 id="landing-overview-title">
               {language === 'en' ? 'System Overview' : 'የሥርዓቱ አጠቃላይ እይታ'}
             </h2>
-            <p className="text-gray-600 italic">
+            <p>
               {language === 'en'
                 ? 'Key metrics and performance indicators'
                 : 'ቁልፍ መለኪያዎች እና የአፈጻጸም አመልካቾች'}
             </p>
-          </div>
+          </header>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          <div className="landing-metrics">
             {stats.map((stat) => {
               const Icon = stat.icon;
-              const isBlue = stat.color === 'blue';
               return (
                 <div
                   key={stat.id}
-                  className={`rounded-3xl p-6 shadow-md hover:shadow-xl transition-all duration-300 transform hover:-translate-y-2 ${
-                    isBlue
-                      ? 'bg-gradient-to-br from-blue-700 to-blue-900 text-white'
-                      : 'bg-gradient-to-br from-amber-400 to-amber-500 text-blue-900'
-                  }`}
+                  className={`landing-metric-card landing-metric-card--${stat.color}`}
                 >
-                  <div className="flex items-start justify-between mb-4">
-                    <p className={`text-sm font-semibold ${isBlue ? 'text-blue-100' : 'text-blue-800'}`}>
-                      {stat.label}
-                    </p>
-                    <Icon className="w-6 h-6 opacity-80" />
+                  <div className="landing-metric-card__top">
+                    <p>{stat.label}</p>
+                    <span className="landing-metric-card__icon" aria-hidden="true"><Icon /></span>
                   </div>
-                  <p className="text-3xl md:text-4xl font-bold" aria-live="polite">
-                    {stat.value === undefined ? <span className="inline-block h-10 w-24 animate-pulse rounded bg-white/30" aria-label="Loading" /> : stat.value}
+                  <p className="landing-metric-card__value" aria-live="polite">
+                    {stat.value === undefined ? <span className="landing-metric-card__loading" aria-label="Loading" /> : stat.value}
                   </p>
                 </div>
               );
             })}
           </div>
+
         </div>
       </section>
 
+      <WorkflowHierarchy />
     </div>
   );
 };

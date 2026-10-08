@@ -1,4 +1,5 @@
 const pool = require('../config/db');
+const { summarizeInstructorFeedback } = require('../services/aiInsightsService');
 
 const ROLE_ALIASES = {
   student: 'student',
@@ -226,48 +227,210 @@ const getLabAssistantInsights = async ({ userId }) => {
 };
 
 const getInstructorInsights = async ({ userId }) => {
-  const [[stats]] = await pool.query(`
-    SELECT COUNT(DISTINCT ed.id) AS total_required,
-      COUNT(DISTINCT CASE WHEN ses.id IS NOT NULL THEN ed.id END) AS total_submitted,
-      AVG(ses.score) AS average_score,
-      COUNT(DISTINCT ses.id) AS response_count
+  const [[instructor]] = await pool.query(`
+    SELECT i.id, i.user_id, u.email
     FROM instructors i
-    LEFT JOIN course_assignments ca ON ca.instructor_id = i.id
-      AND LOWER(COALESCE(ca.status, 'assigned')) <> 'cancelled'
-    LEFT JOIN evaluation_dispatches ed ON ed.assignment_id = ca.id
-      AND LOWER(COALESCE(ed.evaluation_type, 'student')) = 'student'
-    LEFT JOIN student_evaluation_submissions ses ON ses.dispatch_id = ed.id AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'published')
+    INNER JOIN users u ON u.id = i.user_id
     WHERE i.user_id = ?
+    LIMIT 1
   `, [userId]);
-  const [feedbackRows] = await pool.query(`
-    SELECT ses.feedback, ses.strengths, ses.improvements
-    FROM instructors i
-    JOIN course_assignments ca ON ca.instructor_id = i.id
-    JOIN evaluation_dispatches ed ON ed.assignment_id = ca.id
-    JOIN student_evaluation_submissions ses ON ses.dispatch_id = ed.id
-    WHERE i.user_id = ? ORDER BY ses.created_at DESC LIMIT 200
-  `, [userId]);
-  const topKeywords = extractFeedbackPhrases(feedbackRows);
-  const signals = getFeedbackSignals(feedbackRows, stats?.average_score);
-  const total = number(stats?.response_count);
-  const totalRequired = number(stats?.total_required);
-  const totalSubmitted = number(stats?.total_submitted);
-  return response([
-    `Average student evaluation score: ${number(stats?.average_score).toFixed(1)}%.`,
-    `Student evaluation completion: ${percentage(totalSubmitted, totalRequired)}%.`,
-    `Top feedback keywords: ${topKeywords.length ? topKeywords.join(', ') : 'No recurring keywords yet'}.`,
-  ], [
-    recommendation('Review student feedback', 'Explore written comments and recurring feedback themes.', 'View Feedback', 'VIEW_FEEDBACK'),
-    recommendation('Set a teaching goal', 'Choose one measurable improvement to revisit in the next evaluation cycle.', 'Set Improvement Goal', 'SET_GOAL'),
-  ], signals.sentiment, undefined, {
-    ...signals,
-    averageScore: stats?.average_score,
-    topFeedbackKeywords: topKeywords,
-    completionRate: percentage(totalSubmitted, totalRequired),
+  if (!instructor) throw new Error('Instructor profile was not found.');
+
+  const [emailColumns] = await pool.query(`
+    SELECT COLUMN_NAME
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'course_assignments'
+      AND COLUMN_NAME = 'instructor_email'
+    LIMIT 1
+  `);
+  const assignmentPredicates = [
+    'ca.instructor_id = ?',
+    "(ca.lab_assistant_id IS NULL AND LOWER(COALESCE(ca.assigned_role, 'instructor')) <> 'lab_assistant' AND ca.staff_id IN (?, ?))",
+  ];
+  const assignmentParams = [instructor.id, instructor.id, instructor.user_id];
+  if (emailColumns.length && instructor.email) {
+    assignmentPredicates.push('LOWER(TRIM(ca.instructor_email)) = LOWER(TRIM(?))');
+    assignmentParams.push(instructor.email);
+  }
+  const assignmentFilter = `(${assignmentPredicates.join(' OR ')})`;
+  const activeAssignmentFilter = `
+    ${assignmentFilter}
+    AND ca.lab_assistant_id IS NULL
+    AND LOWER(COALESCE(ca.assigned_role, 'instructor')) <> 'lab_assistant'
+    AND LOWER(COALESCE(ca.status, 'assigned')) NOT IN ('cancelled', 'inactive', 'unassigned')
+  `;
+
+  const [expectedRows] = await pool.query(`
+    SELECT COUNT(DISTINCT CONCAT(ca.id, ':', s.id)) AS expected_students
+    FROM course_assignments ca
+    INNER JOIN students s ON ca.student_id = s.id OR (
+      ca.student_id IS NULL
+      AND s.department_id = ca.department_id
+      AND LOWER(COALESCE(s.year_level, '')) = LOWER(COALESCE(ca.year_level, ''))
+      AND LOWER(COALESCE(s.section, '')) = LOWER(COALESCE(ca.section, ''))
+      AND (ca.program_type IS NULL OR LOWER(COALESCE(s.program_type, '')) = LOWER(ca.program_type))
+    )
+    WHERE ${activeAssignmentFilter}
+  `, assignmentParams);
+  const [dispatchCountRows] = await pool.query(`
+    SELECT COUNT(DISTINCT ed.id) AS expected_dispatches
+    FROM course_assignments ca
+    INNER JOIN evaluation_dispatches ed ON ed.assignment_id = ca.id
+    WHERE ${activeAssignmentFilter}
+      AND LOWER(COALESCE(ed.evaluation_type, 'student')) = 'student'
+      AND LOWER(COALESCE(ed.status, 'pending')) <> 'closed'
+  `, assignmentParams);
+  const [studentRows] = await pool.query(`
+    SELECT ca.id AS assignment_id, ed.id AS dispatch_id,
+      COALESCE(ed.student_id, ses.student_id, ca.student_id) AS student_id,
+      ses.score, ses.feedback, ses.strengths, ses.improvements
+    FROM course_assignments ca
+    INNER JOIN evaluation_dispatches ed ON ed.assignment_id = ca.id
+      AND LOWER(COALESCE(ed.evaluation_type, 'student')) = 'student'
+    INNER JOIN student_evaluation_submissions ses ON ses.dispatch_id = ed.id
+      AND LOWER(COALESCE(ses.status, 'pending')) IN ('submitted', 'completed', 'approved', 'published')
+    WHERE ${activeAssignmentFilter}
+    ORDER BY ses.created_at DESC
+  `, assignmentParams);
+  const [deptHeadRows] = await pool.query(`
+    SELECT dhe.total_score AS score, dhe.feedback, dhe.strengths, dhe.weaknesses
+    FROM dept_head_evaluations dhe
+    WHERE (dhe.instructor_id = ? OR dhe.evaluatee_id = ?)
+      AND LOWER(COALESCE(dhe.status, 'pending')) IN ('submitted', 'completed', 'approved', 'published')
+      AND LOWER(COALESCE(dhe.target_role, 'instructor')) IN ('instructor', 'dept_head', 'department_head', 'depthead')
+    ORDER BY dhe.updated_at DESC
+  `, [instructor.id, instructor.id]);
+  const [peerRows] = await pool.query(`
+    SELECT pes.score, pes.strengths, pes.suggestions
+    FROM peer_evaluation_submissions pes
+    INNER JOIN peer_evaluations pe ON pe.id = pes.peer_evaluation_id
+    WHERE (pe.evaluatee_id = ? OR pes.evaluatee_id = ?)
+      AND LOWER(COALESCE(pes.status, 'pending')) IN ('submitted', 'completed', 'approved', 'published')
+    ORDER BY pes.created_at DESC
+  `, [instructor.id, instructor.id]);
+
+  const average = (rows) => rows.length
+    ? rows.reduce((sum, row) => sum + number(row.score), 0) / rows.length
+    : 0;
+  const studentScore = Number(average(studentRows).toFixed(2));
+  const deptHeadScoreValue = average(deptHeadRows);
+  const deptHeadScore = Number((deptHeadScoreValue > 0 && deptHeadScoreValue <= 30
+    ? deptHeadScoreValue / 30 * 100
+    : deptHeadScoreValue).toFixed(2));
+  const peerScore = Number(average(peerRows).toFixed(2));
+  const overallWeightedScore = Number((studentScore * 0.5 + deptHeadScore * 0.3 + peerScore * 0.2).toFixed(2));
+  const completedPairs = new Set(studentRows.map((row) => `${row.assignment_id}:${row.student_id || row.dispatch_id}`));
+  const completedCount = completedPairs.size;
+  const rosterExpected = number(expectedRows[0]?.expected_students);
+  const totalRequired = rosterExpected || number(dispatchCountRows[0]?.expected_dispatches);
+  const completionRate = percentage(completedCount, totalRequired);
+
+  const studentFeedbackRows = studentRows.filter((row) => [row.feedback, row.strengths, row.improvements].some(Boolean));
+  const positiveRows = studentFeedbackRows.filter((row) => POSITIVE_FEEDBACK_TERMS.test([row.feedback, row.strengths, row.improvements].join(' ')));
+  const constructiveRows = studentFeedbackRows.filter((row) => NEGATIVE_FEEDBACK_TERMS.test([row.feedback, row.strengths, row.improvements].join(' ')));
+  const positiveKeywords = extractFeedbackPhrases(positiveRows);
+  const constructiveKeywords = extractFeedbackPhrases(constructiveRows);
+  const topKeywords = [...new Set([...positiveKeywords, ...constructiveKeywords, ...extractFeedbackPhrases(studentFeedbackRows)])].slice(0, 3);
+  const allFeedbackRows = [
+    ...studentRows,
+    ...deptHeadRows.map((row) => ({ ...row, improvements: row.weaknesses })),
+    ...peerRows.map((row) => ({ ...row, feedback: row.suggestions })),
+  ];
+  const signals = getFeedbackSignals(allFeedbackRows);
+  const feedbackComments = allFeedbackRows.flatMap((row) => [row.feedback, row.strengths, row.improvements, row.suggestions])
+    .map((comment) => String(comment || '').trim())
+    .filter(Boolean);
+  const feedbackSummary = await summarizeInstructorFeedback({ studentRows, peerRows, deptHeadRows });
+  const aiObservations = [
+    `Average student evaluation score is ${studentScore.toFixed(2)}%.`,
+    `Overall weighted evaluation score is ${overallWeightedScore.toFixed(2)}%.`,
+    `Student evaluation completion is at ${completionRate.toFixed(1)}% (${completedCount} of ${totalRequired} required).`,
+    ...(feedbackSummary.summary ? [`Qualitative feedback summary: ${feedbackSummary.summary}`] : []),
+    topKeywords.length
+      ? `Top feedback keywords highlight ${topKeywords.join(', ')}.`
+      : 'No recurring written student feedback keywords were found yet.',
+  ];
+  const recommendedActions = [
+    {
+      title: 'Review Student Feedback',
+      description: 'Explore written comments and recurring feedback themes.',
+      actionLabel: 'View Feedback',
+      actionType: 'VIEW_FEEDBACK',
+      link: '#qualitative-feedback',
+    },
+    {
+      title: 'Set a Teaching Goal',
+      description: 'Choose one measurable improvement to revisit in the next evaluation cycle.',
+      actionLabel: 'Set a Goal',
+      actionType: 'SET_GOAL',
+      link: '/instructor/goals',
+    },
+  ];
+  if (completionRate < 100) {
+    recommendedActions.push({
+      title: 'Remind Remaining Students',
+      description: 'Remind remaining students to complete evaluation before deadline.',
+      actionLabel: 'View Pending Evaluations',
+      actionType: 'VIEW_PENDING_EVALUATIONS',
+      link: '#pending-evaluations',
+    });
+  }
+  if (studentScore < 75) {
+    recommendedActions.push({
+      title: 'Improve Course Delivery',
+      description: 'Focus on course delivery engagement and clarify continuous assessment guidelines.',
+      actionLabel: 'Set a Teaching Goal',
+      actionType: 'SET_GOAL',
+      link: '/instructor/goals',
+    });
+  }
+  if (peerScore > 90) {
+    recommendedActions.push({
+      title: 'Share Peer Practices',
+      description: 'Maintain peer collaboration and share best pedagogical practices with department colleagues.',
+      actionLabel: 'Review Peer Feedback',
+      actionType: 'VIEW_FEEDBACK',
+      link: '#qualitative-feedback',
+    });
+  }
+
+  return {
+    averageScore: studentScore,
+    studentScore,
+    deptHeadScore,
+    peerScore,
+    overallWeightedScore,
+    completionRate,
+    completedCount,
+    totalSubmitted: completedCount,
     totalRequired,
-    totalSubmitted,
-    pendingCount: Math.max(totalRequired - totalSubmitted, 0),
-  });
+    topKeywords,
+    topFeedbackKeywords: topKeywords,
+    positiveKeywords,
+    constructiveKeywords,
+    feedbackCount: feedbackComments.length,
+    feedbackComments,
+    qualitativeFeedback: feedbackComments.join('\n'),
+    qualitativeSummary: feedbackSummary.summary,
+    qualitativeSummarySource: feedbackSummary.source,
+    sentiment: signals.sentiment,
+    aiObservations,
+    summary: aiObservations,
+    recommendedActions,
+    recommendations: recommendedActions,
+  };
+};
+
+const getInstructorAiInsights = async (req, res) => {
+  const userId = number(req.user?.id || req.user?.user_id);
+  if (!userId) return res.status(401).json({ success: false, message: 'Authentication is required.' });
+  try {
+    return res.json(await getInstructorInsights({ userId }));
+  } catch (error) {
+    console.error('Instructor AI insights error:', error);
+    return res.status(500).json({ success: false, message: 'Unable to generate instructor AI insights.' });
+  }
 };
 
 const getDeptHeadInsights = async ({ departmentId }) => {
@@ -761,4 +924,4 @@ const getRoleBasedInsights = async (req, res) => {
 
 const getAiInsightsSummary = (req, res) => getRoleBasedInsights(req, res);
 
-module.exports = { getRoleBasedInsights, getAiInsightsSummary, getDeptHeadAiInsights, getInstitutionalEvaluationMetrics };
+module.exports = { getRoleBasedInsights, getAiInsightsSummary, getInstructorAiInsights, getDeptHeadAiInsights, getInstitutionalEvaluationMetrics };

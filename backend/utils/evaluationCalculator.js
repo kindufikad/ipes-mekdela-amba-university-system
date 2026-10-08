@@ -13,16 +13,45 @@ const getInstructorRoleStatus = async (instructorId, academicYear, semester, dat
 
   const resolvedAcademicYear = String(academicYear || '').trim();
   const resolvedSemester = String(semester || '').trim();
-  const filters = ['instructor_id = ?'];
-  const params = [resolvedInstructorId];
+  const [[identity]] = await database.query(
+    `SELECT i.id AS instructor_id, i.user_id, u.email
+     FROM instructors i
+     LEFT JOIN users u ON u.id = i.user_id
+     WHERE i.id = ? LIMIT 1`,
+    [resolvedInstructorId]
+  );
+  const instructorUserId = Number(identity?.user_id || 0);
+  const userEmail = String(identity?.email || '').trim();
+  const [emailColumns] = await database.query(
+    `SELECT COLUMN_NAME
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'course_assignments'
+       AND COLUMN_NAME = 'instructor_email'
+     LIMIT 1`
+  );
+  const identityFilters = [
+    'instructor_id IN (?, ?)',
+    "(lab_assistant_id IS NULL AND LOWER(COALESCE(assigned_role, 'instructor')) <> 'lab_assistant' AND staff_id IN (?, ?))",
+  ];
+  const identityParams = [resolvedInstructorId, instructorUserId || resolvedInstructorId, resolvedInstructorId, instructorUserId || resolvedInstructorId];
+  if (emailColumns.length && userEmail) {
+    identityFilters.push('LOWER(TRIM(instructor_email)) = LOWER(TRIM(?))');
+    identityParams.push(userEmail);
+  }
+  const filters = [
+    `(${identityFilters.join(' OR ')})`,
+    "LOWER(COALESCE(status, 'assigned')) NOT IN ('cancelled', 'inactive', 'unassigned')",
+  ];
+  const params = [...identityParams];
 
   if (resolvedAcademicYear) {
-    const academicYearStart = resolvedAcademicYear.split('/')[0];
-    filters.push('(academic_year IS NULL OR academic_year = ? OR academic_year = ?)');
+    const academicYearStart = resolvedAcademicYear.match(/(?:19|20)\d{2}/)?.[0] || resolvedAcademicYear.split('/')[0];
+    filters.push('(academic_year IS NULL OR LOWER(TRIM(academic_year)) = LOWER(?) OR LOWER(TRIM(academic_year)) = LOWER(?))');
     params.push(resolvedAcademicYear, academicYearStart);
   }
   if (resolvedSemester) {
-    filters.push('(semester IS NULL OR LOWER(TRIM(semester)) = LOWER(TRIM(?)))');
+    filters.push("(semester IS NULL OR LOWER(REPLACE(TRIM(semester), 'semester', '')) = LOWER(REPLACE(TRIM(?), 'semester', ''))) ");
     params.push(resolvedSemester);
   }
 
@@ -35,6 +64,10 @@ const getInstructorRoleStatus = async (instructorId, academicYear, semester, dat
   const assignedCourseCount = Number(assignmentStatus?.assigned_course_count || 0);
 
   return {
+    instructorId: resolvedInstructorId,
+    userId: instructorUserId || null,
+    email: userEmail || null,
+    hasInstructorEmailColumn: emailColumns.length > 0,
     isTeaching: assignedCourseCount > 0,
     assignedCourseCount,
   };
@@ -89,19 +122,49 @@ const calculateAndSaveInstructorResult = async (instructorId, academicYear, seme
     resolvedSemester,
     database
   );
+  const assignmentPredicates = [
+    'ca.instructor_id IN (?, ?)',
+    "(ca.lab_assistant_id IS NULL AND LOWER(COALESCE(ca.assigned_role, 'instructor')) <> 'lab_assistant' AND ca.staff_id IN (?, ?))",
+  ];
+  const assignmentParams = [resolvedInstructorId, roleStatus.userId || resolvedInstructorId, resolvedInstructorId, roleStatus.userId || resolvedInstructorId];
+  if (roleStatus.hasInstructorEmailColumn && roleStatus.email) {
+    assignmentPredicates.push('LOWER(TRIM(ca.instructor_email)) = LOWER(TRIM(?))');
+    assignmentParams.push(roleStatus.email);
+  }
+  const assignmentFilter = `(${assignmentPredicates.join(' OR ')})`;
+  const studentAssignmentExists = `EXISTS (
+    SELECT 1
+    FROM course_assignments ca
+    LEFT JOIN courses c ON c.id = ca.course_id
+    WHERE ${assignmentFilter}
+      AND (
+        ca.id = ed.assignment_id
+        OR (
+          ed.assignment_id IS NULL
+          AND (
+            (ed.course_id IS NOT NULL AND ca.course_id = ed.course_id)
+            OR (ed.course_code IS NOT NULL AND LOWER(TRIM(c.code)) = LOWER(TRIM(ed.course_code)))
+          )
+        )
+      )
+      AND (? = '' OR COALESCE(NULLIF(TRIM(ed.academic_year), ''), NULLIF(TRIM(ca.academic_year), '')) IS NULL
+        OR LOWER(COALESCE(NULLIF(TRIM(ed.academic_year), ''), NULLIF(TRIM(ca.academic_year), ''))) = LOWER(?)
+        OR LOWER(COALESCE(NULLIF(TRIM(ed.academic_year), ''), NULLIF(TRIM(ca.academic_year), ''))) = LOWER(SUBSTRING_INDEX(?, '/', 1)))
+      AND (? = '' OR COALESCE(NULLIF(TRIM(ed.semester), ''), NULLIF(TRIM(ca.semester), '')) IS NULL
+        OR LOWER(REPLACE(COALESCE(NULLIF(TRIM(ed.semester), ''), NULLIF(TRIM(ca.semester), '')), 'semester', ''))
+          = LOWER(REPLACE(?, 'semester', '')))
+  )`;
 
   const [[studentRow]] = await database.query(
         `SELECT COALESCE(AVG(ses.score), 0) AS student_average,
           COUNT(DISTINCT ses.id) AS total_students_evaluated_count
      FROM student_evaluation_submissions ses
      INNER JOIN evaluation_dispatches ed ON ed.id = ses.dispatch_id
-     INNER JOIN course_assignments ca ON ca.id = ed.assignment_id
-     WHERE ca.instructor_id = ?
+    WHERE ${studentAssignmentExists}
        AND LOWER(COALESCE(ed.target_type, 'instructor')) = 'instructor'
-       AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved')
-       AND (? = '' OR ed.academic_year = ?)
-       AND (? = '' OR ed.semester = ?)`,
-    [resolvedInstructorId, resolvedAcademicYear, resolvedAcademicYear, resolvedSemester, resolvedSemester]
+       AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved', 'published')
+        `,
+    [...assignmentParams, resolvedAcademicYear, resolvedAcademicYear, resolvedAcademicYear, resolvedSemester, resolvedSemester]
   );
 
   const [[deptHeadRow]] = await database.query(
@@ -141,7 +204,7 @@ const calculateAndSaveInstructorResult = async (instructorId, academicYear, seme
     studentRawScore: studentAverage,
     peerRawScore: peerAverage,
     directorateRawScore: deptHeadPercentage,
-    isTeaching: roleStatus.isTeaching,
+    isTeaching: roleStatus.isTeaching || totalStudentsEvaluatedCount > 0,
   });
   const totalScore = score.finalScore;
 

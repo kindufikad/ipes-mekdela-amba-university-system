@@ -1,5 +1,6 @@
 import React from 'react';
-import { criteriaApi } from '../services/api';
+import { Clock3 } from 'lucide-react';
+import { criteriaApi, evaluationApi } from '../services/api';
 import LanguageToggle from './LanguageToggle';
 import { getQuestionText, groupCriteriaByCategory } from '../utils/evaluationCriteria';
 
@@ -23,6 +24,9 @@ export default function InstructorEvaluationCriteriaModal({
   const [criteria, setCriteria] = React.useState([]);
   const [language, setLanguage] = React.useState('en');
   const [loadingCriteria, setLoadingCriteria] = React.useState(false);
+  const [activeDeadline, setActiveDeadline] = React.useState('');
+  const [deadlineLoadError, setDeadlineLoadError] = React.useState('');
+  const [currentTime, setCurrentTime] = React.useState(Date.now());
 
   React.useEffect(() => {
     if (!open) return;
@@ -48,9 +52,47 @@ export default function InstructorEvaluationCriteriaModal({
       });
   }, [evaluatorType, targetRole, open]);
 
+  React.useEffect(() => {
+    if (!open) return undefined;
+
+    let cancelled = false;
+    setActiveDeadline('');
+    setDeadlineLoadError('');
+    setCurrentTime(Date.now());
+    evaluationApi.getActiveEvaluationDeadline()
+      .then((result) => {
+        if (!cancelled) setActiveDeadline(result?.deadlineAt || '');
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error('Failed to load the active evaluation deadline:', err);
+        setDeadlineLoadError('Unable to load the evaluation deadline.');
+      });
+
+    const timer = window.setInterval(() => setCurrentTime(Date.now()), 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [open]);
+
   if (!open) return null;
 
+  const parsedDeadline = activeDeadline ? new Date(activeDeadline) : null;
+  const hasValidDeadline = parsedDeadline && !Number.isNaN(parsedDeadline.getTime());
+  const deadlineExpired = Boolean(hasValidDeadline && parsedDeadline.getTime() <= currentTime);
+  const formattedDeadline = hasValidDeadline
+    ? parsedDeadline.toLocaleString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      })
+    : 'Not specified';
+
   const handleScoreChange = (criteriaId, score) => {
+    if (deadlineExpired) return;
     setCriteriaScores(prev => ({
       ...prev,
       [criteriaId]: score
@@ -75,6 +117,10 @@ export default function InstructorEvaluationCriteriaModal({
   };
 
   const handleSubmit = () => {
+    if (deadlineExpired) {
+      setError('The evaluation period for this cycle has ended.');
+      return;
+    }
     if (!allCriteriaScored()) {
       setError('Please score every criterion before submitting.');
       return;
@@ -112,6 +158,18 @@ export default function InstructorEvaluationCriteriaModal({
           </button>
           <LanguageToggle language={language} onChange={setLanguage} />
         </div>
+
+        <div className={`mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border p-4 ${deadlineExpired ? 'border-red-200 bg-red-50 text-red-800' : 'border-amber-200 bg-amber-50 text-amber-900'}`}>
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <Clock3 className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>Deadline: {formattedDeadline}</span>
+          </div>
+          <span className={`rounded-full px-3 py-1 text-xs font-bold ${deadlineExpired ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-900'}`}>
+            {deadlineExpired ? 'Expired' : 'Active'}
+          </span>
+        </div>
+        {deadlineLoadError ? <p role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">{deadlineLoadError}</p> : null}
+        {deadlineExpired ? <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-800">The evaluation period for this cycle has ended.</div> : null}
 
         {/* Instructions */}
         <div className="mb-6 p-4 rounded-xl bg-blue-50 border border-blue-200">
@@ -168,12 +226,12 @@ export default function InstructorEvaluationCriteriaModal({
                               key={rating}
                               type="button"
                               onClick={() => isEditMode && handleScoreChange(criterion.id, rating)}
-                              disabled={!isEditMode}
+                              disabled={!isEditMode || deadlineExpired}
                               className={`w-9 h-9 rounded-full text-sm font-semibold transition-all duration-150 flex items-center justify-center ${
                                 currentScore === rating
                                   ? "bg-blue-600 text-white shadow-md shadow-blue-200 scale-105 ring-2 ring-blue-300"
                                   : "bg-white text-gray-600 border border-gray-200 hover:border-blue-400 hover:text-blue-600"
-                              } ${!isEditMode ? "cursor-default" : "cursor-pointer"}`}
+                              } ${!isEditMode || deadlineExpired ? "cursor-default disabled:opacity-60" : "cursor-pointer"}`}
                             >
                               {rating}
                             </button>
@@ -234,7 +292,7 @@ export default function InstructorEvaluationCriteriaModal({
             <button
               type="button"
               onClick={handleSubmit}
-              disabled={isSubmitting || !allCriteriaScored() || criteria.length === 0}
+              disabled={isSubmitting || deadlineExpired || !allCriteriaScored() || criteria.length === 0}
               className="px-6 py-2 rounded-lg bg-ieps-blue-600 text-white font-semibold hover:bg-ieps-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isSubmitting ? 'Submitting...' : 'Submit Evaluation'}

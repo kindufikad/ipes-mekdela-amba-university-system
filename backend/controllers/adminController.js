@@ -385,12 +385,17 @@ const getAdminDashboardStats = async (req, res) => {
       ? "SELECT COUNT(*) AS securityPulse FROM security_logs WHERE status IN ('flagged', 'pending', 'open')"
       : "SELECT COUNT(*) AS securityPulse FROM users WHERE LOWER(COALESCE(status, 'active')) <> 'active'";
     const [[userRows], [collegeRows], [departmentRows], [upcomingRows], [broadcastRows], [securityRows], [headRows]] = await Promise.all([
-      pool.query(`SELECT COUNT(*) AS totalUsers,
-        SUM(CASE WHEN LOWER(role) = 'instructor' THEN 1 ELSE 0 END) AS instructors,
-        SUM(CASE WHEN LOWER(role) IN ('dept_head', 'department_head', 'head') THEN 1 ELSE 0 END) AS departmentHeads,
-        SUM(CASE WHEN LOWER(role) IN ('college_dean', 'dean') THEN 1 ELSE 0 END) AS deans,
-        SUM(CASE WHEN LOWER(role) = 'student' THEN 1 ELSE 0 END) AS students
-        FROM users`),
+      pool.query(`SELECT COUNT(DISTINCT u.id) AS totalUsers,
+        COUNT(DISTINCT CASE WHEN LOWER(u.role) = 'instructor' THEN u.id END) AS instructors,
+        COUNT(DISTINCT CASE WHEN LOWER(u.role) IN ('dept_head', 'department_head', 'head') THEN u.id END) AS departmentHeads,
+        COUNT(DISTINCT CASE WHEN LOWER(u.role) IN ('college_dean', 'dean') THEN u.id END) AS deans,
+        COUNT(DISTINCT CASE WHEN LOWER(u.role) = 'student' THEN u.id END) AS students,
+        COUNT(DISTINCT CASE WHEN LOWER(u.role) IN ('admin', 'systemadmin', 'system_admin') AND u.active_system_admin_slot = 1 THEN u.id END) AS systemAdministrators,
+        COUNT(DISTINCT CASE WHEN LOWER(u.role) IN ('academic_directorate', 'academic_director', 'directorate') THEN u.id END) AS academicDirectorate,
+        COUNT(DISTINCT CASE WHEN LOWER(u.role) = 'academic_vice_president' THEN u.id END) AS academicVicePresidents,
+        COUNT(DISTINCT CASE WHEN LOWER(u.role) = 'lab_assistant' THEN u.id END) AS labAssistants
+        FROM users u
+        WHERE LOWER(COALESCE(u.status, 'active')) = 'active'`),
       pool.query('SELECT COUNT(*) AS totalColleges FROM colleges'),
       pool.query('SELECT COUNT(*) AS activeDepartments FROM departments'),
       pool.query(upcomingEventsQuery),
@@ -414,6 +419,19 @@ const getAdminDashboardStats = async (req, res) => {
       });
     });
 
+    const userStats = userRows[0] || {};
+    const roleCounts = {
+      instructors: Number(userStats.instructors || 0),
+      departmentHeads: Number(userStats.departmentHeads || 0),
+      deans: Number(userStats.deans || 0),
+      students: Number(userStats.students || 0),
+      systemAdministrators: Number(userStats.systemAdministrators || 0),
+      academicDirectorate: Number(userStats.academicDirectorate || 0),
+      academicVicePresidents: Number(userStats.academicVicePresidents || 0),
+      labAssistants: Number(userStats.labAssistants || 0),
+    };
+    const totalUsers = Object.values(roleCounts).reduce((sum, count) => sum + count, 0);
+
     return res.json({
       success: true,
       message: { en: 'Admin dashboard statistics retrieved successfully.', am: 'የአስተዳዳሪ ዳሽቦርድ ስታቲስቲክስ በተሳካ ሁኔታ ተገኝቷል።' },
@@ -422,13 +440,8 @@ const getAdminDashboardStats = async (req, res) => {
         totalBroadcasts: Number(broadcastRows[0][0]?.totalBroadcasts || 0),
         securityPulse: Number(securityRows[0][0]?.securityPulse || 0),
         registeredHeads: Number(headRows[0][0]?.registeredHeads || 0),
-        totalUsers: Number(userRows[0]?.totalUsers || 0),
-        usersByRole: {
-          instructors: Number(userRows[0]?.instructors || 0),
-          departmentHeads: Number(userRows[0]?.departmentHeads || 0),
-          deans: Number(userRows[0]?.deans || 0),
-          students: Number(userRows[0]?.students || 0),
-        },
+        totalUsers,
+        usersByRole: roleCounts,
         totalColleges: Number(collegeRows[0]?.totalColleges || 0),
         activeDepartments: Number(departmentRows[0]?.activeDepartments || 0),
         evaluationCompletionRate: Number(evaluationMetrics.completionRate || 0),

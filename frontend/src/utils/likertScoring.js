@@ -1,6 +1,6 @@
 export const LIKERT_OPTIONS = [1, 2, 3, 4, 5, 'NA'];
 
-export const isNotApplicable = (value) => typeof value === 'string' && value.trim().toUpperCase() === 'NA';
+export const isNotApplicable = (value) => typeof value === 'string' && value.trim().toUpperCase().replace('/', '') === 'NA';
 
 export const getRatedLikertValues = (responses = {}) => Object.values(responses)
   .filter((value) => !isNotApplicable(value))

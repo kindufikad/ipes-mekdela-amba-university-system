@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { FaEnvelope, FaPhone, FaClock, FaPaperPlane, FaSpinner } from 'react-icons/fa';
+import { FaEnvelope, FaPhone, FaClock, FaPaperPlane, FaSpinner, FaMapMarkerAlt } from 'react-icons/fa';
 import toast from 'react-hot-toast';
 import { contactApi, publicApi } from '../services/api';
 import { useTranslation } from '../context/useTranslation';
@@ -14,6 +14,7 @@ const Contact = () => {
   const officeHours = officeHoursMatch
     ? `${t('contact.office_hours_value')}${officeHoursMatch[1]}`
     : contactInfo.officeHours || t('contact.office_hours_value');
+  const locationHref = 'https://www.google.com/maps/search/?api=1&query=Mekdela+Amba+University';
 
   useEffect(() => {
     let cancelled = false;
@@ -109,6 +110,18 @@ const Contact = () => {
               </div>
             </a>
 
+            <a href={locationHref} target="_blank" rel="noopener noreferrer" className="card block cursor-pointer transition hover:border-blue-500 hover:shadow-xl">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 rounded-full bg-red-100 text-red-600 flex items-center justify-center">
+                  <FaMapMarkerAlt />
+                </div>
+                <div>
+                  <p className="text-sm text-gray-500">{t('contact.location_label')}</p>
+                  <p className="font-medium text-gray-700">{t('contact.location_value')}</p>
+                </div>
+              </div>
+            </a>
+
             <div className="card">
               <div className="flex items-center gap-4">
                 <div className="w-12 h-12 rounded-full bg-yellow-100 text-yellow-600 flex items-center justify-center">
@@ -120,6 +133,7 @@ const Contact = () => {
                 </div>
               </div>
             </div>
+
           </div>
 
           <div className="col-span-1 md:col-span-2">

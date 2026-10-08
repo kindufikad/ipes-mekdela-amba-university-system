@@ -1,11 +1,29 @@
 import mauLogo from '../assets/mau.jpg';
 import { formatCollegeName } from '../utils/formatCollegeName';
+import useOfficialDocumentImages from '../hooks/useOfficialDocumentImages';
+import { calculateDeanPerformanceScore } from '../utils/deanPerformanceScore';
 
 const labels = {
   student: 'Evaluation by Students',
   peer: 'Evaluation by Peer Instructors',
   deptHead: 'Evaluation by Department Head',
   directorate: 'Evaluation by Academic Directorate',
+};
+
+const getAmharicCollegeName = (name) => {
+  const value = String(name || '').trim();
+  if (/computing|informatics/i.test(value) || !/[\u1200-\u137F]/.test(value) || /[A-Za-z]/.test(value)) {
+    return 'የኮምፒዩቲንግ እና ኢንፎርማቲክስ ኮሌጅ';
+  }
+  return value;
+};
+
+const getAmharicDeptName = (name) => {
+  const value = String(name || '').trim();
+  if (/computer\s+science/i.test(value) || !/[\u1200-\u137F]/.test(value) || /[A-Za-z]/.test(value)) {
+    return 'የኮምፒዩተር ሳይንስ ዲፓርትመንት';
+  }
+  return value;
 };
 
 const normalizeDepartmentHeadScore = (score) => {
@@ -54,6 +72,7 @@ const getComponentRawScore = (rawValues, weightedValues, weight) => {
 };
 
 const OfficialDepartmentReport = ({ departmentName, academicYear, semester, reportRow, reportDate, departmentHeadName, evaluatorLabel = labels.deptHead, reportType = 'department' }) => {
+  const certificateImages = useOfficialDocumentImages();
   const row = reportRow || {};
   const rawDepartmentName = departmentName || row.department_name || '';
   const normalizedDepartmentName = String(rawDepartmentName).replace(/^Department of\s+/i, '').trim() || '________________';
@@ -83,7 +102,9 @@ const OfficialDepartmentReport = ({ departmentName, academicYear, semester, repo
       && Number(rawCourseAssigned) !== 0;
   const weights = hasCourseAssigned
     ? { student: 50, deptHead: 30, peer: 20 }
-    : { student: 0, deptHead: 60, peer: 40 };
+    : reportType === 'executive'
+      ? { student: 0, deptHead: 30, peer: 20 }
+      : { student: 0, deptHead: 60, peer: 40 };
   const rawScores = {
     student: getComponentRawScore(
       [row.studentRaw, row.student_raw_percentage, row.student_raw_score, row.student_score, row.student_average, row.studentScore],
@@ -115,28 +136,33 @@ const OfficialDepartmentReport = ({ departmentName, academicYear, semester, repo
     contribution: Number((value * weight / 100).toFixed(2)),
   });
   const scoreRows = reportType === 'executive'
-    ? hasCourseAssigned
-      ? [
-        weightedRow('student', labels.student, weights.student, rawScores.student),
-        weightedRow('peer', labels.peer, weights.peer, rawScores.peer),
-        weightedRow('directorate', labels.directorate, weights.deptHead, rawScores.directorate),
-      ]
-      : [
-        weightedRow('directorate', labels.directorate, weights.deptHead, rawScores.directorate),
-        weightedRow('peer', labels.peer, weights.peer, rawScores.peer),
-      ]
+    ? [
+      ...(hasCourseAssigned ? [weightedRow('student', labels.student, weights.student, rawScores.student)] : []),
+      weightedRow('directorate', labels.directorate, weights.deptHead, rawScores.directorate),
+      weightedRow('peer', labels.peer, weights.peer, rawScores.peer),
+    ]
     : [
       ...(hasCourseAssigned ? [{ key: 'student', label: labels.student, weight: weights.student, value: Number(rawScores.student.toFixed(2)), contribution: Number((rawScores.student * weights.student / 100).toFixed(2)) }] : []),
       { key: 'deptHead', label: evaluatorLabel, weight: weights.deptHead, value: normalizedDeptHead, contribution: Number((normalizedDeptHead * weights.deptHead / 100).toFixed(2)) },
       { key: 'peer', label: labels.peer, weight: weights.peer, value: Number(rawScores.peer.toFixed(2)), contribution: Number((rawScores.peer * weights.peer / 100).toFixed(2)) },
     ];
   const calculatedTotal = scoreRows.reduce((sum, scoreRow) => sum + scoreRow.contribution, 0);
-  const finalScore = Number(calculatedTotal.toFixed(2));
+  const executiveCalculation = reportType === 'executive'
+    ? calculateDeanPerformanceScore({
+      student: rawScores.student,
+      directorate: rawScores.directorate,
+      peer: rawScores.peer,
+      hasAssignedCourses: hasCourseAssigned,
+    })
+    : null;
+  const finalScore = executiveCalculation?.totalScore ?? Number(calculatedTotal.toFixed(2));
   const yearLabel = formatAcademicYear(row.academic_year ?? academicYear);
   const semesterLabel = formatSemester(row.semester ?? semester);
   const instructorName = row.name || row.full_name || row.instructorName || '________________';
   const department = normalizedDepartmentName;
   const collegeName = formatCollegeName(row.college_name) || 'College name unavailable';
+  const amharicCollegeName = getAmharicCollegeName(row.college_name_am || row.collegeNameAm || collegeName);
+  const amharicDepartmentName = getAmharicDeptName(row.department_name_am || row.dept_name_am || row.departmentNameAm || department);
   const recipientName = row.recipient_name || instructorName;
   const reference = row.reference_number || row.referenceNumber || '________________';
   const totalScore = finalScore;
@@ -152,14 +178,17 @@ const OfficialDepartmentReport = ({ departmentName, academicYear, semester, repo
   return (
   <article className="official-report print-container" aria-label="Official department evaluation report">
     <header className="official-report__header">
-      <div className="official-report__brand-mark"><img src={mauLogo} alt="Mekdela Amba University Logo" /></div>
-      <div>
-        <h1>Mekdela Amba University</h1>
-        <p>{collegeName}</p>
-        <p>Department of {department}</p>
-        <p>{roleLabel}</p>
+      <div className="official-report__english" dir="ltr">
+        <h1>MEKDELA AMBA UNIVERSITY</h1>
+        <p>College of Computing and Informatics</p>
+        <p>Department of Computer Science</p>
       </div>
-      <div className="official-report__amharic">መቅደላ አምባ ዩኒቨርሲቲ<br />የትምህርት ጥራት ማረጋገጫ</div>
+      <div className="official-report__brand-mark"><img src={mauLogo} alt="Mekdela Amba University Logo" /></div>
+      <div className="official-report__amharic" dir="rtl">
+        መቅደላ አምባ ዩኒቨርሲቲ<br />
+        {amharicCollegeName}<br />
+        {amharicDepartmentName}
+      </div>
     </header>
 
     <div className="official-report__rule" />
@@ -180,7 +209,12 @@ const OfficialDepartmentReport = ({ departmentName, academicYear, semester, repo
       <thead><tr><th>S/No</th><th>Evaluation Type</th><th>Weight (%)</th><th>Raw Score (%)</th><th>Weighted Contribution (%)</th></tr></thead>
       <tbody>
         {scoreRows.map((scoreRow, index) => <tr key={scoreRow.key}><td>{index + 1}</td><td><strong>{scoreRow.label}</strong></td><td>{scoreRow.weight}%</td><td>{scoreRow.value.toFixed(2)}%</td><td>{scoreRow.contribution.toFixed(2)}%</td></tr>)}
-        <tr><td colSpan="2" className="official-report__total-label">Total Score</td><td><strong>100%</strong></td><td></td><td><strong>{finalScore.toFixed(2)}%</strong></td></tr>
+        {reportType === 'executive' && !hasCourseAssigned
+          ? <>
+            <tr><td colSpan="2" className="official-report__total-label">Total Evaluation Weight</td><td><strong>{executiveCalculation.activeWeight}%</strong></td><td></td><td><strong>{executiveCalculation.weightedSubtotal.toFixed(2)}%</strong></td></tr>
+            <tr><td colSpan="2" className="official-report__total-label">Final Re-scaled Score (100% Equivalent)</td><td><strong>100%</strong></td><td></td><td><strong>{finalScore.toFixed(2)}%</strong></td></tr>
+          </>
+          : <tr><td colSpan="2" className="official-report__total-label">{reportType === 'executive' ? 'Overall Total Score' : 'Total Score'}</td><td><strong>100%</strong></td><td></td><td><strong>{finalScore.toFixed(2)}%</strong></td></tr>}
       </tbody>
     </table>
 
@@ -189,8 +223,16 @@ const OfficialDepartmentReport = ({ departmentName, academicYear, semester, repo
     <p>With best regard!</p>
 
     <div className="official-report__signature">
-      <div><strong>{departmentHeadName || 'Department Head'}</strong><br />Signature: ____________________________<br />Date: ____________________</div>
-      <div className="official-report__stamp">MEKDELA AMBA UNIVERSITY<br />DEPT OF {department.toUpperCase()}<br />SEAL</div>
+      <div className="official-report__signer">
+        {certificateImages.signature ? <img className="official-report__signature-image" src={certificateImages.signature} alt="Department Head signature" /> : null}
+        <div className="official-report__signature-line" />
+        <strong>{departmentHeadName || 'Department Head'}</strong>
+        <span>Department Head</span>
+        <span>Date: ____________________</span>
+      </div>
+      <div className={`official-report__stamp${certificateImages.stamp ? ' official-report__stamp--image' : ''}`}>
+        {certificateImages.stamp ? <img src={certificateImages.stamp} alt="Official university stamp" /> : <span>OFFICIAL STAMP / SEAL</span>}
+      </div>
     </div>
     <div className="official-report__cc"><strong>CC:</strong><br />❖ Department of {department}<br />❖ {collegeName}<br />❖ Educational quality and relevance assurance<br />❖ Human Resource Development Directorate</div>
     <footer className="official-report__footer"><span>Department of {department}</span><span>{yearLabel} / {semesterLabel}</span></footer>

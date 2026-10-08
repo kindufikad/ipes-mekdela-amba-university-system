@@ -1,4 +1,4 @@
-import { createContext, useMemo, useState } from 'react';
+import { createContext, useCallback, useMemo, useState } from 'react';
 import { translations } from '../translations';
 
 const LANGUAGE_STORAGE_KEY = 'ipes-language-preference';
@@ -13,7 +13,9 @@ export const LanguageContext = createContext({
 export const LanguageProvider = ({ children }) => {
   const getInitialLanguage = () => {
     try {
-      const savedLanguage = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
+      const savedLanguage = typeof window !== 'undefined'
+        ? window.localStorage.getItem(LANGUAGE_STORAGE_KEY)
+        : null;
       if (savedLanguage === 'am' || savedLanguage === 'en') return savedLanguage;
     } catch (error) {
       // Ignore storage errors and fall back to browser preference.
@@ -26,19 +28,7 @@ export const LanguageProvider = ({ children }) => {
 
   const [language, setLanguage] = useState(getInitialLanguage);
 
-  const toggleLanguage = () => {
-    setLanguage((current) => {
-      const nextLanguage = current === 'en' ? 'am' : 'en';
-      try {
-        window.localStorage.setItem(LANGUAGE_STORAGE_KEY, nextLanguage);
-      } catch (error) {
-        console.warn('Unable to save language preference:', error);
-      }
-      return nextLanguage;
-    });
-  };
-
-  const updateLanguage = (nextLanguage) => {
+  const updateLanguage = useCallback((nextLanguage) => {
     const normalized = nextLanguage === 'am' ? 'am' : 'en';
     setLanguage(normalized);
     try {
@@ -46,11 +36,15 @@ export const LanguageProvider = ({ children }) => {
     } catch (error) {
       console.warn('Unable to save language preference:', error);
     }
-  };
+  }, []);
+
+  const toggleLanguage = useCallback(() => {
+    updateLanguage(language === 'en' ? 'am' : 'en');
+  }, [language, updateLanguage]);
 
   const value = useMemo(
     () => ({ language, toggleLanguage, setLanguage: updateLanguage, strings: translations[language] || translations.en }),
-    [language]
+    [language, toggleLanguage, updateLanguage]
   );
 
   return <LanguageContext.Provider value={value}>{children}</LanguageContext.Provider>;

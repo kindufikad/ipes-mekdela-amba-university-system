@@ -1,4 +1,4 @@
-const isNotApplicable = (value) => typeof value === 'string' && value.trim().toUpperCase() === 'NA';
+const isNotApplicable = (value) => typeof value === 'string' && value.trim().toUpperCase().replace('/', '') === 'NA';
 
 const getRatedLikertValues = (responses = {}) => Object.values(responses || {})
   .filter((value) => !isNotApplicable(value))

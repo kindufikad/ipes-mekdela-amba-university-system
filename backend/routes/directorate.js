@@ -231,18 +231,23 @@ router.get('/reports', async (req, res) => {
     const reports = await Promise.all(rows.map(async (row) => {
       const yearPlaceholders = academicYearTokens.map(() => '?').join(', ');
       const semesterPlaceholders = semesterTokens.map(() => '?').join(', ');
-      const normalizedYear = "REPLACE(REPLACE(TRIM(ca.academic_year), '-', '/'), ' ', '')";
-      const normalizedSemester = "LOWER(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(ca.semester), 'semester', ''), 'sem', ''), ' ', ''), '-', ''))";
+      const assignmentYear = "COALESCE(NULLIF(TRIM(ed.academic_year), ''), NULLIF(TRIM(ca.academic_year), ''))";
+      const assignmentSemester = "COALESCE(NULLIF(TRIM(ed.semester), ''), NULLIF(TRIM(ca.semester), ''))";
+      const normalizedYear = `LOWER(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(${assignmentYear}), '-', '/'), ' ', ''), '.', ''), 'ec', ''))`;
+      const normalizedSemester = `LOWER(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(${assignmentSemester}), 'semester', ''), 'sem', ''), ' ', ''), '-', ''))`;
       const academicYearFilter = academicYearTokens.length
         ? `AND (
-            ca.academic_year IS NULL
+            ${assignmentYear} IS NULL
             OR ${normalizedYear} IN (${yearPlaceholders})
             OR SUBSTRING_INDEX(${normalizedYear}, '/', 1) IN (${yearPlaceholders})
             OR SUBSTRING_INDEX(${normalizedYear}, '/', -1) IN (${yearPlaceholders})
           )`
         : '';
+      const semesterFilter = semesterTokens.length
+        ? `AND (${assignmentSemester} IS NULL OR ${normalizedSemester} IN (${semesterPlaceholders}))`
+        : '';
       const [assignmentTerms] = await pool.query(
-        `SELECT ca.academic_year, ca.semester,
+        `SELECT MAX(${assignmentYear}) AS academic_year, MAX(${assignmentSemester}) AS semester,
                 COUNT(DISTINCT ca.id) AS course_count,
                 COUNT(DISTINCT ses.id) AS student_evaluation_count,
                 COALESCE(AVG(ses.score), 0) AS student_score,
@@ -258,7 +263,8 @@ router.get('/reports', async (req, res) => {
            )
          LEFT JOIN student_evaluation_submissions ses
            ON ses.dispatch_id = ed.id
-           AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved')
+           AND LOWER(COALESCE(ed.target_type, 'instructor')) = 'instructor'
+           AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved', 'published')
          WHERE (
              CAST(ca.instructor_id AS CHAR) = CAST(? AS CHAR)
              OR (
@@ -268,13 +274,7 @@ router.get('/reports', async (req, res) => {
            )
            AND LOWER(COALESCE(ca.status, 'assigned')) NOT IN ('unassigned', 'cancelled', 'inactive')
            ${academicYearFilter}
-         GROUP BY ca.academic_year, ca.semester
-         ORDER BY
-           CASE WHEN ${semesterTokens.length
-             ? `${normalizedSemester} IN (${semesterPlaceholders})`
-             : 'FALSE'} THEN 0 ELSE 1 END,
-           student_evaluation_count DESC,
-           latest_assignment_id DESC`,
+           ${semesterFilter}`,
         [
           row.instructor_id,
           row.instructor_id,
@@ -287,8 +287,9 @@ router.get('/reports', async (req, res) => {
       );
       const assignmentTerm = assignmentTerms[0] || {};
       const courseCount = Number(assignmentTerm.course_count || 0);
-      const hasAssignedCourses = courseCount > 0;
-      const studentScore = hasAssignedCourses ? Number(assignmentTerm.student_score || 0) : 0;
+      const submissionCount = Number(assignmentTerm.student_evaluation_count || 0);
+      const hasAssignedCourses = courseCount > 0 || submissionCount > 0;
+      const studentScore = Number(assignmentTerm.student_score || 0);
       const peerScore = Number(row.peer_score || 0);
       const directorateScore = Number(row.directorate_score || 0);
       const calculatedScore = calculateDeanPerformanceScore({
@@ -303,26 +304,34 @@ router.get('/reports', async (req, res) => {
       const studentWeighted = calculatedScore.studentWeighted;
       const directorateWeighted = calculatedScore.directorateWeighted;
       const peerWeighted = calculatedScore.peerWeighted;
-      const isComplete = (!hasAssignedCourses || studentScore > 0) && peerScore > 0 && directorateScore > 0;
+      const isComplete = (!hasAssignedCourses || submissionCount > 0) && peerScore > 0 && directorateScore > 0;
       const finalScore = calculatedScore.totalScore;
 
       return {
         ...row,
         user_role: 'College Dean',
         course_count: courseCount,
+        assignment_count: courseCount,
         has_assigned_courses: hasAssignedCourses,
+        hasAssignedCourses,
         hasCourseAssigned: hasAssignedCourses,
+        hasAssignedCourse: hasAssignedCourses,
+        isStudentEvaluationExcluded: !hasAssignedCourses,
         isTeaching: hasAssignedCourses,
+        role: hasAssignedCourses ? 'Teaching' : 'Non-Teaching',
         role_status: hasAssignedCourses ? 'Role: Teaching (100% Weight)' : 'Role: Non-Teaching (Re-scaled to 100%)',
         academic_year: assignmentTerm.academic_year || academicYear,
         semester: assignmentTerm.semester || semester,
         student_score: studentScore,
         student_average: studentScore,
-        student_evaluation_count: Number(assignmentTerm.student_evaluation_count || 0),
+        raw_student_score: studentScore,
+        submission_count: submissionCount,
+        student_evaluation_count: submissionCount,
         peer_score: peerScore,
         peer_average: peerScore,
         directorate_score: directorateScore,
         student_weighted: studentWeighted,
+        student_weighted_score: studentWeighted,
         directorate_weighted: directorateWeighted,
         peer_weighted: peerWeighted,
         student_weight: studentWeight,

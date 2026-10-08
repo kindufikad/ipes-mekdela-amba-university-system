@@ -82,10 +82,11 @@
   line-height: 1.5;
 }
 
-.official-report__header { display: grid; grid-template-columns: 0.8in 1fr 2.1in; align-items: center; gap: 0.18in; }
-.official-report__brand-mark { display: flex; width: 0.68in; height: 0.68in; align-items: center; justify-content: center; }
+.official-report__header { display: grid; grid-template-columns: minmax(0, 1fr) 0.8in minmax(0, 1fr); align-items: center; gap: 0.18in; }
+.official-report__english { text-align: left; }
+.official-report__brand-mark { display: flex; width: 0.8in; height: 0.8in; align-items: center; justify-content: center; justify-self: center; }
 .official-report__brand-mark img { width: 100%; height: 100%; object-fit: contain; }
-.official-report h1 { margin: 0; font-size: 16pt; text-transform: uppercase; }
+.official-report h1 { margin: 0; font-size: 14pt; text-transform: uppercase; }
 .official-report__title { text-align: center; letter-spacing: 0.02em; }
 .official-evaluation-certificate__title { margin: 0.2in 0 0.14in; text-align: center; }
 .official-evaluation-certificate__title p { margin: 0; font-size: 10pt; font-weight: 700; letter-spacing: 0.08em; }
@@ -108,8 +109,14 @@
 .official-report__table td:nth-child(1), .official-report__table td:nth-child(n+4) { text-align: center; }
 .official-report__total-label { text-align: right !important; font-weight: 700; }
 .official-report__summary { border-top: 1px solid #9ca3af; border-bottom: 1px solid #9ca3af; padding: 0.1in 0; }
-.official-report__signature { display: flex; justify-content: space-between; margin-top: 0.35in; }
-.official-report__stamp { display: flex; width: 1.15in; height: 1.15in; align-items: center; justify-content: center; border: 2px solid #6b7280; border-radius: 50%; color: #6b7280; font-size: 8pt; text-align: center; }
+.official-report__signature { display: flex; align-items: flex-end; justify-content: space-between; gap: 0.3in; margin-top: 0.35in; }
+.official-report__signer { position: relative; display: flex; min-width: 2.8in; flex-direction: column; align-items: flex-start; padding-top: 0.55in; font-size: 9pt; }
+.official-report__signature-image { position: absolute; top: 0; left: 0.08in; width: 1.8in; height: 0.55in; object-fit: contain; object-position: bottom left; }
+.official-report__signature-line { width: 2.6in; border-top: 1px solid #111827; margin-bottom: 0.04in; }
+.official-report__signer > span { font-size: 8pt; }
+.official-report__stamp { position: relative; display: flex; width: 1.25in; height: 1.25in; flex: 0 0 auto; align-items: center; justify-content: center; border: 2px dotted #94a3b8; border-radius: 50%; color: #64748b; font-size: 8pt; font-weight: 600; text-align: center; }
+.official-report__stamp--image { border: 0; }
+.official-report__stamp img { width: 100%; height: 100%; object-fit: contain; }
 .official-report__cc { margin-top: 0.35in; font-size: 9.5pt; }
 .official-report__footer { display: flex; justify-content: space-between; margin-top: 0.6in; padding-top: 0.08in; border-top: 2px solid #111827; font-size: 9pt; }
 
@@ -132,13 +139,15 @@
   line-height: 1.25;
 }
 
-.vice-president-report__header { display: grid; grid-template-columns: 0.65in minmax(0, 1fr); align-items: center; gap: 0.12in; }
-.vice-president-report__crest { width: 0.58in; height: 0.58in; object-fit: contain; }
-.vice-president-report__university { text-align: center; }
-.vice-president-report__university h1 { margin: 0; font-size: 13pt; text-transform: uppercase; }
+.vice-president-report__header { display: grid; grid-template-columns: minmax(0, 1fr) 0.67in minmax(0, 1fr); align-items: center; gap: 0.12in; }
+.vice-president-report__crest { grid-column: 2; grid-row: 1; width: 0.67in; height: 0.67in; justify-self: center; object-fit: contain; }
+.vice-president-report__university { min-width: 0; }
+.vice-president-report__university--english { grid-column: 1; grid-row: 1; text-align: left; }
+.vice-president-report__university--amharic { grid-column: 3; grid-row: 1; text-align: right; }
+.vice-president-report__university h1 { margin: 0; font-size: 11pt; text-transform: uppercase; }
 .vice-president-report__university p { margin: 0.02in 0; font-size: 9pt; }
 .vice-president-report__reference { display: flex; justify-content: space-between; gap: 0.15in; margin-top: 0.08in; font-size: 8.5pt; }
-.vice-president-report__rule { margin: 0.1in 0; border-top: 2px solid #111827; border-bottom: 1px solid #111827; height: 3px; }
+.vice-president-report__rule { margin: 0.1in 0 0; border-top: 1px solid #475569; border-bottom: 2px solid #111827; height: 4px; }
 .vice-president-report__subject { margin: 0.12in 0 !important; font-size: 10pt !important; text-decoration: none !important; }
 .vice-president-report__recipient { margin: 0.08in 0; }
 .vice-president-report__candidate { display: grid; grid-template-columns: 1fr 1fr; gap: 0.02in 0.2in; padding: 0.08in 0.1in; border: 1px solid #9ca3af; }
@@ -149,15 +158,19 @@
 .vice-president-report__table th { background: #f3f4f6; }
 .vice-president-report__table th:nth-child(n+2), .vice-president-report__table td:nth-child(n+2) { text-align: center; }
 .vice-president-report__subtotal td { font-weight: 700; background: #f3f4f6; }
+.vice-president-report__final-total td { font-weight: 700; background: #eaf2ff; border-top: 2px solid #1e3a8a; }
 .vice-president-report__final-result { margin: 0.1in 0; padding: 0.08in 0.1in; border-top: 2px solid #111827; border-bottom: 2px solid #111827; font-size: 11pt; }
 .vice-president-report__footer { display: grid; grid-template-columns: 1fr 1fr 1in; align-items: end; gap: 0.2in; margin-top: 0.28in; }
-.vice-president-report__signature { display: flex; flex-direction: column; gap: 0.025in; font-size: 8.5pt; }
-.vice-president-report__line { width: 2.3in; margin-top: 0.28in; border-bottom: 1px solid #111827; }
+.vice-president-report__signature { position: relative; display: flex; flex-direction: column; gap: 0.025in; font-size: 8.5pt; }
+.vice-president-report__signature-image { width: 1.8in; height: 0.48in; object-fit: contain; object-position: bottom left; }
+.vice-president-report__line { width: 2.3in; margin-top: 0.02in; border-bottom: 1px solid #111827; }
 .vice-president-report__seal { display: flex; width: 0.95in; height: 0.95in; align-items: center; justify-content: center; justify-self: end; border: 1.5px dashed #4b5563; border-radius: 50%; color: #4b5563; font-size: 6.5pt; text-align: center; }
+.vice-president-report__seal--image { border: 0; }
+.vice-president-report__seal img { width: 100%; height: 100%; object-fit: contain; }
 .vice-president-report__cc { margin-top: 0.18in; padding-top: 0.06in; border-top: 1px solid #9ca3af; font-size: 8pt; }
 
 @media print {
-  @page { size: A4; margin: 0.35in; }
+  @page { size: A4 portrait; margin: 8mm; }
 
   html,
   body,
@@ -185,10 +198,35 @@
     z-index: 99999 !important;
   }
   body.printing-vice-president-report #printable-academic-report .vice-president-report { display: block !important; visibility: visible !important; }
-  body.printing-vice-president-report .vice-president-report { width: 100%; height: auto; max-width: none; min-height: 0; box-sizing: border-box; margin: 0; padding: 0.05in; font-size: 9pt; line-height: 1.25; overflow: visible; }
+  body.printing-vice-president-report .vice-president-report {
+    width: 100%;
+    height: 281mm;
+    max-width: none;
+    min-height: 0;
+    box-sizing: border-box;
+    margin: 0;
+    padding: 1mm;
+    font-size: 8.5pt;
+    line-height: 1.2;
+    overflow: hidden;
+    background: #fff !important;
+    color: #111827 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  body.printing-vice-president-report .vice-president-report__header { grid-template-columns: minmax(0, 1fr) 16mm minmax(0, 1fr); gap: 2mm; }
+  body.printing-vice-president-report .vice-president-report__crest { width: 16mm; height: 16mm; }
+  body.printing-vice-president-report .vice-president-report__university h1 { font-size: 9pt; }
+  body.printing-vice-president-report .vice-president-report__university p { font-size: 7.5pt; }
+  body.printing-vice-president-report .vice-president-report__rule { border-top: 1px solid #64748b !important; border-bottom: 2px solid #111827 !important; }
   body.printing-vice-president-report .vice-president-report__table { margin: 0.12in 0; font-size: 7.5pt; }
+  body.printing-vice-president-report .vice-president-report__table th,
+  body.printing-vice-president-report .vice-president-report__table td,
+  body.printing-vice-president-report .vice-president-report__final-total td { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
   body.printing-vice-president-report .vice-president-report__reference { font-size: 8pt; }
   body.printing-vice-president-report .vice-president-report__footer { margin-top: 0.18in; }
+  body.printing-vice-president-report .vice-president-report__signature-image,
+  body.printing-vice-president-report .vice-president-report__seal img { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
   body.printing-vice-president-report .vice-president-report__cc { margin-top: 0.12in; font-size: 7.5pt; }
   body.printing-vice-president-report .vice-president-report > * { break-inside: avoid; }
   body.printing-vice-president-report .vice-president-report__table tr,
@@ -306,7 +344,7 @@
 @media print {
   @page {
     size: A4 portrait;
-    margin: 8mm 12mm;
+    margin: 8mm 10mm;
   }
 
   html,
@@ -339,12 +377,16 @@
   body.printing-official-report .print-container {
     width: 100% !important;
     max-width: none !important;
-    height: calc(297mm - 16mm) !important;
-    max-height: 100vh !important;
+    height: 281mm !important;
+    max-height: 281mm !important;
     margin: 0 !important;
-    padding: 5mm 0 !important;
+    padding: 4mm 1mm !important;
     box-sizing: border-box !important;
     overflow: hidden !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
     page-break-inside: avoid !important;
     page-break-after: avoid !important;
     page-break-before: avoid !important;
@@ -352,24 +394,119 @@
   }
 
   body.printing-official-report .print-container .official-report__table {
-    margin: 3mm 0 !important;
+    margin: 2.5mm 0 !important;
     font-size: 7.2pt !important;
   }
 
   body.printing-official-report .print-container .official-report__table th,
   body.printing-official-report .print-container .official-report__table td {
-    padding: 2.5px 3px !important;
+    padding: 2px 3px !important;
+  }
+
+  body.printing-official-report .print-container .official-report__header {
+    grid-template-columns: minmax(0, 1fr) 0.7in minmax(0, 1fr) !important;
+    gap: 0.12in !important;
+  }
+
+  body.printing-official-report .print-container .official-report__brand-mark {
+    width: 0.7in !important;
+    height: 0.7in !important;
+  }
+
+  body.printing-official-report .print-container .official-report__rule,
+  body.printing-official-report .print-container .official-report__table th,
+  body.printing-official-report .print-container .official-report__details,
+  body.printing-official-report .print-container .official-report__stamp {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
   }
 
   body.printing-official-report .print-container .official-report__signature {
-    margin-top: 4mm !important;
+    margin-top: 3mm !important;
+  }
+
+  body.printing-official-report .print-container .official-report__stamp {
+    width: 0.95in !important;
+    height: 0.95in !important;
+  }
+
+  body.printing-official-report .print-container .official-report__signature-image,
+  body.printing-official-report .print-container .official-report__stamp img {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
   }
 
   body.printing-official-report .print-container .official-report__cc {
-    margin-top: 4mm !important;
+    margin-top: 3mm !important;
+    font-size: 7.5pt !important;
   }
 
   body.printing-official-report .print-container .official-report__footer {
-    margin-top: 5mm !important;
+    margin-top: 3mm !important;
+  }
+
+  body.printing-evaluation-letter .evaluation-letter-modal,
+  body.printing-evaluation-letter .evaluation-letter-modal__dialog {
+    display: contents !important;
+  }
+
+  body.printing-evaluation-letter .evaluation-letter-modal__actions {
+    display: none !important;
+  }
+
+  body.printing-evaluation-letter .official-report-shell,
+  body.printing-evaluation-letter .printable-certificate-container {
+    display: block !important;
+  }
+
+  body.printing-evaluation-letter .evaluation-letter-modal__body > .official-report {
+    width: 100% !important;
+    max-width: none !important;
+    height: 281mm !important;
+    max-height: 281mm !important;
+    overflow: hidden !important;
+    padding: 4mm 1mm !important;
+    font-size: 9pt !important;
+    line-height: 1.25 !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    break-inside: avoid !important;
+  }
+
+  body.printing-evaluation-letter .official-report__header {
+    grid-template-columns: minmax(0, 1fr) 0.7in minmax(0, 1fr) !important;
+    gap: 0.12in !important;
+  }
+
+  body.printing-evaluation-letter .official-report__brand-mark {
+    width: 0.7in !important;
+    height: 0.7in !important;
+  }
+
+  body.printing-evaluation-letter .official-report__table {
+    margin: 2.5mm 0 !important;
+    font-size: 7.2pt !important;
+  }
+
+  body.printing-evaluation-letter .official-report__table th,
+  body.printing-evaluation-letter .official-report__table td {
+    padding: 2px 3px !important;
+  }
+
+  body.printing-evaluation-letter .official-report__signature {
+    margin-top: 3mm !important;
+  }
+
+  body.printing-evaluation-letter .official-report__signature-image,
+  body.printing-evaluation-letter .official-report__stamp img {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  body.printing-evaluation-letter .official-report__cc,
+  body.printing-evaluation-letter .official-report__footer {
+    margin-top: 3mm !important;
   }
 }

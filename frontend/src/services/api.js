@@ -112,6 +112,7 @@ export const aiApi = {
   getInsight: (action, input = {}) => request('/ai/insights', { method: 'POST', data: { action, input } }),
   getRoleInsights: (role, params = {}) => request('/ai/insights', { method: 'GET', params: { role, ...params } }),
   getSummary: (role, params = {}) => request('/ai-insights/summary', { method: 'GET', params: { role, ...params } }),
+  getInstructorAiInsights: () => request('/instructor/ai-insights', { method: 'GET' }),
   saveInstructorGoal: (payload) => request('/instructors/goals', { method: 'POST', data: payload }),
 };
 
@@ -130,9 +131,21 @@ export const adminApi = {
   clearSecurityLogs: () => request('/admin/security-logs', { method: 'DELETE', data: { clearAll: true } }),
   getDatabaseHealth: () => request('/admin/database-health'),
   getSystemHealth: () => request('/admin/system-health'),
+  getActiveSessions: () => request('/admin/security/sessions'),
+  revokeActiveSession: (sessionId) => request(`/admin/security/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' }),
+  getFailedLoginActivity: () => request('/admin/security/failed-logins'),
+  updateBlockedIp: (ipAddress, blocked) => request('/admin/security/blocked-ips', { method: 'PUT', data: { ipAddress, blocked } }),
+  deleteBlockedIp: (ipAddress) => request('/admin/security/blocked-ips', { method: 'DELETE', data: { ipAddress } }),
+  getSecurityApiKeys: () => request('/admin/security/api-keys'),
+  createSecurityApiKey: (payload) => request('/admin/security/api-keys', { method: 'POST', data: payload }),
+  rotateSecurityApiKey: (keyId, payload) => request(`/admin/security/api-keys/${keyId}/rotate`, { method: 'PUT', data: payload }),
+  revokeSecurityApiKey: (keyId) => request(`/admin/security/api-keys/${keyId}`, { method: 'DELETE' }),
+  updateMaintenanceMode: (enabled) => request('/admin/maintenance-mode', { method: 'PUT', data: { enabled } }),
   triggerBackup: () => request('/admin/trigger-backup', { method: 'POST' }),
   updateBackupRetention: (retentionDays) => request('/admin/backup-retention', { method: 'PUT', data: { retentionDays } }),
   updateSystemLock: (enabled) => request('/admin/system-lock', { method: 'PUT', data: { enabled } }),
+  getSecurityControls: () => request('/admin/security/controls'),
+  toggleSystemAccessLock: (payload) => request('/admin/toggle-system-lock', { method: 'POST', data: payload }),
   createCollege: (payload) => request('/admin/colleges', { method: 'POST', data: payload }),
   getColleges: () => request('/admin/colleges'),
   getCollegesWithDepartments: () => request('/admin/colleges-with-departments'),
@@ -148,6 +161,10 @@ export const adminApi = {
   getLandingContent: () => request('/admin/landing-content'),
   uploadLandingContent: (key, data) => request(`/admin/landing-content/${key}`, { method: 'POST', data }),
   deleteLandingContent: (key) => request(`/admin/landing-content/${key}`, { method: 'DELETE' }),
+  getLandingPageSettings: () => request('/admin/landing-page-settings'),
+  createLandingPageSetting: (data) => request('/admin/landing-page-settings', { method: 'POST', data }),
+  updateLandingPageSettings: (settings) => request('/admin/landing-page-settings', { method: 'PUT', data: { settings } }),
+  deleteLandingPageSetting: (data) => request('/admin/landing-page-settings', { method: 'DELETE', data }),
   getContactSettings: () => request('/admin/contact-settings'),
   updateContactSetting: (key, value) => request(`/admin/contact-settings/${key}`, { method: 'PUT', data: { value } }),
 };
@@ -248,10 +265,11 @@ export const courseApi = {
 
 export const evaluationApi = {
   getPublishAssignments: (params = {}) => request('/dept-head/publish-list', { method: 'GET', params }),
+  getPaginatedPublishAssignments: (params = {}) => request('/dept-head/publish-list', { method: 'GET', params }),
   togglePeerPublish: (payload = {}) => request('/evaluations/toggle-peer-publish', { method: 'POST', data: payload }),
   getPublishStatuses: (departmentId, params = {}) => request(`/evaluations/publish-statuses/${departmentId}`, { method: 'GET', params }),
   getPeerPublishStatus: (params = {}) => request('/evaluations/peer-publish-status', { method: 'GET', params }),
-  publishStudent: (payload) => request('/evaluations/publish-student', { method: 'POST', data: payload }),
+  publishStudent: (payload) => request('/evaluations/publish', { method: 'POST', data: payload }),
   unpublishStudent: (payload) => request('/evaluations/student/unpublish', { method: 'POST', data: payload }),
   publishInstructor: (payload) => request('/evaluations/publish-instructor', { method: 'POST', data: payload }),
   publishDispatch: (payload) => request('/evaluations/publish-dispatch', { method: 'POST', data: payload }),
@@ -283,7 +301,16 @@ export const evaluationApi = {
   getInstructorEvaluationDetails: (instructorId) => request(`/evaluations/instructor-details/${instructorId}`, { method: 'GET' }),
   getDepartmentHeadEvaluationTracking: (params = {}) => request('/department-head/evaluation-tracking', { method: 'GET', params }),
   getEvaluationDeadline: () => request('/department-head/evaluation-deadline', { method: 'GET' }),
-  updateEvaluationDeadline: (payload = {}) => request('/department-head/evaluation-deadline', { method: 'PUT', data: payload }),
+  updateEvaluationDeadline: (payload = {}) => {
+    const token = typeof window !== 'undefined'
+      ? window.localStorage.getItem('ipesAuthToken') || window.localStorage.getItem('token')
+      : null;
+    return request('/department-head/evaluation-deadline', {
+      method: 'PUT',
+      data: payload,
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+  },
   sendDepartmentHeadEvaluationReminder: (payload = {}) => request('/department-head/send-evaluation-reminder', { method: 'POST', data: payload }),
   getDeptHeadPendingEvaluators: (params = {}) => request('/dept-head/evaluation-tracking/pending', { method: 'GET', params }),
   getDeptHeadPendingStudents: () => request('/dept-head/pending-students', { method: 'GET' }),
@@ -308,6 +335,8 @@ export const labAssistantApi = {
 export const notificationApi = {
   getAll: () => request('/notifications'),
   getUnread: () => request('/notifications'),
+  markRead: (notificationId) => request(`/notifications/${notificationId}/read`, { method: 'PUT' }),
+  deleteOne: (notificationId) => request(`/notifications/${notificationId}`, { method: 'DELETE' }),
   markAllRead: (userId) => request(`/notifications/mark-all-read/${userId}`, { method: 'PUT' }),
   clearAll: (userId) => request(`/notifications/clear-all/${userId}`, { method: 'DELETE' }),
   send: (payload) => request('/notifications/send', { method: 'POST', data: payload }),

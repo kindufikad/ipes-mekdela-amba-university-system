@@ -61,25 +61,27 @@ router.get(
 router.get('/active-deadline', authenticateToken, authorizeRoles('student', 'instructor', 'lab_assistant', 'dept_head', 'dean', 'college_dean', 'academic_director', 'directorate', 'admin'), async (req, res) => {
   const departmentId = Number(req.user?.department_id || req.user?.departmentId || req.user?.department || 0);
   try {
-    await pool.query(`CREATE TABLE IF NOT EXISTS evaluation_periods (
-      id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      academic_year VARCHAR(64) NOT NULL,
-      semester VARCHAR(64) NOT NULL,
-      deadline DATETIME NULL,
-      status VARCHAR(32) NOT NULL DEFAULT 'active',
-      updated_by INT UNSIGNED NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uk_evaluation_period_term (academic_year, semester),
-      INDEX idx_evaluation_period_status (status, deadline)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
-    const [[period]] = await pool.query('SELECT deadline FROM evaluation_periods WHERE status = \'active\' ORDER BY id DESC LIMIT 1');
-    if (period?.deadline) return res.json({ deadlineAt: period.deadline, autoLock: new Date(period.deadline).getTime() > Date.now() });
     if (!departmentId) return res.json({ deadlineAt: null, autoLock: true });
+    await pool.query(`CREATE TABLE IF NOT EXISTS evaluation_deadline_settings (
+      department_id INT UNSIGNED PRIMARY KEY,
+      deadline_at DATETIME NULL,
+      auto_lock TINYINT(1) NOT NULL DEFAULT 1,
+      updated_by INT UNSIGNED NULL,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
     const [[settings]] = await pool.query('SELECT deadline_at, auto_lock FROM evaluation_deadline_settings WHERE department_id = ? LIMIT 1', [departmentId]);
-    if (settings?.deadline_at) return res.json({ deadlineAt: settings.deadline_at, autoLock: settings.auto_lock !== 0 });
-    const [[dispatch]] = await pool.query(`SELECT deadline FROM evaluation_dispatches WHERE department_id = ? AND deadline IS NOT NULL AND LOWER(COALESCE(status, 'pending')) IN ('pending', 'active', 'published') ORDER BY id DESC LIMIT 1`, [departmentId]);
-    return res.json({ deadlineAt: dispatch?.deadline || null, autoLock: true });
+    let dispatch = null;
+    if (!settings?.deadline_at) {
+      [[dispatch]] = await pool.query(`
+      SELECT deadline FROM evaluation_dispatches
+      WHERE department_id = ? AND deadline IS NOT NULL
+        AND LOWER(COALESCE(status, 'pending')) IN ('pending', 'active', 'published')
+      ORDER BY id DESC LIMIT 1`, [departmentId]);
+    }
+    return res.json({
+      deadlineAt: settings?.deadline_at || dispatch?.deadline || null,
+      autoLock: settings ? settings.auto_lock !== 0 : true,
+    });
   } catch (error) {
     console.error('Active evaluation deadline fetch failed:', error);
     return res.status(500).json({ message: 'Unable to load active evaluation deadline.' });

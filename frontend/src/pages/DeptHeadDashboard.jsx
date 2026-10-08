@@ -931,7 +931,7 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
 
       const matchingEvaluations = departmentReports.filter((evaluation) => String(evaluation.instructor_id || evaluation.instructorId || evaluation.target_instructor_id || evaluation.id || '') === String(instructorId));
       const evaluation = matchingEvaluations[0] || sourceRow || {};
-      const studentScore = Number(evaluation.student_score ?? evaluation.studentScore ?? evaluation.student_average ?? sourceRow.student_score ?? sourceRow.studentScore ?? sourceRow.student_average ?? 0);
+      const studentScore = Number(evaluation.raw_student_score ?? evaluation.student_raw_score ?? evaluation.student_score ?? evaluation.studentScore ?? evaluation.student_average ?? sourceRow.raw_student_score ?? sourceRow.student_raw_score ?? sourceRow.student_score ?? sourceRow.studentScore ?? sourceRow.student_average ?? 0);
       const peerScore = Number(evaluation.peer_score ?? evaluation.peerScore ?? evaluation.peer_average ?? sourceRow.peer_score ?? sourceRow.peerScore ?? sourceRow.peer_average ?? 0);
       const deptHeadScore = Number(evaluation.dept_head_score ?? evaluation.deptHeadScore ?? evaluation.dept_head_average ?? evaluation.deptHeadRaw ?? evaluation.department_score ?? evaluation.score ?? sourceRow.dept_head_score ?? sourceRow.deptHeadScore ?? sourceRow.dept_head_average ?? sourceRow.deptHeadRaw ?? sourceRow.department_score ?? 0);
       const normalizedDeptHeadScore = deptHeadScore > 0 && deptHeadScore <= 30 ? (deptHeadScore / 30) * 100 : deptHeadScore;
@@ -944,7 +944,7 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
       const evaluated = calculateEvaluationScores(studentScore, normalizedDeptHeadScore, peerScore);
       const persistedFinalScore = Number(evaluation.total_score ?? evaluation.totalWeightedScore ?? sourceRow.total_score ?? sourceRow.totalWeightedScore ?? 0);
       const finalScore = evaluated.totalScore > 0 ? evaluated.totalScore : persistedFinalScore;
-      const totalEvaluators = Number(evaluation.total_student_evaluators ?? evaluation.totalEvaluatorsCount ?? sourceRow.total_student_evaluators ?? sourceRow.totalEvaluatorsCount ?? 0);
+      const totalEvaluators = Number(evaluation.submission_count ?? evaluation.total_students_evaluated_count ?? evaluation.total_student_evaluators ?? evaluation.totalEvaluatorsCount ?? sourceRow.submission_count ?? sourceRow.total_students_evaluated_count ?? sourceRow.total_student_evaluators ?? sourceRow.totalEvaluatorsCount ?? 0);
       const requiredStudentEvaluators = Number(evaluation.required_student_evaluators ?? sourceRow.required_student_evaluators ?? 0);
       const totalPeerEvaluators = Number(evaluation.total_peer_evaluators ?? sourceRow.total_peer_evaluators ?? 0);
       const requiredPeerEvaluators = Number(evaluation.required_peer_evaluators ?? sourceRow.required_peer_evaluators ?? 0);
@@ -2484,6 +2484,7 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
         <div>
           <h1 className="text-3xl font-bold text-ieps-blue-600">{t('deptHeadDashboard.title')}</h1>
           <p className="mt-1 text-gray-500">{t('deptHeadDashboard.subtitle')}</p>
+          <p className="mt-2 text-sm font-medium text-blue-700">Deadline extensions from Settings apply only to {currentUser?.department_name || currentUser?.department || 'your department'}.</p>
         </div>
       </div>
 

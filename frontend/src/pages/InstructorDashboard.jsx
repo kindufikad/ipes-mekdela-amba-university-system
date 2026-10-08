@@ -326,11 +326,15 @@ const InstructorDashboard = () => {
     // Overview with weighted evaluations
     const totalWeightedScore = Number(report?.totalScore ?? report?.totalWeightedScore ?? 0);
     const breakdown = report?.breakdown || {};
+    const studentSubmissionCount = Number(report?.submission_count ?? report?.submissionCount ?? breakdown.student?.submissionCount ?? breakdown.student?.count ?? 0);
+    const studentEvaluated = studentSubmissionCount > 0;
+    const hasAssignedCourse = (report?.hasAssignedCourses ?? (report?.hasAssignedCourse !== false))
+      || studentSubmissionCount > 0
+      || Number(report?.total_assignments ?? report?.totalAssignments ?? 0) > 0;
     const hasAllEvaluations = [
-      breakdown.student?.rawPercentage,
       breakdown.deptHead?.rawPercentage,
       breakdown.peer?.rawPercentage,
-    ].every((score) => Number(score || 0) > 0);
+    ].every((score) => Number(score || 0) > 0) && (!hasAssignedCourse || studentEvaluated);
     const totalScoreLabel = reportLoading
       ? '—'
       : hasAllEvaluations
@@ -347,21 +351,28 @@ const InstructorDashboard = () => {
     
     const evaluationCards = [
       { 
+        key: 'student',
         label: 'Student Evaluation', 
-        weight: '50%', 
-        score: Number(breakdown.student?.rawPercentage ?? 0),
+        weight: Number(breakdown.student?.weight ?? report?.weights?.student ?? (hasAssignedCourse ? 50 : 0)),
+        score: hasAssignedCourse ? Number(breakdown.student?.rawPercentage ?? report?.raw_student_score ?? 0) : null,
+        status: !hasAssignedCourse ? 'Not assigned' : studentEvaluated ? 'Evaluated' : 'Active',
+        contribution: Number(breakdown.student?.weightedContribution ?? ((Number(breakdown.student?.rawPercentage ?? report?.raw_student_score ?? 0) * Number(breakdown.student?.weight ?? report?.weights?.student ?? (hasAssignedCourse ? 50 : 0))) / 100)),
         color: 'blue'
       },
       { 
+        key: 'deptHead',
         label: 'Dept Head Evaluation', 
-        weight: '30%', 
+        weight: Number(breakdown.deptHead?.weight ?? (hasAssignedCourse ? 30 : 60)),
         score: Number(breakdown.deptHead?.rawPercentage ?? 0),
+        contribution: Number(breakdown.deptHead?.weightedContribution ?? 0),
         color: 'amber'
       },
       { 
+        key: 'peer',
         label: 'Peer Evaluation', 
-        weight: '20%', 
+        weight: Number(breakdown.peer?.weight ?? (hasAssignedCourse ? 20 : 40)),
         score: Number(breakdown.peer?.rawPercentage ?? 0),
+        contribution: Number(breakdown.peer?.weightedContribution ?? 0),
         color: 'purple'
       },
     ];
@@ -388,19 +399,21 @@ const InstructorDashboard = () => {
 
         {/* Evaluation Cards */}
         <div className="grid gap-4 md:grid-cols-3">
-          {evaluationCards.map((card, index) => {
+          {evaluationCards.map((card) => {
             const styles = getColorStyles(card.color);
             return (
-              <div key={index} className={`rounded-2xl border border-gray-200 p-6 shadow-sm ${styles.bg}`}>
+              <div key={card.key} className={`rounded-2xl border border-gray-200 p-6 shadow-sm ${styles.bg}`}>
                 <div className="flex items-start justify-between mb-3">
                   <div>
                     <p className={`text-sm font-medium ${styles.text}`}>{card.label}</p>
                     <span className={`inline-block mt-2 px-3 py-1 rounded-full text-xs font-semibold ${styles.badge}`}>
-                      {card.weight} {t('instructorDashboard.weight')}
+                      {card.weight}% {t('instructorDashboard.weight')}
                     </span>
                   </div>
+                  {card.status && <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${hasAssignedCourse && studentEvaluated ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{card.status}</span>}
                 </div>
-                <p className={`text-4xl font-bold ${styles.text} mt-4`}>{reportLoading ? '—' : `${Number(card.score).toFixed(1)}%`}</p>
+                <p className={`text-4xl font-bold ${styles.text} mt-4`}>{reportLoading ? '—' : card.score === null ? 'N/A' : `${Number(card.score).toFixed(card.key === 'student' ? 2 : 1)}%`}</p>
+                <p className="mt-1 text-sm text-gray-600">Weighted contribution: {reportLoading ? '—' : `${Number(card.contribution).toFixed(card.key === 'student' ? 2 : 1)}%`}</p>
               </div>
             );
           })}

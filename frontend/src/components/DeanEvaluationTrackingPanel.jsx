@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { deanApi } from '../services/api';
+import toast from 'react-hot-toast';
+import { deanApi, evaluationApi } from '../services/api';
 import { useEvaluation } from '../context/useEvaluation';
 
 const round = (value) => Number(Number(value || 0).toFixed(2));
@@ -10,7 +11,6 @@ const calculateWeightedDepartmentHeadScore = (row = {}) => {
   const peerAverage = Number(row.peer_average ?? row.peerScore ?? 0);
   const rawHasAssignedCourse = row.hasCourseAssigned ?? row.has_course_assigned ?? row.has_assigned_course ?? row.hasAssignedCourse ?? '1';
   const hasAssignedCourse = String(rawHasAssignedCourse).toLowerCase() !== 'false' && String(rawHasAssignedCourse) !== '0' && Number(rawHasAssignedCourse) !== 0;
-  const persistedFinalScore = Number(row.final_score ?? row.total_score ?? row.totalWeightedScore ?? row.score ?? 0);
 
   const normalizedDeptHead = row.dept_head_is_normalized
     ? Math.min(deptHeadAverage, 100)
@@ -19,12 +19,12 @@ const calculateWeightedDepartmentHeadScore = (row = {}) => {
       : Math.min(deptHeadAverage, 100);
   const normalizedPeer = peerAverage <= 100 ? peerAverage : Math.min(peerAverage, 100);
 
+  const weightedSubtotal = (hasAssignedCourse ? studentAverage * 0.5 : 0)
+    + normalizedDeptHead * 0.3
+    + normalizedPeer * 0.2;
   const fallbackWeightedScore = hasAssignedCourse
-    ? ((studentAverage * 0.5) + (normalizedDeptHead * 0.3) + (normalizedPeer * 0.2))
-    : ((normalizedDeptHead * 0.6) + (normalizedPeer * 0.4));
-
-  const weightedScore = persistedFinalScore > 0 ? persistedFinalScore : fallbackWeightedScore;
-
+    ? weightedSubtotal
+    : (weightedSubtotal / 0.5) * 100;
   return {
     studentAverage,
     deptHeadAverage,
@@ -32,7 +32,9 @@ const calculateWeightedDepartmentHeadScore = (row = {}) => {
     normalizedDeptHead,
     normalizedPeer,
     hasAssignedCourse,
-    weightedScore: round(weightedScore),
+    activeWeight: hasAssignedCourse ? 100 : 50,
+    rawSubtotal: round(weightedSubtotal),
+    weightedScore: round(fallbackWeightedScore),
     warning: hasAssignedCourse ? '' : 'Student evaluation is excluded because no course was assigned for this semester.',
   };
 };
@@ -45,6 +47,9 @@ const DeanEvaluationTrackingPanel = () => {
   const [fetching, setFetching] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  const [publishing, setPublishing] = useState(false);
+  const [showPublishModal, setShowPublishModal] = useState(false);
+  const [batchYear, setBatchYear] = useState('All Batches');
   const { refreshVersion } = useEvaluation();
 
   useEffect(() => {
@@ -115,16 +120,40 @@ const DeanEvaluationTrackingPanel = () => {
     }
   };
 
-  const handlePublish = () => {
-    const visibleCount = filteredRows.length;
-    if (!visibleCount) {
-      setMessage('There are no rows ready to publish yet.');
+  const readyToPublish = filteredRows.length > 0
+    && filteredRows.every((row) => Number(row.completion_rate || 0) >= 100);
+
+  const handlePublish = async () => {
+    if (!readyToPublish) {
+      toast.error('Peer and Directorate evaluations must be complete before publishing results.');
       return;
     }
 
-    const total = filteredRows.reduce((sum, row) => sum + calculateWeightedDepartmentHeadScore(row).weightedScore, 0);
-    const averageFinalScore = visibleCount ? total / visibleCount : 0;
-    setMessage(`Final results calculated for ${visibleCount} department head record(s). Average final score: ${round(averageFinalScore).toFixed(2)}%.`);
+    const departmentIds = [...new Set(filteredRows.map((row) => Number(row.department_id)).filter((id) => Number.isInteger(id) && id > 0))];
+    if (!departmentIds.length) {
+      toast.error('No publishable department is available for the selected Department Head.');
+      return;
+    }
+
+    setPublishing(true);
+    try {
+      for (const targetDepartmentId of departmentIds) {
+        await evaluationApi.publishStudent({
+          department_id: targetDepartmentId,
+          academic_year: String(new Date().getFullYear()),
+          semester: 'Semester I',
+          batchYear,
+        });
+      }
+      setShowPublishModal(false);
+      toast.success('Evaluation results published successfully for the selected target batch.');
+      setMessage(`Evaluation results were published for ${batchYear}.`);
+    } catch (publishError) {
+      console.error('Dean evaluation results publishing failed:', publishError);
+      toast.error(publishError?.message || 'Unable to publish evaluation results.');
+    } finally {
+      setPublishing(false);
+    }
   };
 
   return (
@@ -192,9 +221,14 @@ const DeanEvaluationTrackingPanel = () => {
                   <td className="px-4 py-4 font-medium text-slate-900">{row.department || 'Unassigned Department'}</td>
                   <td className="px-4 py-4 text-slate-700">{row.department_head_name || '—'}</td>
                   <td className="px-4 py-4">
-                    <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${Number(row.completion_rate ?? 0) >= 100 ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
-                      {row.completed_evaluations ?? 0}/{row.total_instructors ?? 0} ({Number(row.completion_rate ?? 0).toFixed(0)}%)
-                    </span>
+                    <div className="flex flex-col items-start gap-1.5">
+                      <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${Number(row.completion_rate ?? 0) >= 100 ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                        {row.completed_evaluations ?? 0}/{row.total_instructors ?? 0} ({Number(row.completion_rate ?? 0).toFixed(0)}%)
+                      </span>
+                      <span className={`text-xs font-medium ${Number(row.completion_rate ?? 0) >= 100 ? 'text-emerald-700' : 'text-amber-700'}`}>
+                        {Number(row.completion_rate ?? 0) >= 100 ? 'Ready to Publish' : 'Pending Completion'}
+                      </span>
+                    </div>
                   </td>
                   <td className="px-4 py-4 text-slate-700">
                     {String(row.hasCourseAssigned ?? row.has_course_assigned ?? row.has_assigned_course ?? '1') === '0' || String(row.hasCourseAssigned ?? row.has_course_assigned ?? row.has_assigned_course ?? '1') === 'false'
@@ -220,22 +254,46 @@ const DeanEvaluationTrackingPanel = () => {
           <div>
             <p className="text-sm font-semibold text-blue-900">Final results status</p>
             <p className="mt-1 text-sm text-blue-700">
-              {filteredRows.length
-                ? `${filteredRows.length} department-head record(s) are ready for calculation.`
+              {readyToPublish
+                ? `${filteredRows.length} department-head record(s) have completed their active evaluation categories and are ready to publish.`
+                : filteredRows.length
+                  ? 'Publishing becomes available after the active evaluation categories are 100% complete.'
                 : 'No department-head records are available for final publishing.'}
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={handlePublish}
-            disabled={!filteredRows.length}
-            className="inline-flex items-center justify-center rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            Calculate & Publish Final Results
-          </button>
+          {readyToPublish && (
+            <button
+              type="button"
+              onClick={() => setShowPublishModal(true)}
+              disabled={publishing}
+              className="inline-flex items-center justify-center rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              Publish Evaluation Results
+            </button>
+          )}
         </div>
       </div>
+      {showPublishModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="dean-publish-batch-title">
+          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl">
+            <h3 id="dean-publish-batch-title" className="text-lg font-bold text-slate-900">Confirm &amp; Publish</h3>
+            <p className="mt-2 text-sm text-slate-600">Select the target academic year/batch for these completed evaluation results.</p>
+            <label className="mt-5 block text-sm font-medium text-slate-700">
+              Target Academic Year / Batch
+              <select value={batchYear} onChange={(event) => setBatchYear(event.target.value)} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm">
+                <option value="3rd Year">3rd Year</option>
+                <option value="4th Year">4th Year</option>
+                <option value="All Batches">All Batches</option>
+              </select>
+            </label>
+            <div className="mt-6 flex justify-end gap-3">
+              <button type="button" onClick={() => setShowPublishModal(false)} disabled={publishing} className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50">Cancel</button>
+              <button type="button" onClick={() => void handlePublish()} disabled={publishing || !readyToPublish} className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">{publishing ? 'Publishing...' : 'Confirm & Publish'}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 };

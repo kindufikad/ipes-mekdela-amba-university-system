@@ -45,6 +45,7 @@ const Login = () => {
   const [successPayload, setSuccessPayload] = useState({ title: '', message: '', buttonText: '' });
   const [pendingRoute, setPendingRoute] = useState(null);
   const [loginError, setLoginError] = useState('');
+  const [loginErrorCode, setLoginErrorCode] = useState('');
   const { strings } = useContext(LanguageContext);
   const { isAuthenticated, role, isFirstLogin, setAuthSession } = useAuth();
   const navigate = useNavigate();
@@ -189,6 +190,7 @@ const Login = () => {
   const handleLoginSubmit = async (e) => {
     e.preventDefault();
     setLoginError('');
+    setLoginErrorCode('');
     setIsLoading(true);
 
     const identifier = String(formData.identifier ?? '').trim();
@@ -224,6 +226,7 @@ const Login = () => {
         student_id: user.student_id || null,
         username: user.username || user.email || user.student_id || null,
         role: user.role,
+        roles: user.roles || user.role,
         department_id: user.department_id || null,
         isFirstLogin,
       });
@@ -256,6 +259,7 @@ const Login = () => {
       const finalMsg = normalizedBackendMsg || statusText || genericMsg;
 
       setLoginError(finalMsg);
+      setLoginErrorCode(error?.response?.data?.code || '');
 
       toast.error(finalMsg, {
         id: 'login-error-toast',
@@ -274,15 +278,16 @@ const Login = () => {
   };
 
   const normalizeRole = (value) => {
-    const normalizedValue = String(value || '').trim().toLowerCase();
+    const roleValue = Array.isArray(value) ? value[0] : String(value || '').split(/[;,|]+/)[0];
+    const normalizedValue = String(roleValue || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
-    if (normalizedValue === 'dept_head' || normalizedValue === 'depthead') return 'depthead';
-    if (normalizedValue === 'system_admin' || normalizedValue === 'systemadmin' || normalizedValue === 'admin') return 'systemadmin';
-    if (normalizedValue === 'college_dean' || normalizedValue === 'dean') return 'college_dean';
-    if (normalizedValue === 'academic_directorate' || normalizedValue === 'academic_director' || normalizedValue === 'directorate') return 'academic_directorate';
-    if (['academic_vice_president', 'vice_president', 'vice-president', 'vice president'].includes(normalizedValue)) return 'academic_vice_president';
-    if (normalizedValue === 'lab_assistant') return 'lab_assistant';
-    if (normalizedValue === 'student' || normalizedValue === 'instructor') return normalizedValue;
+    if (['depthead', 'departmenthead', 'head'].includes(normalizedValue)) return 'depthead';
+    if (['systemadmin', 'admin'].includes(normalizedValue)) return 'systemadmin';
+    if (['collegedean', 'dean'].includes(normalizedValue)) return 'college_dean';
+    if (['academicdirectorate', 'academicdirector', 'directorate'].includes(normalizedValue)) return 'academic_directorate';
+    if (['academicvicepresident', 'vicepresident'].includes(normalizedValue)) return 'academic_vice_president';
+    if (normalizedValue === 'labassistant') return 'lab_assistant';
+    if (['student', 'instructor', 'teacher'].includes(normalizedValue)) return normalizedValue === 'teacher' ? 'instructor' : normalizedValue;
 
     return 'student';
   };
@@ -487,8 +492,16 @@ const Login = () => {
                 </div>
 
                 {loginError && loginError !== 'Incorrect email' && loginError !== 'Incorrect password' && (
-                  <div style={{ padding: '12px', backgroundColor: '#fee2e2', border: '1px solid #f87171', color: '#991b1b', borderRadius: '8px', marginBottom: '16px', fontWeight: 'bold' }}>
-                    ⚠️ {loginError}
+                  <div
+                    className={`mb-4 flex items-start gap-2 rounded-lg border p-3 text-sm font-semibold ${
+                      loginErrorCode === 'SYSTEM_ACCESS_LOCKED'
+                        ? 'border-amber-300 bg-amber-50 text-amber-900'
+                        : 'border-red-300 bg-red-50 text-red-800'
+                    }`}
+                    role="alert"
+                  >
+                    {loginErrorCode === 'SYSTEM_ACCESS_LOCKED' ? <FaLock className="mt-0.5 shrink-0" aria-hidden="true" /> : <FaShieldAlt className="mt-0.5 shrink-0" aria-hidden="true" />}
+                    <span>{loginError}</span>
                   </div>
                 )}
 
@@ -652,4 +665,3 @@ const Login = () => {
   );
 };
 export default Login; 
-

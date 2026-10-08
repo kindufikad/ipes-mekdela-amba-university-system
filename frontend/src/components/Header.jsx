@@ -44,10 +44,26 @@ const roleLabels = {
 };
 
 const settingsStorageKey = 'ipes-dashboard-settings';
+const ALLOWED_SIGNATURE_ROLES = [
+  'department_head',
+  'dept_head',
+  'depthead',
+  'college_dean',
+  'directorate',
+  'academic_director',
+  'academic_directorate',
+  'vice_president',
+  'academic_vice_president',
+];
+const certificateImageLimit = 1024 * 1024;
+const deadlineFallbackStorageKey = 'ipes-deadline-grace-extension';
+const deadlineCacheStorageKey = 'ipes-department-head-deadline-cache';
 const formatForInput = (isoDate) => {
   if (!isoDate) return '';
   const date = new Date(isoDate);
-  return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 16);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 };
 
 const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) => {
@@ -61,6 +77,7 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSubmittingPassword, setIsSubmittingPassword] = useState(false);
   const [deadlineSettings, setDeadlineSettings] = useState({ deadlineAt: '', autoLock: true });
+  const [savedDeadlineAt, setSavedDeadlineAt] = useState('');
   const [deadlineSaving, setDeadlineSaving] = useState(false);
   const [passwordForm, setPasswordForm] = useState({ currentPassword: '', newPassword: '', confirmPassword: '' });
   const [settingsState, setSettingsState] = useState(() => {
@@ -71,6 +88,21 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
         systemNotifications: saved.systemNotifications ?? true,
         language: saved.language ?? language,
         theme: saved.theme ?? (isDark ? 'dark' : 'light'),
+        autoRemindersEnabled: saved.autoRemindersEnabled ?? false,
+        reminderFrequency: saved.reminderFrequency ?? 'Every 3 Days',
+        reminderAudience: {
+          pendingStudentEvaluators: saved.reminderAudience?.pendingStudentEvaluators ?? true,
+          pendingPeerFacultyEvaluators: saved.reminderAudience?.pendingPeerFacultyEvaluators ?? true,
+        },
+        evaluationWeights: {
+          student: saved.evaluationWeights?.student ?? 50,
+          peer: saved.evaluationWeights?.peer ?? 20,
+          deptHead: saved.evaluationWeights?.deptHead ?? 30,
+        },
+        strictStudentAnonymity: saved.strictStudentAnonymity ?? false,
+        autoLockFormsOnDeadline: saved.autoLockFormsOnDeadline ?? true,
+        departmentHeadSignature: saved.departmentHeadSignature ?? '',
+        officialStamp: saved.officialStamp ?? '',
       };
     } catch (error) {
       return {
@@ -78,6 +110,14 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
         systemNotifications: true,
         language,
         theme: isDark ? 'dark' : 'light',
+        autoRemindersEnabled: false,
+        reminderFrequency: 'Every 3 Days',
+        reminderAudience: { pendingStudentEvaluators: true, pendingPeerFacultyEvaluators: true },
+        evaluationWeights: { student: 50, peer: 20, deptHead: 30 },
+        strictStudentAnonymity: false,
+        autoLockFormsOnDeadline: true,
+        departmentHeadSignature: '',
+        officialStamp: '',
       };
     }
   });
@@ -110,11 +150,78 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
   }, [isMobileMenuOpen]);
 
   const normalizedRole = String(user?.role || role || storedUser?.role || '').trim().toLowerCase();
+  const canUploadSignature = ALLOWED_SIGNATURE_ROLES.includes(String(user?.role || '').toLowerCase());
   const currentUser = { ...storedUser, ...user };
+  const deadlineDepartmentScope = currentUser.department_id || currentUser.departmentId || currentUser.department || 'unknown';
+  const scopedDeadlineFallbackKey = `${deadlineFallbackStorageKey}:${deadlineDepartmentScope}`;
+  const scopedDeadlineCacheKey = `${deadlineCacheStorageKey}:${deadlineDepartmentScope}`;
   const dashboardPath = dashboardRoutes[normalizedRole] || '/login';
   const displayName = currentUser.name || currentUser.full_name || currentUser.fullName || currentUser.username || currentUser.email || 'User';
   const email = currentUser.email || currentUser.username || 'user@university.edu';
   const roleLabel = t(`roles.${roleLabels[normalizedRole] || 'user'}`);
+  const evaluationWeightsTotal = Object.values(settingsState.evaluationWeights).reduce((sum, weight) => sum + (Number(weight) || 0), 0);
+
+  const saveDeadlineWithFallback = async (payload) => {
+    try {
+      await evaluationApi.updateEvaluationDeadline(payload);
+      setDeadlineSettings((current) => ({ ...current, ...payload }));
+      setSavedDeadlineAt(payload.deadlineAt || '');
+      window.localStorage.setItem(scopedDeadlineCacheKey, JSON.stringify(payload));
+      window.localStorage.removeItem(scopedDeadlineFallbackKey);
+      return { saved: true, extended: false };
+    } catch (error) {
+      console.error('Unable to save evaluation deadline:', error);
+      const isServerFailure = !error?.status || error.status >= 500;
+      let cachedDeadline;
+      try {
+        cachedDeadline = JSON.parse(window.localStorage.getItem(scopedDeadlineCacheKey) || 'null');
+      } catch (storageError) {
+        console.error('Unable to read cached evaluation deadline:', storageError);
+      }
+      const deadlineToProtect = savedDeadlineAt || cachedDeadline?.deadlineAt || payload.deadlineAt;
+      const deadlineTimestamp = deadlineToProtect ? new Date(deadlineToProtect).getTime() : NaN;
+      const gracePeriodMs = 24 * 60 * 60 * 1000;
+      const isNearDeadline = Number.isFinite(deadlineTimestamp) && deadlineTimestamp - Date.now() <= gracePeriodMs;
+
+      if (!isServerFailure || !isNearDeadline) {
+        toast.error(error?.message || t('header.deadlineError'));
+        return { saved: false, extended: false };
+      }
+
+      const requestedTimestamp = payload.deadlineAt ? new Date(payload.deadlineAt).getTime() : NaN;
+      const graceDeadline = new Date(Math.max(
+        deadlineTimestamp,
+        Number.isFinite(requestedTimestamp) ? requestedTimestamp : 0,
+        Date.now()
+      ) + gracePeriodMs);
+      const extendedPayload = { ...payload, deadlineAt: formatForInput(graceDeadline) };
+      setDeadlineSettings((current) => ({ ...current, ...extendedPayload }));
+
+      try {
+        await evaluationApi.updateEvaluationDeadline(extendedPayload);
+        setSavedDeadlineAt(extendedPayload.deadlineAt);
+        window.localStorage.setItem(scopedDeadlineCacheKey, JSON.stringify(extendedPayload));
+        window.localStorage.removeItem(scopedDeadlineFallbackKey);
+        toast.success(t('header.deadlineGraceSaved'));
+        return { saved: true, extended: true };
+      } catch (fallbackError) {
+        console.error('Unable to sync emergency evaluation deadline extension:', fallbackError);
+        try {
+          window.localStorage.setItem(scopedDeadlineFallbackKey, JSON.stringify({
+            ...extendedPayload,
+            savedAt: new Date().toISOString(),
+          }));
+          window.localStorage.setItem(scopedDeadlineCacheKey, JSON.stringify(extendedPayload));
+          toast.success(t('header.deadlineGraceQueued'));
+          return { saved: false, extended: true };
+        } catch (storageError) {
+          console.error('Unable to persist emergency evaluation deadline extension locally:', storageError);
+          toast.error(fallbackError?.message || t('header.deadlineError'));
+          return { saved: false, extended: false };
+        }
+      }
+    }
+  };
 
   useEffect(() => {
     try {
@@ -208,32 +315,170 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
     setSettingsState((current) => ({ ...current, [field]: !current[field] }));
   };
 
-  const handleSettingsSave = () => {
-    setLanguage(settingsState.language);
+  const handleCertificateImageUpload = (field, file) => {
+    if (!file) return;
+    if (file.type !== 'image/png') {
+      toast.error('Please choose a PNG image.');
+      return;
+    }
+    if (file.size > certificateImageLimit) {
+      toast.error('PNG files must be 1 MB or smaller.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') {
+        toast.error('Unable to read the selected PNG image.');
+        return;
+      }
+      try {
+        const savedSettings = JSON.parse(window.localStorage.getItem(settingsStorageKey) || '{}');
+        window.localStorage.setItem(settingsStorageKey, JSON.stringify({ ...savedSettings, [field]: reader.result }));
+        setSettingsState((current) => ({ ...current, [field]: reader.result }));
+        window.dispatchEvent(new Event('ipes:official-document-images-changed'));
+      } catch (error) {
+        console.error('Unable to save official document image:', error);
+        toast.error('Unable to save the image. Choose a smaller PNG file.');
+        return;
+      }
+      toast.success('Official document image saved.');
+    };
+    reader.onerror = () => {
+      console.error('Unable to read official document image:', reader.error);
+      toast.error('Unable to read the selected PNG image.');
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleSettingsSave = async () => {
     if ((settingsState.theme === 'dark') !== isDark) toggleTheme();
+    if (['dept_head', 'depthead', 'department_head'].includes(normalizedRole)) {
+      setDeadlineSaving(true);
+      const result = await saveDeadlineWithFallback({
+        deadlineAt: deadlineSettings.deadlineAt || null,
+        autoLock: settingsState.autoLockFormsOnDeadline,
+      });
+      setDeadlineSaving(false);
+      if (!result.saved && !result.extended) {
+        return;
+      }
+      if (!result.saved && result.extended) {
+        setIsSettingsOpen(false);
+        return;
+      }
+      if (result.extended) {
+        setIsSettingsOpen(false);
+        return;
+      }
+    }
     setIsSettingsOpen(false);
     toast.success(t('header.settingsSaved'));
   };
 
   useEffect(() => {
-    if (!isSettingsOpen || !['dept_head', 'depthead', 'department_head'].includes(normalizedRole)) return;
-    evaluationApi.getEvaluationDeadline().then((settings) => setDeadlineSettings({ deadlineAt: formatForInput(settings?.currentDeadline || settings?.deadlineAt), autoLock: settings?.autoLock !== false })).catch((error) => toast.error(error?.message || t('header.deadlineLoadError')));
-  }, [isSettingsOpen, normalizedRole]);
+    if (!isSettingsOpen || !['dept_head', 'depthead', 'department_head'].includes(normalizedRole)) return undefined;
+    let active = true;
+    const syncPendingExtension = async () => {
+      let pendingExtension;
+      try {
+        pendingExtension = JSON.parse(window.localStorage.getItem(scopedDeadlineFallbackKey) || 'null');
+      } catch (error) {
+        console.error('Unable to read pending deadline extension:', error);
+      }
+      if (!pendingExtension?.deadlineAt) return;
+      try {
+        const currentSettings = await evaluationApi.getEvaluationDeadline();
+        const currentDeadline = formatForInput(currentSettings?.currentDeadline || currentSettings?.deadlineAt);
+        const pendingTimestamp = new Date(pendingExtension.deadlineAt).getTime();
+        const currentTimestamp = currentDeadline ? new Date(currentDeadline).getTime() : NaN;
+        if (Number.isFinite(currentTimestamp) && currentTimestamp >= pendingTimestamp) {
+          window.localStorage.removeItem(scopedDeadlineFallbackKey);
+          if (active) {
+            setSavedDeadlineAt(currentDeadline);
+            setDeadlineSettings((current) => ({ ...current, deadlineAt: currentDeadline }));
+          }
+          return;
+        }
+        const settings = await evaluationApi.updateEvaluationDeadline(pendingExtension);
+        if (!active) return;
+        const deadlineAt = formatForInput(settings?.deadlineAt || pendingExtension.deadlineAt);
+        setSavedDeadlineAt(deadlineAt);
+        setDeadlineSettings((current) => ({ ...current, ...pendingExtension, deadlineAt }));
+        window.localStorage.setItem(scopedDeadlineCacheKey, JSON.stringify({ ...pendingExtension, deadlineAt }));
+        window.localStorage.removeItem(scopedDeadlineFallbackKey);
+        toast.success(t('header.deadlineGraceSaved'));
+      } catch (error) {
+        console.error('Pending emergency deadline extension is not synced yet:', error);
+      }
+    };
+    const loadDeadline = async () => {
+      try {
+        const settings = await evaluationApi.getEvaluationDeadline();
+        if (!active) return;
+        const autoLock = settings?.autoLock !== false;
+        const serverDeadline = formatForInput(settings?.currentDeadline || settings?.deadlineAt);
+        let pendingExtension;
+        try {
+          pendingExtension = JSON.parse(window.localStorage.getItem(scopedDeadlineFallbackKey) || 'null');
+        } catch (error) {
+          console.error('Unable to read pending deadline extension:', error);
+        }
+        const pendingIsNewer = pendingExtension?.deadlineAt
+          && (!serverDeadline || new Date(pendingExtension.deadlineAt).getTime() > new Date(serverDeadline).getTime());
+        const deadlineAt = pendingIsNewer ? pendingExtension.deadlineAt : serverDeadline;
+        if (pendingExtension && !pendingIsNewer) window.localStorage.removeItem(scopedDeadlineFallbackKey);
+        window.localStorage.setItem(scopedDeadlineCacheKey, JSON.stringify({ deadlineAt: serverDeadline, autoLock }));
+        setSavedDeadlineAt(serverDeadline);
+        setDeadlineSettings({ deadlineAt, autoLock });
+        setSettingsState((current) => ({ ...current, autoLockFormsOnDeadline: autoLock }));
+        if (pendingIsNewer) void syncPendingExtension();
+      } catch (error) {
+        console.error('Unable to load evaluation deadline:', error);
+        try {
+          const pendingExtension = JSON.parse(window.localStorage.getItem(scopedDeadlineFallbackKey) || 'null');
+          if (pendingExtension?.deadlineAt && active) {
+            setDeadlineSettings({ deadlineAt: pendingExtension.deadlineAt, autoLock: pendingExtension.autoLock !== false });
+            return;
+          }
+          const cachedDeadline = JSON.parse(window.localStorage.getItem(scopedDeadlineCacheKey) || 'null');
+          const cachedTimestamp = cachedDeadline?.deadlineAt ? new Date(cachedDeadline.deadlineAt).getTime() : NaN;
+          if (Number.isFinite(cachedTimestamp) && cachedTimestamp - Date.now() <= 24 * 60 * 60 * 1000 && active) {
+            setSavedDeadlineAt(cachedDeadline.deadlineAt);
+            setDeadlineSettings({ deadlineAt: cachedDeadline.deadlineAt, autoLock: cachedDeadline.autoLock !== false });
+            void saveDeadlineWithFallback(cachedDeadline);
+            return;
+          }
+        } catch (storageError) {
+          console.error('Unable to read saved deadline extension:', storageError);
+        }
+        toast.error(error?.message || t('header.deadlineLoadError'));
+      }
+    };
+    void loadDeadline();
+    window.addEventListener('online', syncPendingExtension);
+    return () => {
+      active = false;
+      window.removeEventListener('online', syncPendingExtension);
+    };
+  }, [deadlineDepartmentScope, isSettingsOpen, normalizedRole]);
 
   const extendDeadline = (days) => {
-    const base = deadlineSettings.deadlineAt ? new Date(deadlineSettings.deadlineAt) : new Date();
+    const selected = deadlineSettings.deadlineAt ? new Date(deadlineSettings.deadlineAt) : null;
+    const base = selected && !Number.isNaN(selected.getTime()) && selected.getTime() > Date.now()
+      ? selected
+      : new Date();
     base.setDate(base.getDate() + days);
     setDeadlineSettings((current) => ({ ...current, deadlineAt: formatForInput(base) }));
   };
 
   const saveEvaluationDeadline = async () => {
     if (!deadlineSettings.deadlineAt) return toast.error(t('header.deadlineRequired'));
+    if (new Date(deadlineSettings.deadlineAt).getTime() <= Date.now()) return toast.error(t('header.deadlineMustBeFuture'));
     setDeadlineSaving(true);
-    try {
-      await evaluationApi.updateEvaluationDeadline(deadlineSettings);
-      toast.success(t('header.deadlineSaved'));
-    } catch (error) { toast.error(error?.message || t('header.deadlineError')); }
-    finally { setDeadlineSaving(false); }
+    const result = await saveDeadlineWithFallback(deadlineSettings);
+    setDeadlineSaving(false);
+    if (result.saved && !result.extended) toast.success(t('header.deadlineSaved'));
   };
 
   return (
@@ -346,7 +591,7 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
 
     {isSettingsOpen && (
       <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/50 p-4">
-        <div className="relative w-full max-w-xl max-h-[85vh] overflow-y-auto p-6 bg-white dark:bg-slate-900 rounded-2xl shadow-2xl custom-scrollbar">
+        <div className="relative w-full max-w-2xl max-h-[85vh] overflow-y-auto p-6 bg-white dark:bg-slate-900 rounded-2xl shadow-2xl custom-scrollbar">
           <div className="mb-5 flex items-center justify-between">
             <div>
               <p className="text-sm font-semibold uppercase tracking-[0.2em] text-blue-600">{t('header.preferences')}</p>
@@ -384,20 +629,129 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
             </div>
 
             {['dept_head', 'depthead', 'department_head'].includes(normalizedRole) && <div className="rounded-xl border border-blue-200 bg-blue-50/50 p-4">
-              <div><p className="font-semibold text-slate-800">{t('header.evaluationPeriod')}</p><p className="mt-1 text-sm text-slate-500">{t('header.deadlineDescription')}</p></div>
-              <label className="mt-4 block text-sm font-medium text-slate-700">{t('header.academicDeadline')}<input type="datetime-local" value={deadlineSettings.deadlineAt} onChange={(event) => setDeadlineSettings((current) => ({ ...current, deadlineAt: event.target.value }))} className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5" /></label>
-              <div className="mt-3 flex flex-wrap gap-2"><span className="self-center text-xs font-semibold text-slate-500">{t('header.quickExtension')}</span>{[3, 7, 14].map((days) => <button key={days} type="button" onClick={() => extendDeadline(days)} className="rounded-lg border border-blue-200 bg-white px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-50">+{days} {t('header.days')}</button>)}</div>
-              <label className="mt-4 flex items-center justify-between text-sm font-medium text-slate-700"><span>{t('header.autoLock')}</span><input type="checkbox" checked={deadlineSettings.autoLock} onChange={(event) => setDeadlineSettings((current) => ({ ...current, autoLock: event.target.checked }))} className="h-4 w-4 accent-blue-600" /></label>
+              <div><p className="font-semibold text-slate-800">{t('header.evaluationPeriod')}</p><p className="mt-1 text-sm text-slate-500">{t('header.deadlineDescription')}</p><p className="mt-1 text-xs font-medium text-blue-800">This deadline applies only to {currentUser.department_name || currentUser.department || 'your department'}.</p></div>
+              <label className="mt-4 block text-sm font-medium text-slate-700">{t('header.academicDeadline')}<input type="datetime-local" min={formatForInput(new Date())} value={deadlineSettings.deadlineAt} onChange={(event) => setDeadlineSettings((current) => ({ ...current, deadlineAt: event.target.value }))} className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5" /></label>
+              <div className="mt-3 flex flex-wrap gap-2"><span className="self-center text-xs font-semibold text-slate-500">{t('header.quickExtension')}</span>{[1, 3, 7, 14].map((days) => <button key={days} type="button" onClick={() => extendDeadline(days)} className="rounded-lg border border-blue-200 bg-white px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-50">{days === 1 ? t('header.oneDay') : `+${days} ${t('header.days')}`}</button>)}</div>
               <button type="button" onClick={saveEvaluationDeadline} disabled={deadlineSaving} className="mt-4 w-full rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{deadlineSaving ? t('header.savingDeadline') : t('header.saveDeadline')}</button>
             </div>}
+
+            {['dept_head', 'depthead', 'department_head'].includes(normalizedRole) && <>
+              <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="mb-4">
+                  <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">Reminders & notifications</p>
+                  <h3 className="mt-1 text-lg font-semibold text-slate-900">Auto-Reminder Alerts</h3>
+                  <p className="mt-1 text-sm text-slate-500">Configure reminders for incomplete evaluation forms.</p>
+                </div>
+                <div className="flex items-center justify-between gap-4 rounded-xl border border-slate-200 p-3">
+                  <span><span className="block text-sm font-semibold text-slate-800">Enable Automated Evaluation Reminders</span><span className="mt-1 block text-xs text-slate-500">Send reminders to selected evaluator groups.</span></span>
+                  <button type="button" role="switch" aria-checked={settingsState.autoRemindersEnabled} aria-label="Enable Automated Evaluation Reminders" onClick={() => setSettingsState((current) => ({ ...current, autoRemindersEnabled: !current.autoRemindersEnabled }))} className={`relative h-6 w-11 shrink-0 rounded-full transition ${settingsState.autoRemindersEnabled ? 'bg-blue-600' : 'bg-slate-300'}`}><span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition ${settingsState.autoRemindersEnabled ? 'left-[22px]' : 'left-0.5'}`} /></button>
+                </div>
+                <label className="mt-4 block text-sm font-medium text-slate-700">Reminder Frequency
+                  <select value={settingsState.reminderFrequency} onChange={(event) => setSettingsState((current) => ({ ...current, reminderFrequency: event.target.value }))} className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100">
+                    <option>Every 2 Days</option>
+                    <option>Every 3 Days</option>
+                    <option>48 Hours Before Deadline</option>
+                  </select>
+                </label>
+                <fieldset className="mt-4 space-y-3">
+                  <legend className="mb-2 text-sm font-semibold text-slate-800">Target Audience</legend>
+                  <label className="flex items-center gap-3 text-sm text-slate-700"><input type="checkbox" checked={settingsState.reminderAudience.pendingStudentEvaluators} onChange={(event) => setSettingsState((current) => ({ ...current, reminderAudience: { ...current.reminderAudience, pendingStudentEvaluators: event.target.checked } }))} className="h-4 w-4 accent-blue-600" />Pending Student Evaluators</label>
+                  <label className="flex items-center gap-3 text-sm text-slate-700"><input type="checkbox" checked={settingsState.reminderAudience.pendingPeerFacultyEvaluators} onChange={(event) => setSettingsState((current) => ({ ...current, reminderAudience: { ...current.reminderAudience, pendingPeerFacultyEvaluators: event.target.checked } }))} className="h-4 w-4 accent-blue-600" />Pending Peer/Faculty Evaluators</label>
+                </fieldset>
+              </section>
+
+              <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="mb-4">
+                  <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">Evaluation configuration</p>
+                  <h3 className="mt-1 text-lg font-semibold text-slate-900">Evaluation Weight Distribution</h3>
+                  <p className="mt-1 text-sm text-slate-500">Set the contribution of each evaluation source.</p>
+                </div>
+                <div className="grid gap-4 sm:grid-cols-3">
+                  {[['student', 'Student Evaluation Weight'], ['peer', 'Peer Evaluation Weight'], ['deptHead', 'Dept Head Evaluation Weight']].map(([key, label]) => (
+                    <label key={key} className="text-sm font-medium text-slate-700">{label}
+                      <div className="mt-2 flex items-center rounded-xl border border-slate-200 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-100">
+                        <input type="number" min="0" max="100" step="1" value={settingsState.evaluationWeights[key]} onChange={(event) => setSettingsState((current) => ({ ...current, evaluationWeights: { ...current.evaluationWeights, [key]: Number(event.target.value) } }))} className="w-full rounded-l-xl border-0 bg-white px-3 py-2.5 text-slate-800 focus:outline-none" aria-label={label} />
+                        <span className="px-3 text-slate-500">%</span>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+                {evaluationWeightsTotal !== 100
+                  ? <p role="status" className="mt-4 inline-flex rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-800">Weight total must equal 100% (currently {evaluationWeightsTotal}%).</p>
+                  : <p role="status" className="mt-4 inline-flex rounded-full border border-green-200 bg-green-50 px-3 py-1 text-xs font-semibold text-green-700">Weights total 100%.</p>}
+              </section>
+
+              <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="mb-4">
+                  <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">Privacy & protection</p>
+                  <h3 className="mt-1 text-lg font-semibold text-slate-900">Anonymity & Security Safeguards</h3>
+                  <p className="mt-1 text-sm text-slate-500">Protect student identities and close forms automatically.</p>
+                </div>
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-4 rounded-xl border border-slate-200 p-3">
+                    <span><span className="block text-sm font-semibold text-slate-800">Strict Student Anonymity Mode</span><span className="mt-1 block text-xs text-slate-500">Hide student names, IDs, and avatars in feedback reports.</span></span>
+                    <button type="button" role="switch" aria-checked={settingsState.strictStudentAnonymity} aria-label="Strict Student Anonymity Mode" onClick={() => setSettingsState((current) => ({ ...current, strictStudentAnonymity: !current.strictStudentAnonymity }))} className={`relative h-6 w-11 shrink-0 rounded-full transition ${settingsState.strictStudentAnonymity ? 'bg-blue-600' : 'bg-slate-300'}`}><span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition ${settingsState.strictStudentAnonymity ? 'left-[22px]' : 'left-0.5'}`} /></button>
+                  </div>
+                  <div className="flex items-center justify-between gap-4 rounded-xl border border-slate-200 p-3">
+                    <span><span className="block text-sm font-semibold text-slate-800">Auto-Lock Forms on Deadline</span><span className="mt-1 block text-xs text-slate-500">Freeze form submissions after the evaluation deadline.</span></span>
+                    <button type="button" role="switch" aria-checked={settingsState.autoLockFormsOnDeadline} aria-label="Auto-Lock Forms on Deadline" onClick={() => {
+                      const autoLock = !settingsState.autoLockFormsOnDeadline;
+                      setSettingsState((current) => ({ ...current, autoLockFormsOnDeadline: autoLock }));
+                      setDeadlineSettings((current) => ({ ...current, autoLock }));
+                    }} className={`relative h-6 w-11 shrink-0 rounded-full transition ${settingsState.autoLockFormsOnDeadline ? 'bg-blue-600' : 'bg-slate-300'}`}><span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition ${settingsState.autoLockFormsOnDeadline ? 'left-[22px]' : 'left-0.5'}`} /></button>
+                  </div>
+                </div>
+              </section>
+
+            </>}
+
+            {canUploadSignature && <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="mb-4">
+                <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">Official documents</p>
+                <h3 className="mt-1 text-lg font-semibold text-slate-900">Signature & Official Stamp</h3>
+                <p className="mt-1 text-sm text-slate-500">Optional PNG images appear on printed evaluation reports. Leave empty for manual signing and stamping.</p>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                {[
+                  ['departmentHeadSignature', 'Official Signature'],
+                  ['officialStamp', 'Official Stamp'],
+                ].map(([field, label]) => (
+                  <div key={field} className="rounded-xl border border-slate-200 p-3">
+                    <label className="block text-sm font-semibold text-slate-800">
+                      {label}
+                      <input type="file" accept="image/png,.png" onChange={(event) => {
+                        handleCertificateImageUpload(field, event.target.files?.[0]);
+                        event.target.value = '';
+                      }} className="mt-2 block w-full text-xs text-slate-600 file:mr-3 file:rounded-lg file:border-0 file:bg-blue-50 file:px-3 file:py-2 file:font-semibold file:text-blue-700 hover:file:bg-blue-100" />
+                    </label>
+                    {settingsState[field] ? <div className="mt-3 flex items-center justify-between gap-3">
+                      <img src={settingsState[field]} alt={`${label} preview`} className="h-16 max-w-32 object-contain" />
+                      <button type="button" onClick={() => {
+                        try {
+                          const savedSettings = JSON.parse(window.localStorage.getItem(settingsStorageKey) || '{}');
+                          delete savedSettings[field];
+                          window.localStorage.setItem(settingsStorageKey, JSON.stringify(savedSettings));
+                          setSettingsState((current) => ({ ...current, [field]: '' }));
+                          window.dispatchEvent(new Event('ipes:official-document-images-changed'));
+                        } catch (error) {
+                          console.error('Unable to remove official document image:', error);
+                          toast.error('Unable to remove the image.');
+                        }
+                      }} className="text-xs font-semibold text-red-600 hover:text-red-700">Remove</button>
+                    </div> : <p className="mt-2 text-xs text-slate-500">No image selected</p>}
+                    <p className="mt-2 text-xs text-slate-400">PNG only, up to 1 MB</p>
+                  </div>
+                ))}
+              </div>
+            </section>}
 
             <div className="rounded-xl border border-slate-200 p-3">
               <p className="font-medium text-slate-800">{t('header.language')}</p>
               <div className="mt-3 grid grid-cols-2 gap-2">
-                <button type="button" onClick={() => setSettingsState((current) => ({ ...current, language: 'en' }))} className={`rounded-xl border px-3 py-2 text-sm font-medium ${settingsState.language === 'en' ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-600'}`}>
+                <button type="button" onClick={() => setLanguage('en')} className={`rounded-xl px-3 py-2 text-sm font-medium ${language === 'en' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700'}`}>
                   {t('header.english')}
                 </button>
-                <button type="button" onClick={() => setSettingsState((current) => ({ ...current, language: 'am' }))} className={`rounded-xl border px-3 py-2 text-sm font-medium ${settingsState.language === 'am' ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-600'}`}>
+                <button type="button" onClick={() => setLanguage('am')} className={`rounded-xl px-3 py-2 text-sm font-medium ${language === 'am' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700'}`}>
                   {t('header.amharic')}
                 </button>
               </div>
@@ -406,7 +760,7 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
 
           <div className="mt-6 flex justify-end gap-3">
             <button type="button" onClick={() => setIsSettingsOpen(false)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-50">{t('header.close')}</button>
-            <button type="button" onClick={handleSettingsSave} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700">{t('header.saveSettings')}</button>
+            <button type="button" onClick={handleSettingsSave} disabled={deadlineSaving || evaluationWeightsTotal !== 100} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60">{deadlineSaving ? t('header.savingDeadline') : t('header.saveSettings')}</button>
           </div>
         </div>
       </div>

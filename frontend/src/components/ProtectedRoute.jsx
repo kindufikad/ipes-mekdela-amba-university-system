@@ -12,9 +12,27 @@ const ProtectedRoute = ({ children, allowedRoles = [] }) => {
       storedUser = {};
     }
   }
-  const normalizeRole = (value) => String(value || '').trim().toLowerCase();
+  const normalizeRole = (value) => {
+    const normalized = String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const aliases = {
+      admin: 'systemadmin',
+      departmenthead: 'depthead',
+      head: 'depthead',
+      teacher: 'instructor',
+    };
+    return aliases[normalized] || normalized;
+  };
   const normalizedRole = normalizeRole(user?.role || role || storedUser?.role);
   const normalizedAllowedRoles = allowedRoles.map(normalizeRole);
+  const collectRoles = (value) => (Array.isArray(value) ? value : [value])
+    .flatMap((entry) => String(entry || '').split(/[;,|]+/));
+  const normalizedRoles = new Set([
+    ...collectRoles(user?.roles),
+    ...collectRoles(user?.role),
+    ...collectRoles(role),
+    ...collectRoles(storedUser?.roles),
+    ...collectRoles(storedUser?.role),
+  ].map(normalizeRole).filter(Boolean));
 
   if (isAuthLoading) {
     return <div className="flex min-h-screen items-center justify-center bg-slate-50 text-sm text-slate-500">Loading your dashboard...</div>;
@@ -24,7 +42,7 @@ const ProtectedRoute = ({ children, allowedRoles = [] }) => {
     return <Navigate to="/login" replace state={{ from: location }} />;
   }
 
-  if (normalizedAllowedRoles.length && !normalizedAllowedRoles.includes(normalizedRole)) {
+  if (normalizedAllowedRoles.length && !normalizedAllowedRoles.some((allowedRole) => normalizedRoles.has(allowedRole))) {
     return <Navigate to="/unauthorized" replace state={{ from: location }} />;
   }
 

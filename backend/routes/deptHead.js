@@ -4,7 +4,7 @@ const { authenticateToken, authorizeRoles } = require('../middleware/auth');
 const { createNotifications } = require('../controllers/notificationController');
 const { getDeptHeadEvaluationTracking, getDeptHeadPendingEvaluators, sendDeptHeadEvaluationReminder } = require('../controllers/trackingController');
 const { getInstructorOverallPerformance, calculateWeightedPerformance } = require('../services/evaluationMetrics');
-const { calculateAndSaveInstructorResult } = require('../utils/evaluationCalculator');
+const { calculateAndSaveInstructorResult, getInstructorRoleStatus } = require('../utils/evaluationCalculator');
 const { computeEvaluation } = require('../utils/calculateEvaluationScores');
 const { getDeptHeadAiInsights } = require('../controllers/aiInsightsController');
 
@@ -51,16 +51,14 @@ router.get('/evaluation-breakdown/:instructorId', authenticateToken, authorizeRo
       LEFT JOIN evaluation_dispatches ed
         ON ed.assignment_id = ca.id
        AND ed.student_id = s.id
-       AND ed.department_id = ca.department_id
        AND LOWER(COALESCE(ed.evaluation_type, 'student')) = 'student'
       LEFT JOIN courses c ON c.id = ca.course_id
       LEFT JOIN instructors target_i ON target_i.id = ca.instructor_id
-      WHERE ca.department_id = ?
-        AND ca.instructor_id = ?
+      WHERE ca.instructor_id = ?
         AND ca.student_id IS NOT NULL
         AND LOWER(COALESCE(ca.status, 'assigned')) <> 'cancelled'
       ORDER BY student_name ASC, c.code ASC
-    `, [departmentId, instructorId]);
+    `, [instructorId]);
 
     const [peerRows] = await pool.query(`
       SELECT DISTINCT
@@ -273,24 +271,19 @@ router.get('/evaluation-deadline', authenticateToken, authorizeRoles('dept_head'
   const departmentId = getDepartmentId(req);
   if (!departmentId) return res.status(403).json({ message: 'Your department is not defined.' });
   try {
-    await pool.query(`CREATE TABLE IF NOT EXISTS evaluation_periods (
-      id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      academic_year VARCHAR(64) NOT NULL,
-      semester VARCHAR(64) NOT NULL,
-      deadline DATETIME NULL,
-      status VARCHAR(32) NOT NULL DEFAULT 'active',
-      updated_by INT UNSIGNED NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uk_evaluation_period_term (academic_year, semester),
-      INDEX idx_evaluation_period_status (status, deadline)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
-    const [[period]] = await pool.query('SELECT deadline FROM evaluation_periods WHERE status = \'active\' ORDER BY id DESC LIMIT 1');
     await pool.query(`CREATE TABLE IF NOT EXISTS evaluation_deadline_settings (department_id INT UNSIGNED PRIMARY KEY, deadline_at DATETIME NULL, auto_lock TINYINT(1) NOT NULL DEFAULT 1, updated_by INT UNSIGNED NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)`);
     const [[settings]] = await pool.query('SELECT department_id, deadline_at, auto_lock, updated_at FROM evaluation_deadline_settings WHERE department_id = ?', [departmentId]);
+    let dispatch = null;
+    if (!settings?.deadline_at) {
+      [[dispatch]] = await pool.query(`
+      SELECT deadline FROM evaluation_dispatches
+      WHERE department_id = ? AND deadline IS NOT NULL
+        AND LOWER(COALESCE(status, 'pending')) IN ('pending', 'active', 'published')
+      ORDER BY id DESC LIMIT 1`, [departmentId]);
+    }
     return res.json({
-      deadlineAt: period?.deadline || settings?.deadline_at || null,
-      autoLock: settings ? settings.auto_lock !== 0 : period?.deadline ? new Date(period.deadline).getTime() > Date.now() : true,
+      deadlineAt: settings?.deadline_at || dispatch?.deadline || null,
+      autoLock: settings ? settings.auto_lock !== 0 : true,
       updatedAt: settings?.updated_at || null,
     });
   } catch (error) {
@@ -302,8 +295,6 @@ router.get('/evaluation-deadline', authenticateToken, authorizeRoles('dept_head'
 router.put('/evaluation-deadline', authenticateToken, authorizeRoles('dept_head'), async (req, res) => {
   const departmentId = getDepartmentId(req);
   const deadlineAt = req.body?.deadlineAt || req.body?.deadline_at || null;
-  const academicYear = String(req.body?.academic_year || new Date().getFullYear()).trim();
-  const semester = String(req.body?.semester || 'Semester I').trim();
   const autoLock = req.body?.autoLock !== false;
   if (!departmentId) return res.status(403).json({ message: 'Your department is not defined.' });
   if (deadlineAt) {
@@ -314,27 +305,6 @@ router.put('/evaluation-deadline', authenticateToken, authorizeRoles('dept_head'
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
-    await connection.query(`CREATE TABLE IF NOT EXISTS evaluation_periods (
-      id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-      academic_year VARCHAR(64) NOT NULL,
-      semester VARCHAR(64) NOT NULL,
-      deadline DATETIME NULL,
-      status VARCHAR(32) NOT NULL DEFAULT 'active',
-      updated_by INT UNSIGNED NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY uk_evaluation_period_term (academic_year, semester),
-      INDEX idx_evaluation_period_status (status, deadline)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
-    if (deadlineAt) {
-      await connection.query(
-        `INSERT INTO evaluation_periods (academic_year, semester, deadline, status, updated_by)
-         VALUES (?, ?, ?, 'active', ?)
-         ON DUPLICATE KEY UPDATE deadline = VALUES(deadline), status = 'active', updated_by = VALUES(updated_by)`,
-        [academicYear, semester, new Date(deadlineAt), req.user.id]
-      );
-      await connection.query('UPDATE evaluation_periods SET deadline = ? WHERE status = \'active\'', [new Date(deadlineAt)]);
-    }
     await connection.query(`CREATE TABLE IF NOT EXISTS evaluation_deadline_settings (department_id INT UNSIGNED PRIMARY KEY, deadline_at DATETIME NULL, auto_lock TINYINT(1) NOT NULL DEFAULT 1, updated_by INT UNSIGNED NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)`);
     await connection.query(`CREATE TABLE IF NOT EXISTS evaluation_deadline_history (id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY, department_id INT UNSIGNED NOT NULL, deadline_at DATETIME NULL, auto_lock TINYINT(1) NOT NULL DEFAULT 1, changed_by INT UNSIGNED NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
     await connection.query(`INSERT INTO evaluation_deadline_settings (department_id, deadline_at, auto_lock, updated_by) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE deadline_at = VALUES(deadline_at), auto_lock = VALUES(auto_lock), updated_by = VALUES(updated_by)`, [departmentId, deadlineAt ? new Date(deadlineAt) : null, autoLock ? 1 : 0, req.user.id]);
@@ -706,23 +676,30 @@ router.get('/evaluation-tracking', authenticateToken, authorizeRoles('dept_head'
   const evaluateeId = Number(req.query.evaluatee_id ?? req.query.instructor_id ?? req.query.target_id ?? req.query.target_instructor_id ?? 0);
   const requestedRole = String(req.query.target_role || req.query.role || '').trim().toLowerCase();
   const targetRole = ['instructor', 'lab_assistant'].includes(requestedRole) ? requestedRole : null;
-  const academicYear = String(req.query.academic_year || '').trim();
-  const semester = String(req.query.semester || '').trim();
+  const [[activePeriod]] = await pool.query(
+    `SELECT academic_year, semester FROM evaluation_periods
+     WHERE LOWER(status) = 'active' ORDER BY id DESC LIMIT 1`
+  );
+  const academicYear = String(req.query.academic_year || activePeriod?.academic_year || '').trim();
+  const semester = String(req.query.semester || activePeriod?.semester || '').trim();
 
   const buildSummary = async (role, id) => {
     const toNumber = (value) => Number(value || 0);
     if (role === 'instructor') {
       const [[studentSummary]] = await pool.query(`
-        SELECT AVG(ses.score) AS student_average,
+         SELECT AVG(CASE WHEN ses.id IS NOT NULL AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved', 'published') THEN ses.score END) AS student_average,
                COUNT(DISTINCT ed.id) AS total_evaluations,
-               SUM(CASE WHEN LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved') THEN 1 ELSE 0 END) AS completed_evaluations
+           COUNT(DISTINCT CASE WHEN ses.id IS NOT NULL AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved', 'published') THEN ed.id END) AS completed_evaluations,
+               COUNT(DISTINCT ses.id) AS submission_count
         FROM course_assignments ca
         LEFT JOIN evaluation_dispatches ed ON ed.assignment_id = ca.id
         LEFT JOIN student_evaluation_submissions ses ON ses.dispatch_id = ed.id
-        WHERE ca.department_id = ? AND ca.instructor_id = ?
-          AND (? = '' OR ed.academic_year = ?)
-          AND (? = '' OR ed.semester = ?)
-      `, [departmentId, id, academicYear, academicYear, semester, semester]);
+        WHERE ca.instructor_id = ?
+          AND LOWER(COALESCE(ed.target_type, 'instructor')) = 'instructor'
+          AND (? = '' OR LOWER(COALESCE(NULLIF(TRIM(ed.academic_year), ''), NULLIF(TRIM(ca.academic_year), ''), '')) = LOWER(?)
+            OR LOWER(COALESCE(NULLIF(TRIM(ed.academic_year), ''), NULLIF(TRIM(ca.academic_year), ''), '')) = LOWER(SUBSTRING_INDEX(?, '/', 1)))
+          AND (? = '' OR LOWER(REPLACE(COALESCE(NULLIF(TRIM(ed.semester), ''), NULLIF(TRIM(ca.semester), ''), ''), 'semester', '')) = LOWER(REPLACE(?, 'semester', '')))
+      `, [id, academicYear, academicYear, academicYear, semester, semester]);
       const [[peerSummary]] = await pool.query(`
         SELECT AVG(pes.score) AS peer_average,
                COUNT(DISTINCT pe.id) AS total_evaluations,
@@ -742,16 +719,24 @@ router.get('/evaluation-tracking', authenticateToken, authorizeRoles('dept_head'
       const studentAverage = toNumber(studentSummary?.student_average);
       const peerAverage = toNumber(peerSummary?.peer_average);
       const deptHeadAverage = toNumber(deptHeadSummary?.dept_head_average);
+      const assignmentStatus = await getInstructorRoleStatus(id, academicYear, semester);
+      const hasAssignedCourse = assignmentStatus.isTeaching;
       const totalEvaluations = toNumber(studentSummary?.total_evaluations) + toNumber(peerSummary?.total_evaluations) + toNumber(deptHeadSummary?.total_evaluations);
       const completedEvaluations = toNumber(studentSummary?.completed_evaluations) + toNumber(peerSummary?.completed_evaluations) + toNumber(deptHeadSummary?.completed_evaluations);
       const normalizedPeer = peerAverage <= 30 ? (peerAverage / 30) * 100 : peerAverage;
       const normalizedDeptHead = deptHeadAverage <= 30 ? (deptHeadAverage / 30) * 100 : deptHeadAverage;
-      const finalScore = Number((studentAverage * 0.5 + normalizedDeptHead * 0.3 + normalizedPeer * 0.2).toFixed(2));
+      const weighted = calculateWeightedPerformance({ student: studentAverage, deptHead: normalizedDeptHead, peer: normalizedPeer, hasAssignedCourse });
+      const finalScore = weighted.totalWeightedScore;
 
       return {
         evaluatee_id: id,
         target_role: 'instructor',
         student_average: Number(studentAverage.toFixed(2)),
+        raw_student_score: Number(studentAverage.toFixed(2)),
+        submission_count: toNumber(studentSummary?.submission_count),
+        student_weighted: weighted.studentWeighted,
+        hasAssignedCourse,
+        has_assigned_course: hasAssignedCourse,
         peer_average: Number(normalizedPeer.toFixed(2)),
         dept_head_average: Number(normalizedDeptHead.toFixed(2)),
         final_score: finalScore,
@@ -877,26 +862,41 @@ router.get('/evaluation-tracking-results', authenticateToken, authorizeRoles('de
   const yearLevel = String(req.query.year_level || '').trim();
   const section = String(req.query.section || '').trim();
   const programType = String(req.query.program_type || '').trim();
-  const studentFilters = [];
-  const studentParams = [departmentId];
-  if (yearLevel && !/^all/i.test(yearLevel)) { studentFilters.push('LOWER(TRIM(s.year_level)) = LOWER(TRIM(?))'); studentParams.push(yearLevel.replace(/^\d+(st|nd|rd|th) Year \(/i, '').replace(/\)$/, '').trim()); }
-  if (section && !/^all/i.test(section)) { studentFilters.push('LOWER(TRIM(REPLACE(s.section, \'Section \', \'\'))) = LOWER(TRIM(REPLACE(?, \'Section \', \'\')))'); studentParams.push(section); }
-  if (programType && !/^all/i.test(programType)) { studentFilters.push('LOWER(TRIM(s.program_type)) = LOWER(TRIM(?))'); studentParams.push(programType); }
-  const studentFilterSql = studentFilters.length ? ` AND ${studentFilters.join(' AND ')}` : '';
-  const params = [...studentParams, departmentId, Number.isInteger(instructorId) && instructorId > 0 ? instructorId : null, departmentId, req.user.id, departmentId];
   try {
+    const [[activePeriod]] = await pool.query(
+      `SELECT academic_year, semester FROM evaluation_periods
+       WHERE LOWER(status) = 'active' ORDER BY id DESC LIMIT 1`
+    );
+    const academicYear = String(req.query.academic_year || activePeriod?.academic_year || '').trim();
+    const semester = String(req.query.semester || activePeriod?.semester || '').trim();
+    const studentFilters = [];
+    const studentParams = [];
+    if (yearLevel && !/^all/i.test(yearLevel)) { studentFilters.push('LOWER(TRIM(s.year_level)) = LOWER(TRIM(?))'); studentParams.push(yearLevel.replace(/^\d+(st|nd|rd|th) Year \(/i, '').replace(/\)$/, '').trim()); }
+    if (section && !/^all/i.test(section)) { studentFilters.push('LOWER(TRIM(REPLACE(s.section, \'Section \', \'\'))) = LOWER(TRIM(REPLACE(?, \'Section \', \'\')))'); studentParams.push(section); }
+    if (programType && !/^all/i.test(programType)) { studentFilters.push('LOWER(TRIM(s.program_type)) = LOWER(TRIM(?))'); studentParams.push(programType); }
+    const studentFilterSql = studentFilters.length ? ` AND ${studentFilters.join(' AND ')}` : '';
+    const instructorFilterId = Number.isInteger(instructorId) && instructorId > 0 ? instructorId : null;
     const [rows] = await pool.query(`
       SELECT i.id AS instructor_id, TRIM(CONCAT(i.first_name, ' ', i.last_name)) AS instructor_name,
         COALESCE(st.student_average, 0) AS student_average, COALESCE(pe.peer_average, 0) AS peer_average, COALESCE(dh.dept_head_average, 0) AS dept_head_average,
+        COALESCE(st.submission_count, 0) AS submission_count,
         COALESCE(st.student_total, 0) + COALESCE(pe.peer_total, 0) + COALESCE(dh.dept_head_total, 0) AS total_evaluations,
         COALESCE(st.student_completed, 0) + COALESCE(pe.peer_completed, 0) + COALESCE(dh.dept_head_completed, 0) AS completed_evaluations
       FROM instructors i INNER JOIN users u ON u.id = i.user_id
       LEFT JOIN (
-        SELECT ca.instructor_id, AVG(ses.score) AS student_average, COUNT(DISTINCT ed.id) AS student_total,
+        SELECT ca.instructor_id, AVG(ses.score) AS student_average, COUNT(DISTINCT ses.id) AS submission_count, COUNT(DISTINCT ed.id) AS student_total,
           COUNT(DISTINCT CASE WHEN LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved') THEN ed.id END) AS student_completed
         FROM evaluation_dispatches ed INNER JOIN course_assignments ca ON ca.id = ed.assignment_id
         INNER JOIN students s ON s.id = ed.student_id INNER JOIN student_evaluation_submissions ses ON ses.dispatch_id = ed.id
-        WHERE ed.department_id = ?${studentFilterSql} GROUP BY ca.instructor_id
+        WHERE LOWER(COALESCE(ed.evaluation_type, 'student')) = 'student'
+          AND LOWER(COALESCE(ed.target_type, 'instructor')) = 'instructor'${studentFilterSql}
+          AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved')
+          AND (? = '' OR COALESCE(NULLIF(TRIM(ed.academic_year), ''), NULLIF(TRIM(ca.academic_year), '')) IS NULL
+            OR LOWER(COALESCE(NULLIF(TRIM(ed.academic_year), ''), NULLIF(TRIM(ca.academic_year), ''))) = LOWER(?)
+            OR LOWER(COALESCE(NULLIF(TRIM(ed.academic_year), ''), NULLIF(TRIM(ca.academic_year), ''))) = LOWER(SUBSTRING_INDEX(?, '/', 1)))
+          AND (? = '' OR COALESCE(NULLIF(TRIM(ed.semester), ''), NULLIF(TRIM(ca.semester), '')) IS NULL
+            OR LOWER(REPLACE(COALESCE(NULLIF(TRIM(ed.semester), ''), NULLIF(TRIM(ca.semester), '')), 'semester', '')) = LOWER(REPLACE(?, 'semester', '')))
+        GROUP BY ca.instructor_id
       ) st ON st.instructor_id = i.id
       LEFT JOIN (
         SELECT pe.evaluatee_id, AVG(pes.score) AS peer_average, COUNT(DISTINCT pe.id) AS peer_total,
@@ -913,7 +913,23 @@ router.get('/evaluation-tracking-results', authenticateToken, authorizeRoles('de
       WHERE i.department_id = ? AND LOWER(COALESCE(u.status, 'active')) = 'active' AND LOWER(u.role) = 'instructor'
         AND (? IS NULL OR i.id = ?)
       ORDER BY instructor_name ASC
-    `, [...params.slice(0, studentParams.length), departmentId, req.user.id, departmentId, Number.isInteger(instructorId) && instructorId > 0 ? instructorId : null, Number.isInteger(instructorId) && instructorId > 0 ? instructorId : null]);
+    `, [...studentParams, academicYear, academicYear, academicYear, semester, semester, departmentId, req.user.id, departmentId, instructorFilterId, instructorFilterId]);
+    const instructorIds = rows.map((row) => Number(row.instructor_id)).filter((id) => Number.isInteger(id) && id > 0);
+    const assignmentCounts = new Map();
+    if (instructorIds.length) {
+      const placeholders = instructorIds.map(() => '?').join(', ');
+      const [assignmentRows] = await pool.query(
+        `SELECT instructor_id, COUNT(*) AS assignment_count
+         FROM course_assignments
+         WHERE instructor_id IN (${placeholders})
+           AND LOWER(COALESCE(status, 'assigned')) NOT IN ('cancelled', 'inactive', 'unassigned')
+           AND (? = '' OR academic_year IS NULL OR LOWER(TRIM(academic_year)) = LOWER(?) OR LOWER(TRIM(academic_year)) = LOWER(SUBSTRING_INDEX(?, '/', 1)))
+           AND (? = '' OR semester IS NULL OR LOWER(REPLACE(TRIM(semester), 'semester', '')) = LOWER(REPLACE(TRIM(?), 'semester', '')))
+         GROUP BY instructor_id`,
+        [...instructorIds, academicYear, academicYear, academicYear, semester, semester]
+      );
+      assignmentRows.forEach((row) => assignmentCounts.set(Number(row.instructor_id), Number(row.assignment_count || 0)));
+    }
     return res.json(rows.map((row) => {
       const student = Number(row.student_average || 0);
       const peer = Number(row.peer_average || 0);
@@ -922,8 +938,10 @@ router.get('/evaluation-tracking-results', authenticateToken, authorizeRoles('de
       const normalizedDeptHead = deptHead <= 30 ? (deptHead / 30) * 100 : deptHead;
       const total = Number(row.total_evaluations || 0);
       const completed = Number(row.completed_evaluations || 0);
-      const weighted = calculateWeightedPerformance({ student, peer: normalizedPeer, deptHead: normalizedDeptHead });
-      return { ...row, student_average: Number(student.toFixed(2)), peer_average: Number(normalizedPeer.toFixed(2)), dept_head_average: Number(normalizedDeptHead.toFixed(2)), final_score: weighted.totalScore, total_evaluations: total, completed_evaluations: completed, completion_rate: total ? Number((completed / total * 100).toFixed(2)) : 0, status: total > 0 && completed === total ? 'Completed' : 'Pending' };
+      const assignmentCount = assignmentCounts.get(Number(row.instructor_id)) || 0;
+      const hasAssignedCourse = assignmentCount > 0;
+      const weighted = calculateWeightedPerformance({ student, peer: normalizedPeer, deptHead: normalizedDeptHead, hasAssignedCourse });
+      return { ...row, student_average: Number(student.toFixed(2)), raw_student_score: Number(student.toFixed(2)), submission_count: Number(row.submission_count || 0), student_weighted: weighted.studentWeighted, hasAssignedCourse, has_assigned_course: hasAssignedCourse, peer_average: Number(normalizedPeer.toFixed(2)), dept_head_average: Number(normalizedDeptHead.toFixed(2)), final_score: weighted.totalWeightedScore, total_evaluations: total, completed_evaluations: completed, completion_rate: total ? Number((completed / total * 100).toFixed(2)) : 0, status: total > 0 && completed === total ? 'Completed' : 'Pending' };
     }));
   } catch (error) {
     console.error('Department evaluation tracking query failed:', error);
@@ -933,8 +951,8 @@ router.get('/evaluation-tracking-results', authenticateToken, authorizeRoles('de
 
 router.get('/department-summary', authenticateToken, authorizeRoles('dept_head', 'college_dean', 'dean'), async (req, res) => {
   const departmentId = getDepartmentId(req);
-  const academicYear = String(req.query.academic_year || '').trim();
-  const semester = String(req.query.semester || '').trim();
+  let academicYear = String(req.query.academic_year || '').trim();
+  let semester = String(req.query.semester || '').trim();
   if (!departmentId) return res.status(403).json({ message: 'Your department is not defined.' });
 
   try {
@@ -1065,13 +1083,19 @@ const calculateProportionalScore = ({ student, peer, deptHead }) => {
 
 router.get(['/reports', '/department-report'], authenticateToken, authorizeRoles('dept_head', 'admin', 'college_dean'), async (req, res) => {
   const departmentId = Number(req.user?.department_id || req.query.department_id);
-  const academicYear = String(req.query.academic_year || '').trim();
-  const semester = String(req.query.semester || '').trim();
+  let academicYear = String(req.query.academic_year || '').trim();
+  let semester = String(req.query.semester || '').trim();
   if (!Number.isInteger(departmentId) || departmentId <= 0) {
     return res.status(403).json({ message: 'Your department is not defined. Contact an administrator.' });
   }
 
   try {
+    const [[activePeriod]] = await pool.query(
+      `SELECT academic_year, semester FROM evaluation_periods
+       WHERE LOWER(status) = 'active' ORDER BY id DESC LIMIT 1`
+    );
+    academicYear = academicYear || String(activePeriod?.academic_year || '').trim();
+    semester = semester || String(activePeriod?.semester || '').trim();
     const [instructors] = await pool.query(`
       SELECT i.id, i.user_id,
         TRIM(CONCAT(COALESCE(i.first_name, ''), ' ', COALESCE(i.last_name, ''))) AS name,
@@ -1148,6 +1172,7 @@ router.get(['/reports', '/department-report'], authenticateToken, authorizeRoles
           peer: { rawPercentage: Number(peerRaw.toFixed(2)), weight: hasCourseAssigned ? 20 : 40, weightedContribution: peerWeighted },
         },
         hasCourseAssigned,
+        hasAssignedCourses: hasCourseAssigned,
         has_course_assigned: hasCourseAssigned,
         total_students_evaluated_count: Number(metrics.student?.count || 0),
         total_peers_evaluated_count: Number(metrics.peer?.count || 0),

@@ -6,6 +6,7 @@ import AIInsightsWidget from './ai/AIInsightsWidget';
 import { evaluationApi } from '../services/api';
 import { validateEvaluationFeedbackPair, VALIDATION_MESSAGE } from '../utils/validationUtility';
 import { deadlineToneClasses, getDeadlineState } from '../utils/evaluationDeadline';
+import { calculateLikertPercentage, hasLikertResponse } from '../utils/likertScoring';
 
 const analyzeFeedback = (strengths, improvements) => {
   const feedback = `${strengths} ${improvements}`.trim();
@@ -100,11 +101,7 @@ export default function StudentEvaluationModal({
   const deadlineLocked = deadlineState.expired && !isReadOnly;
   const feedbackValidation = useMemo(() => validateEvaluationFeedbackPair(strengths, improvements), [strengths, improvements]);
   const feedbackAnalysis = useMemo(() => analyzeFeedback(strengths, improvements), [strengths, improvements]);
-  const totalItems = useMemo(() => sections.reduce((sum, section) => sum + (section.items?.length || 0), 0), [sections]);
-  const totalScore = useMemo(() => {
-    const sum = Object.values(responses).reduce((acc, value) => acc + Number(value || 0), 0);
-    return totalItems ? (sum / totalItems) * 20 : 0;
-  }, [responses, totalItems]);
+  const totalScore = useMemo(() => calculateLikertPercentage(responses), [responses]);
   let globalQuestionNumber = 1;
 
   const setAnswer = (id, value) => setResponses((prev) => ({ ...prev, [id]: value }));
@@ -131,7 +128,7 @@ export default function StudentEvaluationModal({
 
     // Validate that all criteria have been answered
     const allItemIds = sections.reduce((acc, section) => acc.concat((section.items || []).map(item => item.id)), []);
-    const unansweredItems = allItemIds.filter(id => !responses[id]);
+    const unansweredItems = allItemIds.filter((id) => !hasLikertResponse(responses[id]));
     
     if (unansweredItems.length > 0) {
       setSubmitError(`Please answer all criteria questions before submitting. ${unansweredItems.length} question(s) remaining.`);
@@ -185,7 +182,7 @@ export default function StudentEvaluationModal({
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-sm font-semibold text-gray-800">Scale</p>
-                <p className="text-sm text-gray-600">1 = Very Low, 2 = Low, 3 = Average, 4 = High, 5 = Very High</p>
+                <p className="text-sm text-gray-600">1 = Very Low, 2 = Low, 3 = Average, 4 = High, 5 = Very High, N/A = Not Applicable</p>
               </div>
               {mode === 'view' && !isEditMode && (
                 <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-gray-700">View Mode</span>
@@ -226,18 +223,23 @@ export default function StudentEvaluationModal({
                         </p>
 
                         <div className="flex items-center gap-2 shrink-0">
-                          {[1, 2, 3, 4, 5].map((value) => {
+                          {[1, 2, 3, 4, 5, 'N/A'].map((value) => {
                             const selected = responses[item.id] === value;
+                            const isNotApplicableOption = value === 'N/A';
                             return (
                               <button
                                 key={value}
                                 type="button"
                                 onClick={() => !isReadOnly && setAnswer(item.id, value)}
                                 disabled={isReadOnly || deadlineLocked}
-                                className={`flex h-9 w-9 items-center justify-center rounded-full text-sm font-semibold transition-all duration-150 ${
+                                className={`flex h-9 items-center justify-center rounded-full px-2 text-sm font-semibold transition-all duration-150 ${
                                   selected
-                                    ? 'scale-105 bg-blue-600 text-white shadow-md shadow-blue-200 ring-2 ring-blue-300'
-                                    : 'border border-gray-200 bg-white text-gray-600 hover:border-blue-400 hover:text-blue-600'
+                                    ? isNotApplicableOption
+                                      ? 'scale-105 bg-slate-700 text-white shadow-md shadow-slate-200 ring-2 ring-slate-400'
+                                      : 'scale-105 bg-blue-600 text-white shadow-md shadow-blue-200 ring-2 ring-blue-300'
+                                    : isNotApplicableOption
+                                      ? 'border border-slate-300 bg-slate-100 text-slate-600 hover:border-slate-500 hover:text-slate-800'
+                                      : 'w-9 border border-gray-200 bg-white text-gray-600 hover:border-blue-400 hover:text-blue-600'
                                 } ${isReadOnly ? 'cursor-default' : 'cursor-pointer'}`}
                               >
                                 {value}

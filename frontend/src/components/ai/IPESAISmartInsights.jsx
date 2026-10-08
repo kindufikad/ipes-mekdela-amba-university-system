@@ -8,6 +8,13 @@ import AIInsightsWidget from './AIInsightsWidget';
 
 const normalizeRole = (role) => String(role || '').trim().toUpperCase().replace(/[\s-]+/g, '_');
 const csvCell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+const normalizeInsightData = (result = {}) => ({
+  ...result,
+  summary: Array.isArray(result.aiObservations) ? result.aiObservations : (result.summary || []),
+  recommendations: Array.isArray(result.recommendedActions) ? result.recommendedActions : (result.recommendations || []),
+  topFeedbackKeywords: Array.isArray(result.topKeywords) ? result.topKeywords : (result.topFeedbackKeywords || []),
+  totalSubmitted: result.completedCount ?? result.totalSubmitted ?? 0,
+});
 
 const createSummaryCsv = (data, role) => {
   const rows = [
@@ -37,8 +44,10 @@ const IPESAISmartInsights = ({
   const { user } = useAuth();
   const { refreshVersion } = useEvaluation();
   const normalizedRole = normalizeRole(role || user?.role);
-  const [data, setData] = useState({});
+  const [insightsData, setInsightsData] = useState({});
   const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [retryCount, setRetryCount] = useState(0);
   const [anomaliesOpen, setAnomaliesOpen] = useState(false);
 
   useEffect(() => {
@@ -48,25 +57,30 @@ const IPESAISmartInsights = ({
     if (userId || user?.id) params.userId = userId || user.id;
 
     setIsLoading(true);
-    aiApi.getSummary(normalizedRole, params)
+    setError('');
+    const insightsRequest = normalizedRole === 'INSTRUCTOR'
+      ? aiApi.getInstructorAiInsights()
+      : aiApi.getSummary(normalizedRole, params);
+    insightsRequest
       .then((result) => {
         if (!active) return;
-        const nextData = result && typeof result === 'object' ? result : {};
-        setData(nextData);
+        const nextData = normalizeInsightData(result && typeof result === 'object' ? result : {});
+        setInsightsData(nextData);
         onDataChange?.(nextData);
       })
       .catch((error) => {
         if (!active) return;
-        const fallback = { summary: [error?.message || 'Insights are temporarily unavailable.'], recommendations: [] };
-        setData(fallback);
-        onDataChange?.(fallback);
+        const message = error?.message || 'Insights are temporarily unavailable.';
+        setError(message);
+        setInsightsData({});
+        onDataChange?.({});
       })
       .finally(() => {
         if (active) setIsLoading(false);
       });
 
     return () => { active = false; };
-  }, [departmentId, normalizedRole, onDataChange, refreshVersion, user?.id, userId]);
+  }, [departmentId, normalizedRole, onDataChange, refreshVersion, retryCount, user?.id, userId]);
 
   const scrollToPending = () => {
     const pendingTarget = document.querySelector('[data-pending-evaluations], #pending-evaluations, #my-evaluations, #evaluation-tracking');
@@ -74,7 +88,7 @@ const IPESAISmartInsights = ({
   };
 
   const exportSummary = () => {
-    const file = new Blob([createSummaryCsv(data, normalizedRole)], { type: 'text/csv;charset=utf-8;' });
+    const file = new Blob([createSummaryCsv(insightsData, normalizedRole)], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(file);
     const link = document.createElement('a');
     link.href = url;
@@ -106,9 +120,9 @@ const IPESAISmartInsights = ({
       try {
         const result = await notificationApi.sendReminders();
         toast.success(`Reminders sent to ${Number(result?.sent || 0)} evaluators; ${Number(result?.telegramSent || 0)} via Telegram.`);
-        const nextData = await aiApi.getSummary(normalizedRole, { departmentId });
-        setData(nextData || {});
-        onDataChange?.(nextData || {});
+        const nextData = normalizeInsightData(await aiApi.getSummary(normalizedRole, { departmentId }));
+        setInsightsData(nextData);
+        onDataChange?.(nextData);
       } catch (error) {
         toast.error(error?.message || 'Unable to send evaluation reminders.');
       }
@@ -125,20 +139,29 @@ const IPESAISmartInsights = ({
   };
 
   return <>
-    <AIInsightsWidget
-      role={normalizedRole}
-      data={data}
-      isLoading={isLoading}
-      isEnabled
-      onActionClick={handleAction}
-    />
+    {error ? (
+      <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800" role="alert">
+        <span>{error}</span>
+        <button type="button" onClick={() => setRetryCount((count) => count + 1)} className="ml-3 font-semibold underline underline-offset-2">Retry</button>
+      </div>
+    ) : (
+      <AIInsightsWidget
+        role={normalizedRole}
+        data={insightsData}
+        isLoading={isLoading}
+        isEnabled
+        isRefreshing={isLoading}
+        onRefresh={() => setRetryCount((count) => count + 1)}
+        onActionClick={handleAction}
+      />
+    )}
     {anomaliesOpen && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/60 p-4" role="dialog" aria-modal="true" aria-labelledby="ipes-ai-anomalies-title">
       <section className="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-xl bg-white p-5 shadow-2xl">
         <header className="flex items-start justify-between gap-4 border-b border-slate-200 pb-4">
           <div><p className="text-xs font-semibold uppercase tracking-wider text-rose-700">Evaluation anomaly review</p><h2 id="ipes-ai-anomalies-title" className="mt-1 text-xl font-bold text-slate-900">Uniform score clusters</h2></div>
           <button type="button" onClick={() => setAnomaliesOpen(false)} aria-label="Close anomaly review" className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"><X size={18} /></button>
         </header>
-        {!data.anomalies?.length ? <p className="py-8 text-sm text-slate-600">No uniform score clusters were detected in the current data.</p> : <div className="mt-4 overflow-x-auto"><table className="min-w-full text-left text-sm"><thead className="bg-slate-50 text-xs uppercase text-slate-500"><tr><th className="px-3 py-2">Course</th><th className="px-3 py-2">Instructor</th><th className="px-3 py-2">Responses</th><th className="px-3 py-2">Score</th><th className="px-3 py-2">Finding</th></tr></thead><tbody className="divide-y divide-slate-100">{data.anomalies.map((anomaly, index) => <tr key={`${anomaly.assignmentId || anomaly.dispatchId || index}`}><td className="px-3 py-3">{anomaly.courseName || 'Assigned course'}</td><td className="px-3 py-3">{anomaly.instructorName || 'Instructor'}</td><td className="px-3 py-3">{Number(anomaly.responseCount || 0)}</td><td className="px-3 py-3">{Number(anomaly.score || 0).toFixed(1)}%</td><td className="px-3 py-3">{anomaly.reason || 'Uniform submitted scores'}</td></tr>)}</tbody></table></div>}
+        {!insightsData.anomalies?.length ? <p className="py-8 text-sm text-slate-600">No uniform score clusters were detected in the current data.</p> : <div className="mt-4 overflow-x-auto"><table className="min-w-full text-left text-sm"><thead className="bg-slate-50 text-xs uppercase text-slate-500"><tr><th className="px-3 py-2">Course</th><th className="px-3 py-2">Instructor</th><th className="px-3 py-2">Responses</th><th className="px-3 py-2">Score</th><th className="px-3 py-2">Finding</th></tr></thead><tbody className="divide-y divide-slate-100">{insightsData.anomalies.map((anomaly, index) => <tr key={`${anomaly.assignmentId || anomaly.dispatchId || index}`}><td className="px-3 py-3">{anomaly.courseName || 'Assigned course'}</td><td className="px-3 py-3">{anomaly.instructorName || 'Instructor'}</td><td className="px-3 py-3">{Number(anomaly.responseCount || 0)}</td><td className="px-3 py-3">{Number(anomaly.score || 0).toFixed(1)}%</td><td className="px-3 py-3">{anomaly.reason || 'Uniform submitted scores'}</td></tr>)}</tbody></table></div>}
       </section>
     </div>}
   </>;

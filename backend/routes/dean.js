@@ -59,6 +59,16 @@ const getCollegeId = async (req) => {
   );
   return Number(fallbackRow?.college_id || 0);
 };
+const getActiveEvaluationPeriod = async () => {
+  const [[period]] = await pool.query(
+    `SELECT academic_year, semester FROM evaluation_periods
+     WHERE LOWER(status) = 'active' ORDER BY id DESC LIMIT 1`
+  );
+  return {
+    academicYear: String(period?.academic_year || '').trim(),
+    semester: String(period?.semester || '').trim(),
+  };
+};
 const sendError = (res, status, message) => res.status(status).json({ success: false, message });
 const isPeerPublicationActive = async (departmentId, academicYear, semester) => {
   const [[publication]] = await pool.query(
@@ -501,6 +511,7 @@ const getDeanEvaluations = async (req, res) => {
 
 router.get('/evaluations', getDeanEvaluations);
 router.get('/dept-heads', getDeanEvaluations);
+router.get('/dept-head-evaluations', getDeanEvaluations);
 
 const getDepartmentHeadsForDean = async (req, res) => {
   try {
@@ -548,6 +559,7 @@ const saveDepartmentHeadEvaluation = async (req, res) => {
   const deadline = String(req.body?.deadline || '').trim() || null;
   try {
     const collegeId = await getCollegeId(req);
+    const { academicYear, semester } = await getActiveEvaluationPeriod();
     if (!collegeId || !instructorId || !Number.isFinite(totalScore) || totalScore < 0 || totalScore > 30) {
       return sendError(res, 400, 'Department Head and a score from 0 to 30 are required.');
     }
@@ -561,10 +573,10 @@ const saveDepartmentHeadEvaluation = async (req, res) => {
     if (!targets.length) return sendError(res, 404, 'Department Head was not found in your college.');
     await pool.query(
       `INSERT INTO dept_head_evaluations
-        (evaluator_id, instructor_id, department_id, criteria_scores, strengths, weaknesses, total_score, deadline, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 7 DAY), '%Y-%m-%d')), 'SUBMITTED')
-       ON DUPLICATE KEY UPDATE criteria_scores = VALUES(criteria_scores), strengths = VALUES(strengths), weaknesses = VALUES(weaknesses), total_score = VALUES(total_score), deadline = COALESCE(VALUES(deadline), deadline), status = 'SUBMITTED', updated_at = CURRENT_TIMESTAMP`,
-      [req.user.id, instructorId, targets[0].department_id, JSON.stringify(criteriaScores), strengths, weaknesses, totalScore, deadline]
+        (evaluator_id, instructor_id, department_id, academic_year, semester, criteria_scores, strengths, weaknesses, total_score, deadline, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, DATE_FORMAT(DATE_ADD(CURDATE(), INTERVAL 7 DAY), '%Y-%m-%d')), 'SUBMITTED')
+       ON DUPLICATE KEY UPDATE academic_year = VALUES(academic_year), semester = VALUES(semester), criteria_scores = VALUES(criteria_scores), strengths = VALUES(strengths), weaknesses = VALUES(weaknesses), total_score = VALUES(total_score), deadline = COALESCE(VALUES(deadline), deadline), status = 'SUBMITTED', updated_at = CURRENT_TIMESTAMP`,
+      [req.user.id, instructorId, targets[0].department_id, academicYear, semester, JSON.stringify(criteriaScores), strengths, weaknesses, totalScore, deadline]
     );
     return res.json({ success: true, message: 'Department Head evaluation submitted.' });
   } catch (error) {
@@ -583,6 +595,7 @@ router.put('/dept-head-evaluations/:id', async (req, res) => {
   const weaknesses = String(req.body?.weaknesses || '').trim();
   try {
     const collegeId = await getCollegeId(req);
+    const { academicYear, semester } = await getActiveEvaluationPeriod();
     if (!collegeId || !evaluationId || !Number.isFinite(totalScore) || totalScore < 0 || totalScore > 30) {
       return sendError(res, 400, 'Valid evaluation ID and score from 0 to 30 are required.');
     }
@@ -590,9 +603,9 @@ router.put('/dept-head-evaluations/:id', async (req, res) => {
       `UPDATE dept_head_evaluations dhe
        INNER JOIN instructors i ON i.id = dhe.instructor_id
        INNER JOIN departments d ON d.id = i.department_id AND d.college_id = ?
-       SET dhe.criteria_scores = ?, dhe.strengths = ?, dhe.weaknesses = ?, dhe.total_score = ?, dhe.status = 'SUBMITTED', dhe.updated_at = CURRENT_TIMESTAMP
+       SET dhe.academic_year = ?, dhe.semester = ?, dhe.criteria_scores = ?, dhe.strengths = ?, dhe.weaknesses = ?, dhe.total_score = ?, dhe.status = 'SUBMITTED', dhe.updated_at = CURRENT_TIMESTAMP
        WHERE dhe.id = ? AND dhe.evaluator_id = ?`,
-      [collegeId, JSON.stringify(criteriaScores), strengths, weaknesses, totalScore, evaluationId, req.user.id]
+      [collegeId, academicYear, semester, JSON.stringify(criteriaScores), strengths, weaknesses, totalScore, evaluationId, req.user.id]
     );
     if (!result.affectedRows) return sendError(res, 404, 'Department Head evaluation was not found.');
     return res.json({ success: true, message: 'Department Head evaluation updated.' });
@@ -611,6 +624,7 @@ const submitDepartmentHeadEvaluation = async (req, res) => {
 
   try {
     const collegeId = await getCollegeId(req);
+    const { academicYear, semester } = await getActiveEvaluationPeriod();
     if (!collegeId || !instructorId || !Number.isFinite(totalScore)) return sendError(res, 400, 'Instructor and evaluation scores are required.');
 
     const [targetRows] = await pool.query(
@@ -623,10 +637,10 @@ const submitDepartmentHeadEvaluation = async (req, res) => {
     if (!targetRows.length) return sendError(res, 404, 'Department Head was not found in your college.');
 
     await pool.query(
-      `INSERT INTO dept_head_evaluations (evaluator_id, instructor_id, department_id, criteria_scores, strengths, weaknesses, total_score, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'COMPLETED')
-       ON DUPLICATE KEY UPDATE criteria_scores = VALUES(criteria_scores), strengths = VALUES(strengths), weaknesses = VALUES(weaknesses), total_score = VALUES(total_score), status = 'COMPLETED', updated_at = CURRENT_TIMESTAMP`,
-      [req.user.id, instructorId, targetRows[0].department_id, JSON.stringify(criteriaScores), strengths, weaknesses, totalScore]
+      `INSERT INTO dept_head_evaluations (evaluator_id, instructor_id, department_id, academic_year, semester, criteria_scores, strengths, weaknesses, total_score, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED')
+       ON DUPLICATE KEY UPDATE academic_year = VALUES(academic_year), semester = VALUES(semester), criteria_scores = VALUES(criteria_scores), strengths = VALUES(strengths), weaknesses = VALUES(weaknesses), total_score = VALUES(total_score), status = 'COMPLETED', updated_at = CURRENT_TIMESTAMP`,
+      [req.user.id, instructorId, targetRows[0].department_id, academicYear, semester, JSON.stringify(criteriaScores), strengths, weaknesses, totalScore]
     );
     return res.json({ success: true, message: 'Department Head evaluation submitted.' });
   } catch (error) {

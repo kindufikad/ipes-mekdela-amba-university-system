@@ -25,11 +25,13 @@ import {
   Plus,
   Pencil,
   Trash2,
+  Menu,
+  X,
 } from 'lucide-react';
 import { LanguageContext } from '../context/LanguageContext';
 import { useTranslation } from '../context/useTranslation';
 import { useNavigate } from 'react-router-dom';
-import { adminApi, aiApi, authApi, criteriaApi, departmentApi, notificationApi, registrationApi, studentApi } from '../services/api';
+import { adminApi, aiApi, authApi, criteriaApi, departmentApi, notificationApi, registrationApi } from '../services/api';
 import { useAuth } from '../context/useAuth';
 import toast from 'react-hot-toast';
 import EvaluationCalendar from '../components/EvaluationCalendar';
@@ -39,8 +41,10 @@ import DepartmentRegistration from '../components/DepartmentRegistration';
 import DepartmentCombobox from '../components/DepartmentCombobox';
 import AuditLogManagement from '../components/AuditLogManagement';
 import AuditTimelineModal from '../components/AuditTimelineModal';
-import LandingContentManagement from '../components/admin/LandingContentManagement';
+import LandingPageManagement from '../components/admin/LandingPageManagement';
 import IPESAISmartInsights from '../components/ai/IPESAISmartInsights';
+import SecurityLogs from '../components/SecurityLogs';
+import SystemHealth from '../components/SystemHealth';
 
 const getTodayDate = () => new Date().toISOString().slice(0, 10);
 const NAME_REGEX = /^[A-Za-z]+(?:[ '-][A-Za-z]+)*$/;
@@ -116,11 +120,21 @@ const SystemAdminDashboard = () => {
   };
 
   const [activeTab, setActiveTab] = useState('overview');
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [broadcastAudience, setBroadcastAudience] = useState('all');
   const [broadcastTitle, setBroadcastTitle] = useState('System announcement');
   const [broadcastMessage, setBroadcastMessage] = useState('');
   const [broadcastHistory, setBroadcastHistory] = useState([]);
   const [isComposing, setIsComposing] = useState(true);
+
+  useEffect(() => {
+    if (!isMobileMenuOpen) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') setIsMobileMenuOpen(false);
+    };
+    document.addEventListener('keydown', closeOnEscape);
+    return () => document.removeEventListener('keydown', closeOnEscape);
+  }, [isMobileMenuOpen]);
   const [dbHealthMetrics, setDbHealthMetrics] = useState({
     status: '--',
     replicationLag: '--',
@@ -197,6 +211,8 @@ const SystemAdminDashboard = () => {
   const [registeredDepartments, setRegisteredDepartments] = useState([]);
   const [isDepartmentsLoading, setIsDepartmentsLoading] = useState(true);
   const [dashboardStats, setDashboardStats] = useState(null);
+  const [dashboardStatsLoading, setDashboardStatsLoading] = useState(true);
+  const [dashboardStatsError, setDashboardStatsError] = useState('');
   const [securityLogsLoading, setSecurityLogsLoading] = useState(true);
   const [criteriaType, setCriteriaType] = useState('student');
   const [criteriaTargetRole, setCriteriaTargetRole] = useState('instructor');
@@ -474,17 +490,30 @@ const SystemAdminDashboard = () => {
     let isMounted = true;
 
     const loadDashboardStats = async () => {
+      setDashboardStatsLoading(true);
+      setDashboardStatsError('');
       try {
         const stats = await adminApi.getDashboardStats();
-        if (isMounted) setDashboardStats(stats);
+        if (isMounted) {
+          setDashboardStats(stats);
+          setDashboardStatsLoading(false);
+        }
       } catch (error) {
         console.warn('Unable to load admin dashboard statistics:', error);
-        if (isMounted) setDashboardStats({});
+        if (isMounted) {
+          setDashboardStats(null);
+          setDashboardStatsError('Unable to load user statistics.');
+          setDashboardStatsLoading(false);
+        }
       }
     };
 
     if (isAuthenticated && (role === 'admin' || role === 'systemadmin')) {
       void loadDashboardStats();
+    } else if (isMounted) {
+      setDashboardStats(null);
+      setDashboardStatsLoading(false);
+      setDashboardStatsError('');
     }
 
     const intervalId = activeTab === 'overview' && isAuthenticated && (role === 'admin' || role === 'systemadmin')
@@ -1381,32 +1410,6 @@ const SystemAdminDashboard = () => {
     });
   };
 
-  const formatUptime = (seconds) => {
-    const value = Number(seconds);
-    if (!Number.isFinite(value) || value < 0) return '--';
-    const days = Math.floor(value / 86400);
-    const hours = Math.floor((value % 86400) / 3600);
-    const minutes = Math.floor((value % 3600) / 60);
-    return `${days}d ${hours}h ${minutes}m`;
-  };
-
-  const diskPercent = systemHealth?.generatedAt && systemHealth?.disk?.available !== false && systemHealth?.disk?.percentUsed !== null
-    ? Number(systemHealth?.disk?.percentUsed)
-    : null;
-  const memoryPercent = systemHealth?.generatedAt ? Number(systemHealth?.memory?.percentUsed) : null;
-  const lastBackupValue = systemHealth?.database?.lastBackup || (dbHealthMetrics.lastBackup !== '--' ? dbHealthMetrics.lastBackup : null);
-  const parsedLastBackup = lastBackupValue ? new Date(lastBackupValue) : null;
-  const lastBackupLabel = parsedLastBackup && !Number.isNaN(parsedLastBackup.getTime())
-    ? parsedLastBackup.toLocaleString()
-    : 'No backup yet';
-  const visibleHealthAlerts = systemHealthError
-    ? [{ level: 'warning', title: 'Health data may be stale', detail: systemHealthError }, ...healthAlerts]
-    : healthAlerts.length
-      ? healthAlerts
-      : systemHealth?.generatedAt
-        ? [{ level: 'healthy', title: 'All systems operational', detail: 'No critical issues detected.' }]
-        : [{ level: 'warning', title: 'Waiting for health data', detail: 'The first server health snapshot is being collected.' }];
-
   const handleTriggerBackup = async () => {
     if (backuping) return;
     setBackuping(true);
@@ -1454,8 +1457,24 @@ const SystemAdminDashboard = () => {
   };
 
   return (
-    <div className="flex min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(96,165,250,0.20),_transparent_28%),radial-gradient(circle_at_top_right,_rgba(14,165,233,0.14),_transparent_34%),linear-gradient(135deg,_#e8f0fb_0%,_#dfeaf8_48%,_#edf4ff_100%)] text-slate-900">
-      <aside className="w-80 border-r border-slate-200 p-6 flex flex-col">
+    <div className="relative flex min-h-screen min-w-0 flex-col bg-[radial-gradient(circle_at_top_left,_rgba(96,165,250,0.20),_transparent_28%),radial-gradient(circle_at_top_right,_rgba(14,165,233,0.14),_transparent_34%),linear-gradient(135deg,_#e8f0fb_0%,_#dfeaf8_48%,_#edf4ff_100%)] text-slate-900 lg:flex-row">
+      <div className={`fixed inset-x-0 bottom-0 top-16 z-40 transition-opacity lg:hidden ${isMobileMenuOpen ? 'visible opacity-100' : 'pointer-events-none invisible opacity-0'}`}>
+        <button type="button" className="absolute inset-0 bg-slate-950/45" onClick={() => setIsMobileMenuOpen(false)} aria-label="Close system admin navigation" tabIndex={isMobileMenuOpen ? 0 : -1} />
+      </div>
+      <header className="sticky top-0 z-30 flex items-center justify-between border-b border-slate-200 bg-white/95 px-4 py-3 shadow-sm backdrop-blur lg:hidden">
+        <h1 className="text-base font-bold text-slate-900">{t('systemAdminTitle', 'System Admin', 'የስርዓት አስተዳደር')}</h1>
+        <button
+          type="button"
+          onClick={() => setIsMobileMenuOpen((open) => !open)}
+          className="rounded-lg p-2 text-slate-700 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          aria-label={isMobileMenuOpen ? 'Close navigation menu' : 'Open navigation menu'}
+          aria-expanded={isMobileMenuOpen}
+          aria-controls="system-admin-sidebar"
+        >
+          {isMobileMenuOpen ? <X size={22} /> : <Menu size={22} />}
+        </button>
+      </header>
+      <aside id="system-admin-sidebar" className={`fixed inset-y-16 left-0 z-50 flex w-[min(20rem,85vw)] flex-col overflow-y-auto border-r border-slate-200 bg-white p-6 shadow-2xl transition-transform duration-200 lg:visible lg:static lg:inset-y-auto lg:z-auto lg:w-80 lg:shrink-0 lg:translate-x-0 lg:shadow-none ${isMobileMenuOpen ? 'visible translate-x-0' : 'invisible -translate-x-full'}`}>
         <div className="mb-8">
           <div className="inline-flex items-center gap-2 rounded-3xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-blue-500/20">
             <Activity size={18} /> {t('liveAdmin', 'Live Admin', 'ቀጥታ አስተዳደር')}
@@ -1481,7 +1500,7 @@ const SystemAdminDashboard = () => {
               <button
                 key={item.id}
                 type="button"
-                onClick={() => setActiveTab(item.id)}
+                onClick={() => { setActiveTab(item.id); setIsMobileMenuOpen(false); }}
                 className={`w-full flex items-center gap-3 rounded-2xl px-4 py-3 text-left text-sm transition ${activeTab === item.id ? 'bg-gradient-to-r from-blue-500 to-cyan-400 text-white shadow-lg shadow-blue-500/20' : 'text-slate-600 hover:bg-slate-100 hover:text-blue-600'}`}
               >
                 <Icon size={18} />
@@ -1492,7 +1511,7 @@ const SystemAdminDashboard = () => {
         </nav>
       </aside>
 
-      <main className="flex-1 overflow-y-auto px-6 py-8 lg:px-8">
+      <main className="min-w-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6 sm:py-8 lg:px-8">
         <div className="mb-8">
           <IPESAISmartInsights role="ADMIN" onActionClick={handleAiAction} />
         </div>
@@ -1506,7 +1525,7 @@ const SystemAdminDashboard = () => {
           />
         )}
 
-        {activeTab === 'landing-content' && <LandingContentManagement />}
+        {activeTab === 'landing-content' && <LandingPageManagement />}
 
         {activeTab === 'overview' && (() => {
           const userBreakdown = dashboardStats?.usersByRole || {};
@@ -1521,6 +1540,11 @@ const SystemAdminDashboard = () => {
           const countLabel = (value) => value === null || value === undefined || value === ''
             ? '—'
             : Number.isFinite(Number(value)) ? Number(value).toLocaleString() : '—';
+          const dashboardTotalLabel = dashboardStatsLoading
+            ? 'Loading…'
+            : dashboardStatsError
+              ? 'Unavailable'
+              : countLabel(dashboardStats?.totalUsers);
           const quickActions = [
             { label: 'Register user', icon: UserPlus, color: 'text-blue-700', action: () => { setRegistrationMode(null); setActiveTab('register-head'); } },
             { label: 'Manage roles', icon: ShieldCheck, color: 'text-indigo-700', action: () => setActiveTab('manage-roles') },
@@ -1544,7 +1568,7 @@ const SystemAdminDashboard = () => {
               <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
                 <article className="min-w-0 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                   <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0"><p className="text-xs font-semibold uppercase text-slate-500">Total registered users</p><p className="mt-2 text-3xl font-bold text-slate-950">{dashboardStats ? countLabel(dashboardStats.totalUsers) : '—'}</p></div>
+                    <div className="min-w-0"><p className="text-xs font-semibold uppercase text-slate-500">Total registered users</p><p className="mt-2 text-3xl font-bold text-slate-950">{dashboardTotalLabel}</p></div>
                     <span className="rounded-xl bg-blue-50 p-2.5 text-blue-700"><Users size={20} /></span>
                   </div>
                   <div className="mt-4 grid grid-cols-2 gap-x-3 gap-y-1 border-t border-slate-100 pt-3 text-xs text-slate-500">
@@ -1552,7 +1576,12 @@ const SystemAdminDashboard = () => {
                     <span>Dept heads <strong className="text-slate-800">{countLabel(userBreakdown.departmentHeads)}</strong></span>
                     <span>Deans <strong className="text-slate-800">{countLabel(userBreakdown.deans)}</strong></span>
                     <span>Students <strong className="text-slate-800">{countLabel(userBreakdown.students)}</strong></span>
+                    <span>System admins <strong className="text-slate-800">{countLabel(userBreakdown.systemAdministrators)}</strong></span>
+                    <span>Academic directorate <strong className="text-slate-800">{countLabel(userBreakdown.academicDirectorate)}</strong></span>
+                    <span>Academic vice-president <strong className="text-slate-800">{countLabel(userBreakdown.academicVicePresidents)}</strong></span>
+                    <span>Lab assistants <strong className="text-slate-800">{countLabel(userBreakdown.labAssistants)}</strong></span>
                   </div>
+                  {dashboardStatsError && <p className="mt-3 text-xs font-medium text-red-600">{dashboardStatsError}</p>}
                 </article>
 
                 <article className="min-w-0 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -2165,6 +2194,7 @@ const SystemAdminDashboard = () => {
                     <option value="lab_assistants">Lab Assistants</option>
                     <option value="college_deans">College Deans</option>
                     <option value="academic_directors">Academic Directors</option>
+                    <option value="vice_presidents">Vice Presidents</option>
                   </select>
                 </label>
                 <label className="mb-4 block">
@@ -2209,7 +2239,9 @@ const SystemAdminDashboard = () => {
           </section>
         )}
 
-        {activeTab === 'security' && (
+        {activeTab === 'security' && <SecurityLogs />}
+
+        {activeTab === 'security-legacy' && (
           <section className="space-y-6">
             <div className="flex flex-col justify-between gap-4 border-b border-slate-200 pb-6 sm:flex-row sm:items-end">
               <div>
@@ -2349,116 +2381,20 @@ const SystemAdminDashboard = () => {
         />
 
         {activeTab === 'health' && (
-          <section className="space-y-8">
-            <div className="rounded-[24px] border border-slate-200 bg-gradient-to-br from-blue-50 to-cyan-50 p-6 shadow-[inset_0_1px_0_rgba(255,255,255,0.9)]">
-              <div className="text-center">
-                <p className="text-xs uppercase tracking-[0.2em] text-blue-600 font-semibold">{t('systemHealthTitle', 'System Health', 'የስርዓት ጤና')}</p>
-                <p className="mt-4 text-4xl font-bold text-slate-900">{systemHealth?.uptime?.formatted || formatUptime(dbHealthMetrics.uptimeSeconds) || '--'}</p>
-                <p className="text-slate-500 text-sm mt-2">{t('uptimeThisWeek', 'server uptime', 'የአገልጋዩ የስርዓት ጊዜ')}</p>
-                <p className="mt-1 text-xs text-slate-400">{systemHealth?.generatedAt ? `Updated ${new Date(systemHealth.generatedAt).toLocaleTimeString()}` : 'Waiting for first health snapshot'}</p>
-              </div>
-            </div>
-
-            <div className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-[0_18px_55px_-34px_rgba(37,99,235,0.24)]">
-              <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between mb-6">
-                <div>
-                  <h3 className="text-lg font-semibold text-slate-900">{t('systemHealth', 'System Health', 'የስርዓት ጤና')}</h3>
-                  <p className="text-slate-600">{t('systemHealthDesc', 'Monitor system performance, resources, and status.', 'የስርዓት አፈጻጸም፣ ሀብቶች እና ሁኔታ ተከታተል')}</p>
-                </div>
-                <div className="flex items-center gap-3">
-                  <button type="button" onClick={handleTriggerBackup} disabled={backuping} className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60">
-                    <Database size={18} /> {backuping ? 'Backing up...' : 'Trigger Backup'}
-                  </button>
-                  <button type="button" onClick={() => { void refreshSystemHealth(); }} className="inline-flex items-center gap-2 rounded-2xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-70" disabled={systemHealthLoading}>
-                    <RefreshCw size={18} className={systemHealthLoading ? 'animate-spin' : ''} /> {systemHealthLoading ? 'Refreshing...' : 'Refresh'}
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid gap-4 lg:grid-cols-2">
-                <div className="rounded-3xl bg-gradient-to-br from-blue-50 to-cyan-50 border border-blue-200 p-6">
-                  <div className="flex items-center justify-between mb-4">
-                    <h4 className="font-semibold text-slate-900">Storage & Backup</h4>
-                    <span className="text-right text-xs font-medium text-blue-700">Last Backup: {lastBackupLabel}</span>
-                  </div>
-                  <div className="space-y-4">
-                    <div>
-                      <div className="flex justify-between text-sm mb-2">
-                        <span className="text-slate-600">Server Volume Usage</span>
-                        <span className="font-semibold text-slate-900">{diskPercent === null || !Number.isFinite(diskPercent) ? 'Unavailable' : `${diskPercent.toFixed(1)}%`}</span>
-                      </div>
-                      <div className="h-2 rounded-full bg-slate-200 overflow-hidden">
-                        <div className="h-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all" style={{ width: `${Math.min(100, Math.max(0, diskPercent || 0))}%` }}></div>
-                      </div>
-                      {systemHealth?.disk?.available && <p className="mt-1 text-xs text-slate-500">{systemHealth.disk.usedGb} GB used of {systemHealth.disk.totalGb} GB</p>}
-                    </div>
-                    <div>
-                      <div className="flex justify-between text-sm mb-2">
-                        <span className="text-slate-600">Memory Usage</span>
-                        <span className="font-semibold text-slate-900">{memoryPercent === null || !Number.isFinite(memoryPercent) ? '--' : `${memoryPercent.toFixed(1)}%`}</span>
-                      </div>
-                      <div className="h-2 rounded-full bg-slate-200 overflow-hidden">
-                        <div className="h-full bg-gradient-to-r from-violet-500 to-purple-400 transition-all" style={{ width: `${Math.min(100, Math.max(0, memoryPercent || 0))}%` }}></div>
-                      </div>
-                    </div>
-                    <div>
-                      <div className="flex justify-between text-sm mb-2">
-                        <span className="text-slate-600">Backup Retention</span>
-                        <span className="font-semibold text-slate-900">{backupRetentionDays} days</span>
-                      </div>
-                      <input 
-                        type="range" 
-                        min="7" 
-                        max="90" 
-                        value={backupRetentionDays}
-                        onChange={handleBackupRetentionChange}
-                        className="w-full"
-                      />
-                      <div className="mt-2 flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
-                        <p className="text-xs text-slate-500">Expired generated backups are removed after the next successful backup.</p>
-                        <button type="button" onClick={() => void handleSaveBackupRetention()} disabled={backupRetentionSaving} className="shrink-0 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-50">{backupRetentionSaving ? 'Saving...' : 'Save policy'}</button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="rounded-3xl bg-gradient-to-br from-purple-50 to-pink-50 border border-purple-200 p-6">
-                  <h4 className="font-semibold text-slate-900 mb-4">API Performance</h4>
-                  <div className="space-y-3">
-                    <div className="flex justify-between text-sm">
-                      <span className="text-slate-600">Response Time</span>
-                      <span className="font-semibold text-slate-900">{Number(systemHealth?.apiPerformance?.averageResponseTimeMs ?? 0).toFixed(1)}ms</span>
-                    </div>
-                    <div className="flex justify-between text-sm">
-                      <span className="text-slate-600">Request Rate</span>
-                      <span className="font-semibold text-slate-900">{Number(systemHealth?.apiPerformance?.requestsPerMinute || 0).toLocaleString()}/min</span>
-                    </div>
-                    <div className="flex justify-between text-sm">
-                      <span className="text-slate-600">Error Rate</span>
-                      <span className={`font-semibold ${Number(systemHealth?.apiPerformance?.errorRate || 0) > 2 ? 'text-red-600' : Number(systemHealth?.apiPerformance?.errorRate || 0) > 1 ? 'text-amber-600' : 'text-emerald-600'}`}>
-                        {Number(systemHealth?.apiPerformance?.errorRate || 0).toFixed(2)}%
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="rounded-3xl bg-gradient-to-br from-orange-50 to-red-50 border border-orange-200 p-6">
-                  <h4 className="font-semibold text-slate-900 mb-4">System Alerts</h4>
-                  <div className="space-y-3">
-                    {visibleHealthAlerts.map((alert, index) => (
-                      <div key={`${alert.title}-${index}`} className="flex items-start gap-3 rounded-2xl border border-slate-200 bg-white/60 p-3">
-                        <span className={`mt-1 h-2.5 w-2.5 rounded-full ${alert.level === 'critical' ? 'bg-red-500' : alert.level === 'warning' ? 'bg-amber-500' : 'bg-emerald-500'}`}></span>
-                        <div>
-                          <p className="text-sm font-semibold text-slate-800">{alert.title}</p>
-                          <p className="text-xs text-slate-600">{alert.detail}</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </section>
+          <SystemHealth
+            systemHealth={systemHealth}
+            dbHealthMetrics={dbHealthMetrics}
+            loading={systemHealthLoading}
+            error={systemHealthError}
+            onRefresh={() => { void refreshSystemHealth(); }}
+            backuping={backuping}
+            onTriggerBackup={handleTriggerBackup}
+            backupRetentionDays={backupRetentionDays}
+            onBackupRetentionChange={handleBackupRetentionChange}
+            backupRetentionSaving={backupRetentionSaving}
+            onSaveBackupRetention={() => { void handleSaveBackupRetention(); }}
+            t={t}
+          />
         )}
 
         {showEditModal && selectedHead && (

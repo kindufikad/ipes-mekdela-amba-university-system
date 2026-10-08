@@ -28,7 +28,7 @@ const { batchAssignMatrix } = require('./controllers/courseController');
 const { createDepartment } = require('./controllers/departmentController');
 const { me } = require('./controllers/authController');
 const { getUserNotifications, markAllRead, clearAllNotifications, markNotificationRead, deleteNotification, sendNotification, sendTelegramReminders, createNotifications, setRealtimeServer } = require('./controllers/notificationController');
-const { getAiInsightsSummary } = require('./controllers/aiInsightsController');
+const { getAiInsightsSummary, getInstructorAiInsights } = require('./controllers/aiInsightsController');
 const { sendDeptHeadEvaluationReminder } = require('./controllers/trackingController');
 const { authenticateToken: mwAuthenticateToken, authorizeRoles: mwAuthorizeRoles } = require('./middleware/auth');
 const { auditRequest } = require('./middleware/auditLogger');
@@ -136,6 +136,7 @@ app.use('/api/evaluations', evaluationRoutes);
 app.use('/api/ai', aiRouter);
 app.use('/api/v1/ai', aiRouter);
 app.get('/api/ai-insights/summary', mwAuthenticateToken, getAiInsightsSummary);
+app.get('/api/instructor/ai-insights', mwAuthenticateToken, mwAuthorizeRoles('instructor'), getInstructorAiInsights);
 app.use('/uploads', express.static(require('path').join(__dirname, 'uploads')));
 
 app.get('/api/reports/print-efficiency/:instructorId', mwAuthenticateToken, mwAuthorizeRoles('instructor', 'dept_head', 'college_dean', 'dean', 'admin'), async (req, res) => {
@@ -2326,12 +2327,21 @@ const getDeptHeadPerformance = async (req, res) => {
       statusBadge: isComplete ? 'Completed' : 'Pending Complete Evaluation',
       completion,
       isStudentEvaluationRequired: hasAssignedCourse,
+      isStudentEvaluationExcluded: !hasAssignedCourse,
+      raw_student_score: Number(weightedSummary.breakdown.student.rawPercentage.toFixed(2)),
+      submission_count: studentRows.length,
+      total_assignments: performance.totalAssignments,
       incomingPeerCount,
       periodEnded,
       hasAssignedCourse: Boolean(weightedSummary.hasAssignedCourse),
+      hasAssignedCourses: Boolean(weightedSummary.hasAssignedCourse),
+      isStudentEvaluationExcluded: !Boolean(weightedSummary.hasAssignedCourse),
       isTeaching,
       warning: weightedSummary.warning,
-      breakdown: weightedSummary.breakdown,
+      breakdown: {
+        ...weightedSummary.breakdown,
+        student: { ...weightedSummary.breakdown.student, submissionCount: studentRows.length },
+      },
       strengths,
       weaknesses: improvements,
     });
@@ -2588,9 +2598,10 @@ app.post(['/api/dept-head/calculate-publish', '/api/evaluations/publish-instruct
         `SELECT COUNT(*) AS total
          FROM course_assignments
          WHERE instructor_id = ?
-           AND academic_year = ?
-           AND semester = ?`,
-        [instructor.id, academicYear, semesterValue]
+            AND LOWER(COALESCE(status, 'assigned')) NOT IN ('cancelled', 'inactive', 'unassigned')
+            AND (academic_year IS NULL OR LOWER(TRIM(academic_year)) = LOWER(?) OR LOWER(TRIM(academic_year)) = LOWER(SUBSTRING_INDEX(?, '/', 1)))
+            AND (semester IS NULL OR LOWER(REPLACE(TRIM(semester), 'semester', '')) = LOWER(REPLACE(TRIM(?), 'semester', '')))` ,
+          [instructor.id, academicYear, academicYear, semesterValue]
       );
       const hasCourseAssigned = Number(courseRows[0]?.total || 0) > 0;
 
@@ -2600,11 +2611,14 @@ app.post(['/api/dept-head/calculate-publish', '/api/evaluations/publish-instruct
          JOIN evaluation_dispatches ed ON ses.dispatch_id = ed.id
          JOIN course_assignments ca ON ca.id = ed.assignment_id
          WHERE ca.instructor_id = ?
-           AND (ed.academic_year = ? OR ed.academic_year IS NULL)
-           AND (ed.semester = ? OR ed.semester IS NULL)
+           AND (? = '' OR COALESCE(NULLIF(TRIM(ed.academic_year), ''), NULLIF(TRIM(ca.academic_year), '')) IS NULL
+             OR LOWER(COALESCE(NULLIF(TRIM(ed.academic_year), ''), NULLIF(TRIM(ca.academic_year), ''))) = LOWER(?)
+             OR LOWER(COALESCE(NULLIF(TRIM(ed.academic_year), ''), NULLIF(TRIM(ca.academic_year), ''))) = LOWER(SUBSTRING_INDEX(?, '/', 1)))
+           AND (? = '' OR COALESCE(NULLIF(TRIM(ed.semester), ''), NULLIF(TRIM(ca.semester), '')) IS NULL
+             OR LOWER(REPLACE(COALESCE(NULLIF(TRIM(ed.semester), ''), NULLIF(TRIM(ca.semester), '')), 'semester', '')) = LOWER(REPLACE(?, 'semester', '')))
            AND LOWER(COALESCE(ed.target_type, 'instructor')) = 'instructor'
            AND LOWER(TRIM(COALESCE(ses.status, ''))) IN ('submitted', 'completed', 'approved')`,
-        [hasCourseAssigned ? 1 : 0, instructor.id, academicYear, semesterValue]
+        [hasCourseAssigned ? 1 : 0, instructor.id, academicYear, academicYear, academicYear, semesterValue, semesterValue]
       );
       const studentAverage = hasCourseAssigned ? Number(studentRows[0]?.avg_score || 0) : 0;
 
@@ -5896,10 +5910,14 @@ const getInstructorPerformance = async (req, res) => {
     }
 
     const instructor = instructorRows[0];
+    const [[activeEvaluationPeriod]] = await pool.query(
+      `SELECT academic_year, semester FROM evaluation_periods
+       WHERE LOWER(status) = 'active' ORDER BY id DESC LIMIT 1`
+    );
     const unified = await getInstructorOverallPerformance({
       instructorId: instructor.id,
-      academicYear: String(req.query.academic_year || '').trim(),
-      semester: String(req.query.semester || '').trim(),
+      academicYear: String(req.query.academic_year || activeEvaluationPeriod?.academic_year || '').trim(),
+      semester: String(req.query.semester || activeEvaluationPeriod?.semester || '').trim(),
     });
     return sendResponse(res, 200, 'Performance summary retrieved.', 'የአፈጻጸም ማጠቃለያ ተመለሰ።', {
       totalWeightedScore: unified.totalScore,
@@ -5910,11 +5928,17 @@ const getInstructorPerformance = async (req, res) => {
       badgeColor: unified.isComplete ? (unified.totalScore >= 90 ? 'emerald' : unified.totalScore >= 85 ? 'blue' : unified.totalScore >= 70 ? 'cyan' : unified.totalScore >= 50 ? 'amber' : 'red') : 'amber',
       completion: unified.completion,
       hasAssignedCourse: unified.hasAssignedCourse,
+      hasAssignedCourses: unified.hasAssignedCourse,
+      total_assignments: unified.totalAssignments,
+      isStudentEvaluationExcluded: !unified.hasAssignedCourse,
+      raw_student_score: unified.studentRaw,
+      submission_count: unified.student.count,
+      role: unified.role,
       isDepartmentHead: false,
       breakdown: {
-        student: { rawPercentage: unified.studentRaw, rawScore: unified.studentRaw, weightedContribution: unified.studentWeighted, weight: 50, isAvailable: unified.hasAssignedCourse },
-        deptHead: { rawPercentage: unified.deptHeadRaw, rawScore: unified.deptHeadRaw, weightedContribution: unified.deptHeadWeighted, weight: 30, isAvailable: unified.deptHead.count > 0 },
-        peer: { rawPercentage: unified.peerRaw, rawScore: unified.peerRaw, weightedContribution: unified.peerWeighted, weight: 20, isAvailable: unified.peer.count > 0 },
+        student: { rawPercentage: unified.studentRaw, rawScore: unified.studentRaw, weightedContribution: unified.studentWeighted, weight: unified.weights.student, isAvailable: unified.hasAssignedCourse, submissionCount: unified.student.count },
+        deptHead: { rawPercentage: unified.deptHeadRaw, rawScore: unified.deptHeadRaw, weightedContribution: unified.deptHeadWeighted, weight: unified.weights.deptHead, isAvailable: unified.deptHead.count > 0 },
+        peer: { rawPercentage: unified.peerRaw, rawScore: unified.peerRaw, weightedContribution: unified.peerWeighted, weight: unified.weights.peer, isAvailable: unified.peer.count > 0 },
       },
       instructor: { name: unified.instructorName, department: unified.department },
       academicYear: unified.academicYear,
@@ -6135,8 +6159,7 @@ const getInstructorPerformance = async (req, res) => {
   }
 };
 
-app.get('/api/instructor/performance-summary', authenticate, authorizeRoles('instructor'), getInstructorPerformance);
-app.get('/api/instructor/performance', authenticate, authorizeRoles('instructor'), getInstructorPerformance);
+app.get(['/api/instructor/dashboard', '/api/instructor/performance-summary', '/api/instructor/performance'], authenticate, authorizeRoles('instructor', 'dept_head'), getInstructorPerformance);
 app.post('/api/instructors/goals', authenticate, authorizeRoles('instructor'), async (req, res) => {
   const focusArea = String(req.body?.focusArea || '').trim();
   const goal = String(req.body?.goal || '').trim();
@@ -6350,19 +6373,12 @@ app.post('/api/student/evaluations/submit', authenticate, authorizeRoles('studen
     const feedbackValidation = validateEvaluationFeedbackPair(strengths, improvements);
     if (!feedbackValidation.valid) return sendResponse(res, 400, feedbackValidation.errors[0], feedbackValidation.errors[0]);
 
-    const scores = Array.isArray(responses)
-      ? responses
-      : (responses && typeof responses === 'object')
-        ? Object.values(responses)
-        : [];
-
-    const computedScore = scores
-      .map((value) => Number(value))
-      .filter((value) => Number.isFinite(value) && value > 0)
-      .reduce((sum, value) => sum + value, 0);
-    const count = scores.filter((value) => Number.isFinite(Number(value)) && Number(value) > 0).length;
-    const normalizedScore = count ? (computedScore / count) * 20 : 0;
-    const finalScore = score === undefined ? normalizedScore : Number(score);
+    const hasResponses = Array.isArray(responses)
+      ? responses.length > 0
+      : Object.keys(responses || {}).length > 0;
+    const finalScore = hasResponses
+      ? Number(calculateLikertPercentage(responses).toFixed(2))
+      : Number(score || 0);
 
     const [studentRows] = await pool.query("SELECT id, department_id, CONCAT(COALESCE(first_name, ''), ' ', COALESCE(last_name, '')) AS student_name FROM students WHERE user_id = ? LIMIT 1", [req.user.id]);
     if (!studentRows.length) {
@@ -6446,19 +6462,12 @@ app.post('/api/evaluations/submit-student', authenticate, authorizeRoles('studen
       return sendResponse(res, 400, 'Please answer all criteria questions before submitting.', 'ሁሉንም ጥያቄዎች መልስ ከመስጠት በፊት እባክዎ ያስገቡ።');
     }
 
-    const scores = Array.isArray(responses)
-      ? responses
-      : (responses && typeof responses === 'object')
-        ? Object.values(responses)
-        : [];
-
-    const computedScore = scores
-      .map((value) => Number(value))
-      .filter((value) => Number.isFinite(value) && value > 0)
-      .reduce((sum, value) => sum + value, 0);
-    const count = scores.filter((value) => Number.isFinite(Number(value)) && Number(value) > 0).length;
-    const normalizedScore = count ? (computedScore / count) * 20 : 0;
-    const finalScore = score === undefined ? normalizedScore : Number(score);
+    const hasResponses = Array.isArray(responses)
+      ? responses.length > 0
+      : Object.keys(responses || {}).length > 0;
+    const finalScore = hasResponses
+      ? Number(calculateLikertPercentage(responses).toFixed(2))
+      : Number(score || 0);
 
     const [studentRows] = await pool.query("SELECT id, department_id, CONCAT(COALESCE(first_name, ''), ' ', COALESCE(last_name, '')) AS student_name FROM students WHERE user_id = ? LIMIT 1", [req.user.id]);
     if (!studentRows.length) {

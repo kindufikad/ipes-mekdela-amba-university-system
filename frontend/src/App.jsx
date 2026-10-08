@@ -3,7 +3,7 @@ import { Toaster } from 'react-hot-toast';
 import ProtectedRoute from './components/ProtectedRoute';
 import DashboardLayout from './components/DashboardLayout';
 import PublicLayout from './layouts/PublicLayout';
-import Home from './pages/Home';
+import LandingPage from './pages/LandingPage';
 import About from './pages/About';
 import Contact from './pages/Contact';
 import Login from './pages/Login';
@@ -59,7 +59,7 @@ function App() {
       <main className="flex-grow">
         <Routes>
           <Route element={<PublicLayout />}>
-            <Route path="/" element={<Home />} />
+            <Route path="/" element={<LandingPage />} />
             <Route path="/about" element={<About />} />
             <Route path="/contact" element={<Contact />} />
             <Route path="/login" element={<Login />} />
@@ -68,14 +68,14 @@ function App() {
           <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
           <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
           <Route path="/student-dashboard" element={<ProtectedRoute allowedRoles={['student']}><DashboardLayout role="student"><StudentDashboard /></DashboardLayout></ProtectedRoute>} />
-          <Route path="/instructor-dashboard" element={<ProtectedRoute allowedRoles={['instructor']}><DashboardLayout role="instructor"><InstructorDashboard /></DashboardLayout></ProtectedRoute>} />
+          <Route path="/instructor-dashboard" element={<ProtectedRoute allowedRoles={['instructor', 'teacher', 'dept_head', 'department_head']}><DashboardLayout role="instructor"><InstructorDashboard /></DashboardLayout></ProtectedRoute>} />
           <Route path="/lab-assistant/dashboard" element={<ProtectedRoute allowedRoles={['lab_assistant']}><DashboardLayout role="lab_assistant"><LabAssistantDashboard /></DashboardLayout></ProtectedRoute>} />
           <Route path="/unauthorized" element={<Unauthorized />} />
           <Route path="/admin/dashboard" element={<ProtectedRoute allowedRoles={['systemadmin']}><DashboardLayout role="systemadmin"><SystemAdminDashboard /></DashboardLayout></ProtectedRoute>} />
           <Route path="/admin-dashboard" element={<ProtectedRoute allowedRoles={['systemadmin']}><DashboardLayout role="systemadmin"><SystemAdminDashboard /></DashboardLayout></ProtectedRoute>} />
           <Route path="/dept-head/dashboard" element={<ProtectedRoute allowedRoles={['depthead']}><DashboardLayout role="depthead"><DeptHeadDashboard /></DashboardLayout></ProtectedRoute>} />
           <Route path="/depthead-dashboard" element={<ProtectedRoute allowedRoles={['depthead']}><DashboardLayout role="depthead"><DeptHeadDashboard /></DashboardLayout></ProtectedRoute>} />
-          <Route path="/dept-head-dashboard" element={<ProtectedRoute allowedRoles={['depthead']}><DashboardLayout role="depthead"><DeptHeadDashboard /></DashboardLayout></ProtectedRoute>} />
+          <Route path="/dept-head-dashboard" element={<ProtectedRoute allowedRoles={['dept_head', 'department_head', 'head', 'admin']}><DashboardLayout role="depthead"><DeptHeadDashboard /></DashboardLayout></ProtectedRoute>} />
           <Route path="/system-admin-dashboard" element={<ProtectedRoute allowedRoles={['systemadmin']}><DashboardLayout role="systemadmin"><SystemAdminDashboard /></DashboardLayout></ProtectedRoute>} />
           <Route element={<ProtectedRoute allowedRoles={['college_dean', 'dean']}><DashboardLayout role="college_dean" title="College Dean Dashboard" subtitle="College performance, approvals, and announcements." /></ProtectedRoute>}>
             <Route path="/dean/dashboard" element={<CollegeDeanDashboard />} />

@@ -1,5 +1,6 @@
 import mauLogo from '../assets/mau.jpg';
 import { formatCollegeName } from '../utils/formatCollegeName';
+import useOfficialDocumentImages from '../hooks/useOfficialDocumentImages';
 
 const scoreValue = (value) => Number(value || 0).toFixed(2);
 
@@ -13,6 +14,7 @@ const OfficialEvaluationCertificate = ({
   collegeName: collegeNameProp,
   departmentHeadName,
 }) => {
+  const certificateImages = useOfficialDocumentImages();
   const row = instructor || {};
   const collegeName = formatCollegeName(collegeNameProp || row.college_name) || 'College name unavailable';
   const fullName = row.full_name || row.fullName || row.instructorName || row.name || '________________';
@@ -34,13 +36,17 @@ const OfficialEvaluationCertificate = ({
   return (
     <article className="official-report print-container official-evaluation-certificate" aria-label="Official evaluation certificate">
       <header className="official-report__header">
-        <div className="official-report__brand-mark"><img src={mauLogo} alt="Mekdela Amba University Logo" /></div>
-        <div>
-          <h1>Mekdela Amba University</h1>
-          <p>{collegeName}</p>
-          <p>Department of {department}</p>
+        <div className="official-report__english" dir="ltr">
+          <h1>MEKDELA AMBA UNIVERSITY</h1>
+          <p>College of Computing and Informatics</p>
+          <p>Department of Computer Science</p>
         </div>
-        <div className="official-report__amharic">መቅደላ አምባ ዩኒቨርሲቲ<br />የትምህርት ጥራት ማረጋገጫ</div>
+        <div className="official-report__brand-mark"><img src={mauLogo} alt="Mekdela Amba University Logo" /></div>
+        <div className="official-report__amharic" dir="rtl">
+          መቅደላ አምባ ዩኒቨርሲቲ<br />
+          የኮምፒዩቲንግ እና ኢንፎርማቲክስ ኮሌጅ<br />
+          የኮምፒዩተር ሳይንስ ዲፓርትመንት
+        </div>
       </header>
 
       <div className="official-report__rule" />
@@ -76,8 +82,16 @@ const OfficialEvaluationCertificate = ({
       <p>Accordingly, the instructor&apos;s final weighted evaluation result is <strong>{scoreValue(displayedTotal)}%</strong>.</p>
 
       <div className="official-report__signature">
-        <div><strong>{departmentHeadName || 'Department Head'}</strong><br />Signature: ____________________________<br />Date: ____________________</div>
-        <div className="official-report__stamp">MEKDELA AMBA UNIVERSITY<br />DEPT OF {department.toUpperCase()}<br />OFFICIAL SEAL</div>
+        <div className="official-report__signer">
+          {certificateImages.signature ? <img className="official-report__signature-image" src={certificateImages.signature} alt="Department Head signature" /> : null}
+          <div className="official-report__signature-line" />
+          <strong>{departmentHeadName || 'Department Head'}</strong>
+          <span>Department Head</span>
+          <span>Date: ____________________</span>
+        </div>
+        <div className={`official-report__stamp${certificateImages.stamp ? ' official-report__stamp--image' : ''}`}>
+          {certificateImages.stamp ? <img src={certificateImages.stamp} alt="Official university stamp" /> : <span>OFFICIAL STAMP / SEAL</span>}
+        </div>
       </div>
       <div className="official-report__cc"><strong>CC:</strong><br />Department of {department}<br />{collegeName}<br />Educational Quality Assurance Directorate</div>
       <footer className="official-report__footer"><span>Department of {department}</span><span>{year} / {term}</span></footer>

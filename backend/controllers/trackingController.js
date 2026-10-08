@@ -59,8 +59,7 @@ const getLegacyDeptHeadEvaluationTracking = async (req, res) => {
                  SELECT COUNT(DISTINCT ed.id)
                  FROM evaluation_dispatches ed
                  INNER JOIN course_assignments ca ON ca.id = ed.assignment_id
-                 WHERE ca.department_id = i.department_id
-                   AND ca.instructor_id = i.id
+                 WHERE ca.instructor_id = i.id
                    AND LOWER(COALESCE(ed.evaluation_type, 'student')) = 'student'
                    AND ed.student_id IS NOT NULL
                    AND (? IS NULL OR LOWER(TRIM(ca.year_level)) = LOWER(TRIM(?)))
@@ -72,8 +71,7 @@ const getLegacyDeptHeadEvaluationTracking = async (req, res) => {
                  FROM evaluation_dispatches ed
                  INNER JOIN course_assignments ca ON ca.id = ed.assignment_id
                  INNER JOIN student_evaluation_submissions ses ON ses.dispatch_id = ed.id
-                 WHERE ca.department_id = i.department_id
-                   AND ca.instructor_id = i.id
+                 WHERE ca.instructor_id = i.id
                    AND LOWER(COALESCE(ed.evaluation_type, 'student')) = 'student'
                    AND LOWER(COALESCE(ses.status, 'submitted')) IN ${COMPLETED_STATUSES}
                    AND (? IS NULL OR LOWER(TRIM(ca.year_level)) = LOWER(TRIM(?)))

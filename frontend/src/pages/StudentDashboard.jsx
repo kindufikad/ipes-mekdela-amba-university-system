@@ -9,6 +9,7 @@ import LanguageToggle from '../components/LanguageToggle';
 import StudentEvaluationModal from '../components/StudentEvaluationModal';
 import { useAuth } from '../context/useAuth';
 import IPESAISmartInsights from '../components/ai/IPESAISmartInsights';
+import { calculateLikertPercentage, hasLikertResponse } from '../utils/likertScoring';
 
 const resolveTranslationValue = (value, fallback = '', preferredLanguage = 'en') => {
   if (typeof value === 'string') return value;
@@ -211,11 +212,7 @@ const StudentDashboard = () => {
     [criteriaLanguage, dynamicStudentSections]
   );
 
-  const totalItems = activeEvaluationSections.reduce((count, section) => count + section.items.length, 0);
-  const totalScore = useMemo(() => {
-    const sum = Object.values(studentResponses).reduce((acc, value) => acc + Number(value || 0), 0);
-    return totalItems ? (sum / totalItems) * 20 : 0;
-  }, [studentResponses, totalItems]);
+  const totalScore = useMemo(() => calculateLikertPercentage(studentResponses), [studentResponses]);
 
   const isCompletedEvaluation = (course) => Boolean(course?.is_evaluated)
     || ['submitted', 'completed', 'approved', 'evaluated'].includes(String(course?.submission_status || course?.status || course?.evaluation_status || '').toLowerCase());
@@ -402,6 +399,13 @@ const StudentDashboard = () => {
     event.preventDefault();
     if (!selectedDispatch) {
       setError('Please select an evaluation to submit.');
+      return;
+    }
+    const unansweredItems = activeEvaluationSections
+      .flatMap((section) => section.items)
+      .filter((item) => !hasLikertResponse(studentResponses[item.id]));
+    if (unansweredItems.length) {
+      setError(`Please answer all criteria questions before submitting. ${unansweredItems.length} question(s) remaining.`);
       return;
     }
     const pendingTask = workflowSummary.items.find((item) => item.type === 'student-feedback' && item.status !== 'completed');
@@ -611,7 +615,8 @@ const StudentDashboard = () => {
                 </div>
               </div>
             </div>
-            <p className="mb-4 text-sm text-gray-600">{t('studentDashboard.bilingualInstruction')}</p>
+            <p className="mb-2 text-sm text-gray-600">{t('studentDashboard.bilingualInstruction')}</p>
+            <p className="mb-4 text-xs text-gray-500">Scale: 1 = Very Low, 2 = Low, 3 = Average, 4 = High, 5 = Very High, N/A = Not Applicable</p>
             <form onSubmit={handleSubmit} className="space-y-5">
               {activeEvaluationSections.map((section, sectionIndex) => (
                 <div key={`section-${section.title}-${sectionIndex}`} className="rounded-2xl border border-gray-200 bg-gray-50 p-4">
@@ -624,8 +629,8 @@ const StudentDashboard = () => {
                             <p className="text-sm text-gray-700">{criteriaLanguage === 'am' ? (item.am || item.en) : item.en}</p>
                           </div>
                           <div className="flex flex-wrap gap-2">
-                            {[1, 2, 3, 4, 5].map((value) => (
-                              <label key={value} className={`rounded-full border px-3 py-1 text-sm ${studentResponses[item.id] === value ? 'border-ieps-blue-600 bg-ieps-blue-600 text-white' : 'border-gray-200 bg-white text-gray-700'}`}>
+                            {[1, 2, 3, 4, 5, 'N/A'].map((value) => (
+                              <label key={value} className={`rounded-full border px-3 py-1 text-sm ${studentResponses[item.id] === value ? (value === 'N/A' ? 'border-slate-700 bg-slate-700 text-white' : 'border-ieps-blue-600 bg-ieps-blue-600 text-white') : (value === 'N/A' ? 'border-slate-300 bg-slate-100 text-slate-600' : 'border-gray-200 bg-white text-gray-700')}`}>
                                 <input
                                   type="radio"
                                   name={item.id}

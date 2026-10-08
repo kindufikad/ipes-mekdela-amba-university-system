@@ -3,7 +3,7 @@ import { evaluationApi } from '../services/api';
 import { validateEvaluationFeedback } from '../utils/validationUtility';
 import { useTranslation } from '../context/useTranslation';
 
-const formatScore = (value) => `${Number(value || 0).toFixed(1)}%`;
+const formatScore = (value, precision = 1) => `${Number(value || 0).toFixed(precision)}%`;
 
 const getStatus = (score, t) => {
   if (score >= 90) return { label: t('performanceDashboard.excellent'), className: 'bg-emerald-100 text-emerald-700' };
@@ -51,9 +51,11 @@ const PerformanceDashboard = () => {
 
   const isComplete = report?.isComplete === true;
   const totalWeightedScore = Number(report?.totalScore ?? report?.totalWeightedScore ?? 0);
-  const isDepartmentHead = Boolean(report?.isDepartmentHead);
-  const hasAssignedCourse = report?.hasAssignedCourse !== false;
-  const studentExcluded = isDepartmentHead || !hasAssignedCourse;
+  const studentSubmissionCount = Number(report?.submission_count ?? report?.submissionCount ?? report?.breakdown?.student?.submissionCount ?? report?.breakdown?.student?.count ?? 0);
+  const hasAssignedCourse = (report?.hasAssignedCourses ?? (report?.hasAssignedCourse !== false))
+    || studentSubmissionCount > 0
+    || Number(report?.total_assignments ?? report?.totalAssignments ?? 0) > 0;
+  const studentExcluded = !hasAssignedCourse;
   const status = getStatus(totalWeightedScore, t);
   const backendStatus = String(report?.status || '').toLowerCase();
   const translatedBackendStatus = ({ excellent: t('performanceDashboard.excellent'), 'very good': t('performanceDashboard.veryGood'), good: t('performanceDashboard.good'), satisfactory: t('performanceDashboard.satisfactory'), unsatisfactory: t('performanceDashboard.unsatisfactory'), pending: t('performanceDashboard.pending') })[backendStatus];
@@ -70,6 +72,7 @@ const PerformanceDashboard = () => {
   const strengths = Array.isArray(feedback.strengths) ? feedback.strengths : [];
   const improvements = Array.isArray(feedback.improvements) ? feedback.improvements : [];
   const breakdown = report?.breakdown || {};
+  const studentEvaluated = studentSubmissionCount > 0;
   const breakdownItems = [
     { key: 'student', label: t('performanceDashboard.student'), color: 'blue', available: !studentExcluded },
     { key: 'deptHead', label: t('performanceDashboard.deptHead'), color: 'indigo', available: true },
@@ -106,13 +109,20 @@ const PerformanceDashboard = () => {
       <div className="grid gap-4 md:grid-cols-3">
         {breakdownItems.map((item) => {
           const score = breakdown[item.key] || {};
-          const rawPercent = Number(score.rawPercentage ?? score.rawScore ?? 0);
-          const weightedPercent = Number(score.weightedContribution ?? 0);
-          const displayedValue = item.key === 'student' && studentExcluded ? t('performanceDashboard.notAvailable') : formatScore(rawPercent);
+          const rawPercent = Number(score.rawPercentage ?? score.rawScore ?? (item.key === 'student' ? report?.raw_student_score : 0) ?? 0);
+          const weightedPercent = Number(score.weightedContribution ?? (rawPercent * Number(score.weight ?? (hasAssignedCourse ? 50 : 0)) / 100));
+          const studentStatus = !hasAssignedCourse ? 'Not assigned' : studentEvaluated ? 'Evaluated' : 'Active';
+          const displayedValue = item.key === 'student' && studentExcluded
+            ? t('performanceDashboard.notAvailable')
+            : formatScore(rawPercent, item.key === 'student' ? 2 : 1);
           const weightText = getWeightText(item.key, score);
-          const noteText = item.key === 'student' && studentExcluded ? t('performanceDashboard.noCourseAssigned') : t('performanceDashboard.rawPercentage');
-          const contributionText = item.key === 'student' && studentExcluded ? '0.0%' : formatScore(weightedPercent);
-          return <section key={item.key} className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><h3 className="font-bold text-gray-900">{item.label}</h3><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">{weightText}</span></div><p className="mt-4 text-3xl font-bold text-ieps-blue-700">{displayedValue}</p><p className="mt-1 text-sm text-gray-500">{noteText}</p><div className="mt-4 border-t border-gray-100 pt-3"><p className="text-sm text-gray-500">{t('performanceDashboard.weightedContribution')}</p><p className="text-xl font-bold text-gray-900">{contributionText}</p></div></section>;
+          const noteText = item.key === 'student' && studentExcluded
+            ? t('performanceDashboard.noCourseAssigned')
+            : t('performanceDashboard.rawPercentage');
+          const contributionText = item.key === 'student' && studentExcluded
+            ? '0.00%'
+            : formatScore(weightedPercent, item.key === 'student' ? 2 : 1);
+          return <section key={item.key} className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm"><div className="flex items-center justify-between gap-3"><h3 className="font-bold text-gray-900">{item.label}</h3><div className="flex flex-wrap justify-end gap-2"><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">{weightText}</span>{item.key === 'student' && <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${hasAssignedCourse && studentEvaluated ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{studentStatus}</span>}</div></div><p className="mt-4 text-3xl font-bold text-ieps-blue-700">{displayedValue}</p><p className="mt-1 text-sm text-gray-500">{noteText}</p><div className="mt-4 border-t border-gray-100 pt-3"><p className="text-sm text-gray-500">{t('performanceDashboard.weightedContribution')}</p><p className="text-xl font-bold text-gray-900">{contributionText}</p></div></section>;
         })}
       </div>
 

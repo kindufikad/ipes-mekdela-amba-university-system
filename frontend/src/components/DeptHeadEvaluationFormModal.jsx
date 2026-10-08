@@ -1,9 +1,35 @@
 import { useEffect, useMemo, useState, useContext } from 'react';
 import { X } from 'lucide-react';
-import { criteriaApi } from '../services/api';
 import { LanguageContext } from '../context/LanguageContext';
 import LanguageToggle from './LanguageToggle';
-import { getQuestionText, groupCriteriaByCategory } from '../utils/evaluationCriteria';
+
+const criteria = [
+  {
+    id: 'academic_assessment_compliance',
+    title: 'Academic & Assessment Compliance',
+    criterion_text: 'Timely submission of course outlines, exam papers, continuous assessments, and final grades.',
+  },
+  {
+    id: 'student_advising_mentorship',
+    title: 'Student Advising & Mentorship',
+    criterion_text: 'Regular availability during scheduled office hours and effective guidance for Senior Essays/Projects.',
+  },
+  {
+    id: 'research_community_service',
+    title: 'Research & Community Service',
+    criterion_text: 'Active engagement in academic research, publications, capacity-building workshops, and community outreach.',
+  },
+  {
+    id: 'professional_ethics_punctuality',
+    title: 'Professional Ethics & Punctuality',
+    criterion_text: 'Consistent attendance in classes and department meetings, adherence to university regulations, and professional code of conduct.',
+  },
+  {
+    id: 'instructional_innovation_e_learning',
+    title: 'Instructional Innovation & E-Learning Adoption',
+    criterion_text: 'Effective use of modern teaching methodologies, practical/lab sessions, and digital learning platforms (LMS).',
+  },
+];
 
 const copy = {
   en: { title: 'Evaluate Department Head', scale: '1 = Very Low, 2 = Low, 3 = Average, 4 = High, 5 = Very High', deadline: 'Deadline', strengths: 'Strengths / Key Achievements', weaknesses: 'Areas for Improvement', submit: 'Submit Evaluation', update: 'Update Evaluation', cancel: 'Cancel', close: 'Close', submitting: 'Submitting...', score: 'Score', required: 'Please rate every criterion before submitting.' },
@@ -12,7 +38,6 @@ const copy = {
 
 const DeptHeadEvaluationFormModal = ({ open, head, mode = 'create', onClose, onSubmit, submitting = false, error = '' }) => {
   const { language, toggleLanguage } = useContext(LanguageContext);
-  const [criteria, setCriteria] = useState([]);
   const [scores, setScores] = useState({});
   const [strengths, setStrengths] = useState('');
   const [weaknesses, setWeaknesses] = useState('');
@@ -21,7 +46,6 @@ const DeptHeadEvaluationFormModal = ({ open, head, mode = 'create', onClose, onS
 
   useEffect(() => {
     if (!open) return;
-    criteriaApi.get('dept_head').then((rows) => setCriteria(Array.isArray(rows) ? rows : [])).catch(() => setCriteria([]));
     const saved = typeof head?.criteria_scores === 'string' ? (() => { try { return JSON.parse(head.criteria_scores); } catch { return {}; } })() : (head?.criteria_scores || {});
     setScores(mode === 'edit' ? saved : {});
     setStrengths(mode === 'edit' ? head?.strengths || '' : '');
@@ -29,12 +53,9 @@ const DeptHeadEvaluationFormModal = ({ open, head, mode = 'create', onClose, onS
     setLocalError('');
   }, [open, head, mode]);
 
-  const sections = groupCriteriaByCategory(criteria);
-  const totalWeight = useMemo(() => criteria.reduce((sum, criterion) => sum + Math.max(0, Number(criterion.weight) || 0), 0), [criteria]);
   const totalScore = useMemo(() => {
-    if (!totalWeight) return 0;
-    return criteria.reduce((sum, criterion) => sum + ((Number(scores[criterion.id]) || 0) / 5) * ((Number(criterion.weight) || 0) / totalWeight) * 30, 0);
-  }, [criteria, scores, totalWeight]);
+    return criteria.reduce((sum, criterion) => sum + ((Number(scores[criterion.id]) || 0) / 5) * 6, 0);
+  }, [scores]);
 
   const handleSubmit = (event) => {
     event.preventDefault();
@@ -57,23 +78,18 @@ const DeptHeadEvaluationFormModal = ({ open, head, mode = 'create', onClose, onS
         <div className="mt-5 rounded-xl border border-blue-100 bg-blue-50 p-4 text-sm text-blue-900"><div className="flex flex-wrap justify-between gap-3"><span>{t.scale}</span><strong>{t.deadline}: {head.deadline || '-'}</strong></div></div>
         {error || localError ? <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error || localError}</div> : null}
         <form onSubmit={handleSubmit} className="mt-5 space-y-5">
-          {sections.map((section) => {
-            let questionNumber = 1;
-            return (
-              <fieldset key={section.category} className="space-y-3">
-                <legend className="border-b border-slate-200 pb-2 text-xs font-bold uppercase tracking-[0.14em] text-slate-500">{section.category}</legend>
-                {section.criteria.map((criterion) => {
-                  const questionNumberValue = questionNumber++;
-                  return (
-                    <div key={criterion.id} className="rounded-xl border border-slate-100 bg-slate-50 p-4">
-                      <p className="text-sm font-medium text-slate-800"><span className="mr-2 font-mono text-xs text-slate-400">{questionNumberValue}.</span>{getQuestionText(criterion, language)}</p>
-                      <div className="mt-3 flex gap-2">{[1, 2, 3, 4, 5].map((rating) => <button key={rating} type="button" onClick={() => setScores((current) => ({ ...current, [criterion.id]: rating }))} aria-pressed={scores[criterion.id] === rating} className={`h-10 w-10 rounded-full text-sm font-bold ${scores[criterion.id] === rating ? 'bg-blue-600 text-white' : 'bg-white text-slate-700 ring-1 ring-slate-200 hover:ring-blue-400'}`}>{rating}</button>)}</div>
-                    </div>
-                  );
-                })}
-              </fieldset>
-            );
-          })}
+          <fieldset className="space-y-3">
+            <legend className="border-b border-slate-200 pb-2 text-xs font-bold uppercase tracking-[0.14em] text-slate-500">Academic Performance Criteria</legend>
+            {criteria.map((criterion, index) => (
+              <div key={criterion.id} className="rounded-xl border border-slate-200 bg-white p-4">
+                <p className="text-sm font-semibold text-slate-900"><span className="mr-2 font-mono text-xs text-slate-400">{index + 1}.</span>{criterion.title}</p>
+                <p className="mt-1 text-sm leading-6 text-slate-600">{criterion.criterion_text}</p>
+                <div className="mt-3 flex gap-2" role="group" aria-label={`Rating for ${criterion.title}`}>
+                  {[1, 2, 3, 4, 5].map((rating) => <button key={rating} type="button" onClick={() => setScores((current) => ({ ...current, [criterion.id]: rating }))} aria-pressed={scores[criterion.id] === rating} className={`h-10 w-10 rounded-full text-sm font-bold ${scores[criterion.id] === rating ? 'bg-blue-600 text-white' : 'bg-white text-slate-700 ring-1 ring-slate-200 hover:ring-blue-400'}`}>{rating}</button>)}
+                </div>
+              </div>
+            ))}
+          </fieldset>
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-right font-bold text-blue-700">{t.score}: {totalScore.toFixed(2)} / 30</div>
           <label className="block text-sm font-medium text-slate-700">{t.strengths}<textarea rows="3" value={strengths} onChange={(event) => setStrengths(event.target.value)} className="mt-2 w-full rounded-xl border border-slate-300 px-3 py-3" /></label>
           <label className="block text-sm font-medium text-slate-700">{t.weaknesses}<textarea rows="3" value={weaknesses} onChange={(event) => setWeaknesses(event.target.value)} className="mt-2 w-full rounded-xl border border-slate-300 px-3 py-3" /></label>

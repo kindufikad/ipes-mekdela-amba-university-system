@@ -2,6 +2,7 @@ const pool = require('../config/db');
 const { createNotifications } = require('./notificationController');
 const { validateEvaluationFeedbackPair } = require('../utils/validationUtility');
 const { calculateAndSaveInstructorResult } = require('../utils/evaluationCalculator');
+const { calculateLikertPercentage } = require('../utils/likertScoring');
 
 const ACADEMIC_DIRECTORATE_RATING_KEYS = [
   'leadership',
@@ -322,6 +323,13 @@ exports.submitStudentEvaluation = async (req, res) => {
     });
   }
 
+  const hasResponses = Array.isArray(responses)
+    ? responses.length > 0
+    : Object.keys(responses || {}).length > 0;
+  const calculatedScore = hasResponses
+    ? Number(calculateLikertPercentage(responses).toFixed(2))
+    : Number(score || 0);
+
   const feedbackValidation = validateEvaluationFeedbackPair(strengths, improvements);
   if (!feedbackValidation.valid) {
     return res.status(400).json({
@@ -379,7 +387,7 @@ exports.submitStudentEvaluation = async (req, res) => {
     }
 
     const submissionValues = [
-      Number(score),
+      calculatedScore,
       String(feedback).trim(),
       JSON.stringify(responses),
       String(strengths).trim(),
@@ -657,11 +665,10 @@ exports.getInstructorEvaluationDetails = async (req, res) => {
       INNER JOIN users student_user ON student_user.id = s.user_id
       LEFT JOIN courses c ON c.id = ca.course_id
       LEFT JOIN instructors i ON i.id = ca.instructor_id
-      WHERE ca.department_id = ?
-        AND ca.instructor_id = ?
+      WHERE ca.instructor_id = ?
         AND LOWER(COALESCE(ca.status, 'assigned')) <> 'cancelled'
       ORDER BY student_name ASC, c.code ASC
-    `, [departmentId, instructorId]);
+    `, [instructorId]);
 
     const [peers] = await pool.query(`
       SELECT DISTINCT

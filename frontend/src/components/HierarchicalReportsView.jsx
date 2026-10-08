@@ -6,6 +6,7 @@ import { printDocument } from '../utils/printDocument';
 const HierarchicalReportsView = ({ title, description, rows = [], currentUser, targetLabel }) => {
   const [selectedRow, setSelectedRow] = useState(null);
   const [isPrinting, setIsPrinting] = useState(false);
+  const isExecutiveReports = title === 'Executive Reports';
 
   const printRow = (row) => {
     const completion = getReportCompletion(row);
@@ -31,14 +32,15 @@ const HierarchicalReportsView = ({ title, description, rows = [], currentUser, t
       </div>
       <div className="overflow-x-auto rounded-xl border border-slate-200">
         <table className="min-w-full text-left text-sm">
-          <thead className="bg-slate-50 text-xs uppercase text-slate-500"><tr><th className="px-4 py-3">Name</th><th className="px-4 py-3">{targetLabel}</th><th className="px-4 py-3">Final Score</th><th className="px-4 py-3">Action</th></tr></thead>
+          <thead className="bg-slate-50 text-xs uppercase text-slate-500"><tr><th className="px-4 py-3">Name</th><th className="px-4 py-3">{targetLabel}</th>{isExecutiveReports && <th className="px-4 py-3">Role</th>}<th className="px-4 py-3">Final Score</th><th className="px-4 py-3">Action</th></tr></thead>
           <tbody className="divide-y divide-slate-100">
             {rows.length ? rows.map((row) => <tr key={row.user_id || row.instructor_id}>
               <td className="px-4 py-4 font-medium text-slate-900">{row.name || row.full_name || row.email}</td>
               <td className="px-4 py-4 text-slate-600">{row.college_name || row.department_name || row.department || '-'}</td>
-              <td className="px-4 py-4 font-semibold text-blue-700">{Number(row.final_score ?? row.total_score ?? 0).toFixed(1)}%</td>
+              {isExecutiveReports && <td className="px-4 py-4"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${row.has_assigned_courses ? 'bg-emerald-50 text-emerald-700' : 'bg-blue-50 text-blue-700'}`}>{row.role_status || (row.has_assigned_courses ? 'Role: Teaching (100% Weight)' : 'Role: Non-Teaching (Re-scaled to 100%)')}</span></td>}
+              <td className="px-4 py-4 font-semibold text-blue-700">{Number(row.final_score ?? row.total_score ?? 0).toFixed(2)}%</td>
               <td className="px-4 py-4"><button type="button" title={getReportCompletion(row).canPrint ? 'Export / Print' : getReportCompletion(row).message} onClick={() => printRow(row)} disabled={!getReportCompletion(row).canPrint} className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">Export / Print</button></td>
-            </tr>) : <tr><td colSpan={4} className="px-4 py-10 text-center text-slate-500">No authorized reports are available.</td></tr>}
+            </tr>) : <tr><td colSpan={isExecutiveReports ? 5 : 4} className="px-4 py-10 text-center text-slate-500">No authorized reports are available.</td></tr>}
           </tbody>
         </table>
       </div>

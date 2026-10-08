@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
 import { evaluationApi, registrationApi } from '../services/api';
+import PublishEvaluationTable from '../components/PublishEvaluationTable';
 
 const PublishEvaluation = ({ departmentId, role = 'dept_head' }) => {
   const isDepartmentHead = ['dept_head', 'depthead', 'department_head'].includes(String(role).toLowerCase());
@@ -17,6 +18,8 @@ const PublishEvaluation = ({ departmentId, role = 'dept_head' }) => {
   const [peerHasSubmissions, setPeerHasSubmissions] = useState(false);
   const [studentEvaluationStarted, setStudentEvaluationStarted] = useState(false);
   const [studentEvaluationFullyCompleted, setStudentEvaluationFullyCompleted] = useState(false);
+  const [showPublishModal, setShowPublishModal] = useState(false);
+  const [batchYear, setBatchYear] = useState('All Batches');
   const publishFilters = { ...filters, academic_year: new Date().getFullYear() };
 
   const handleUnpublish = async () => {
@@ -141,9 +144,15 @@ const PublishEvaluation = ({ departmentId, role = 'dept_head' }) => {
   const getStaffType = (record) => String(record.target_type || record.publish_role || record.assigned_role || record.role || '').toLowerCase() === 'lab_assistant' ? 'lab_assistant' : 'instructor';
   const matchingAssignments = assignments.filter((assignment) => filters.staff_type === 'all' || getStaffType(assignment) === filters.staff_type).filter((assignment) => Object.entries(filters).every(([field, value]) => field === 'staff_type' || !value || String(assignment[field] || '').toLowerCase() === value.toLowerCase()));
   const visibleStaff = departmentStaff.filter((staff) => filters.staff_type === 'all' || getStaffType(staff) === filters.staff_type);
-  const targetAlreadyPublished = alreadyPublished[target] || (target === 'student' && matchingAssignments.some((assignment) => assignment.is_student_published));
-  const targetEvaluationStarted = target === 'student' ? studentEvaluationStarted : peerEvaluationStarted;
-  const targetEvaluationFullyCompleted = target === 'student' ? studentEvaluationFullyCompleted : peerEvaluationFullyCompleted;
+  const targetAlreadyPublished = target === 'student' && !isDepartmentHead
+    ? false
+    : alreadyPublished[target] || (target === 'student' && matchingAssignments.some((assignment) => assignment.is_student_published));
+  const targetEvaluationStarted = target === 'student' && !isDepartmentHead
+    ? false
+    : target === 'student' ? studentEvaluationStarted : peerEvaluationStarted;
+  const targetEvaluationFullyCompleted = target === 'student' && !isDepartmentHead
+    ? false
+    : target === 'student' ? studentEvaluationFullyCompleted : peerEvaluationFullyCompleted;
   const canUnpublish = !targetEvaluationStarted || targetEvaluationFullyCompleted;
   const instructorCount = departmentStaff.filter((staff) => String(staff.role).toLowerCase() === 'instructor').length;
   const canPublish = !publishing
@@ -161,7 +170,12 @@ const PublishEvaluation = ({ departmentId, role = 'dept_head' }) => {
     }
     setPublishing(true);
     try {
-      const payload = { department_id: departmentId, ...publishFilters, staff_type: filters.staff_type };
+      const payload = {
+        department_id: departmentId,
+        ...publishFilters,
+        batchYear,
+        staff_type: filters.staff_type,
+      };
       const result = target === 'student'
         ? await evaluationApi.publishStudent(payload)
         : await evaluationApi.publishPeerEvaluation({
@@ -176,7 +190,10 @@ const PublishEvaluation = ({ departmentId, role = 'dept_head' }) => {
         return;
       }
       setAlreadyPublished((current) => ({ ...current, [target]: true }));
-      toast.success(result?.message || `Evaluation published to ${target}s.`);
+      toast.success(target === 'student'
+        ? 'Evaluation results published successfully for the selected target batch.'
+        : result?.message || `Evaluation published to ${target}s.`);
+      setShowPublishModal(false);
       const rows = await evaluationApi.getPublishAssignments({ department: departmentId, staff_type: filters.staff_type });
       setAssignments(Array.isArray(rows) ? rows : []);
     } catch (error) {
@@ -219,10 +236,39 @@ const PublishEvaluation = ({ departmentId, role = 'dept_head' }) => {
           </div>
         )}
 
-          <div className="mt-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between"><p className="text-sm text-gray-500">{target === 'student' ? (loading ? 'Loading assignments...' : `${matchingAssignments.length} assigned course${matchingAssignments.length === 1 ? '' : 's'} match the selected filters.`) : `${departmentStaff.length} active academic staff in this department.`}</p><div className="flex min-h-12 w-full flex-wrap items-center justify-start gap-2 md:w-auto md:min-w-[18rem] md:justify-end">{(target === 'instructor' ? !targetAlreadyPublished : canPublish) && <button type="button" onClick={publish} disabled={!canPublish} className="inline-flex min-h-12 items-center justify-center rounded-xl bg-ieps-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-ieps-blue-700 disabled:cursor-not-allowed disabled:opacity-50">{publishing ? 'Publishing...' : target === 'instructor' ? 'Publish Peer Evaluation' : 'Publish Evaluation to Students'}</button>}{target === 'instructor' && !targetAlreadyPublished && instructorCount < 1 && <span className="text-right text-xs font-medium text-slate-500">At least one active instructor is required to publish peer evaluations.</span>}{targetAlreadyPublished && canUnpublishTarget && <button type="button" onClick={handleUnpublish} className="inline-flex min-h-12 items-center justify-center rounded-xl border border-amber-300 px-5 py-3 text-sm font-semibold text-amber-700 transition hover:bg-amber-50">{publishing ? 'Withdrawing...' : target === 'student' ? 'Unpublish' : 'Unpublish Peer Evaluation'}</button>}{target === 'instructor' && targetAlreadyPublished && peerHasSubmissions && <span className="text-right text-xs font-medium text-slate-500">Peer evaluations cannot be unpublished after a submission exists.</span>}</div></div>
+          <div className="mt-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between"><p className="text-sm text-gray-500">{target === 'student' ? (loading ? 'Loading assignments...' : `${matchingAssignments.length} assigned course${matchingAssignments.length === 1 ? '' : 's'} match the selected filters.`) : `${departmentStaff.length} active academic staff in this department.`}</p><div className="flex min-h-12 w-full flex-wrap items-center justify-start gap-2 md:w-auto md:min-w-[18rem] md:justify-end">{(target === 'instructor' ? !targetAlreadyPublished : canPublish) && <button type="button" onClick={() => target === 'student' ? setShowPublishModal(true) : void publish()} disabled={!canPublish} className="inline-flex min-h-12 items-center justify-center rounded-xl bg-ieps-blue-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-ieps-blue-700 disabled:cursor-not-allowed disabled:opacity-50">{publishing ? 'Publishing...' : target === 'instructor' ? 'Publish Peer Evaluation' : 'Publish Evaluation to Students'}</button>}{target === 'instructor' && !targetAlreadyPublished && instructorCount < 1 && <span className="text-right text-xs font-medium text-slate-500">At least one active instructor is required to publish peer evaluations.</span>}{targetAlreadyPublished && canUnpublishTarget && <button type="button" onClick={handleUnpublish} className="inline-flex min-h-12 items-center justify-center rounded-xl border border-amber-300 px-5 py-3 text-sm font-semibold text-amber-700 transition hover:bg-amber-50">{publishing ? 'Withdrawing...' : target === 'student' ? 'Unpublish' : 'Unpublish Peer Evaluation'}</button>}{target === 'instructor' && targetAlreadyPublished && peerHasSubmissions && <span className="text-right text-xs font-medium text-slate-500">Peer evaluations cannot be unpublished after a submission exists.</span>}</div></div>
       </div>
 
-      {target === 'student' && <div className="overflow-x-auto rounded-3xl border border-gray-200 bg-white shadow-sm"><table className="min-w-full text-left text-sm"><thead className="bg-slate-50 text-slate-600"><tr><th className="px-4 py-3 font-semibold">Course</th><th className="px-4 py-3 font-semibold">Instructor / Staff</th><th className="px-4 py-3 font-semibold">Type</th><th className="px-4 py-3 font-semibold">Program</th><th className="px-4 py-3 font-semibold">Year / Section</th><th className="px-4 py-3 font-semibold">Status</th></tr></thead><tbody className="divide-y divide-gray-100">{matchingAssignments.map((assignment) => <tr key={assignment.id}><td className="px-4 py-3">{assignment.course_code} · {assignment.course_name}</td><td className="px-4 py-3">{assignment.instructor_name || '-'}</td><td className="px-4 py-3"><span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${assignment.type === 'Lab Assistant' ? 'bg-violet-100 text-violet-700' : 'bg-blue-100 text-blue-700'}`}>{assignment.type || 'Course / Instructor'}</span></td><td className="px-4 py-3">{assignment.program_type || '-'}</td><td className="px-4 py-3">{assignment.year_level || '-'} / {assignment.section || '-'}</td><td className="px-4 py-3">{assignment.is_student_published ? 'Published' : 'Not published'}</td></tr>)}{!matchingAssignments.length && <tr><td colSpan={6} className="px-4 py-10 text-center text-slate-500">No assigned courses or lab assistants match the selected filters.</td></tr>}</tbody></table></div>}
+      {showPublishModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="publish-batch-title">
+          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-xl">
+            <h3 id="publish-batch-title" className="text-lg font-bold text-slate-900">Confirm Evaluation Publishing</h3>
+            <p className="mt-2 text-sm text-slate-600">Choose the student batch that should receive this evaluation.</p>
+            <label className="mt-5 block text-sm font-medium text-slate-700">
+              Target Academic Year / Batch
+              <select value={batchYear} onChange={(event) => setBatchYear(event.target.value)} className={`${selectClass} mt-2`}>
+                <option value="3rd Year">3rd Year</option>
+                <option value="4th Year">4th Year</option>
+                <option value="All Batches">All Batches</option>
+              </select>
+            </label>
+            <div className="mt-6 flex justify-end gap-3">
+              <button type="button" onClick={() => setShowPublishModal(false)} disabled={publishing} className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 disabled:opacity-50">Cancel</button>
+              <button type="button" onClick={() => void publish()} disabled={publishing || !canPublish} className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">{publishing ? 'Publishing...' : 'Confirm & Publish'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {target === 'student' && (
+        <div className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5">
+          <PublishEvaluationTable
+            departmentId={departmentId}
+            filters={filters}
+            refreshToken={assignments}
+          />
+        </div>
+      )}
     </section>
   );
 };

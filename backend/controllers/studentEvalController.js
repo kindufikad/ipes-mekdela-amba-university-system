@@ -3,8 +3,12 @@ const pool = require('../config/db');
 const getConsolidatedStudentScore = async (req, res) => {
   try {
     const instructorId = Number(req.params.instructorId);
-    const academicYear = String(req.query.academicYear || '2026 E.C').trim();
-    const semester = String(req.query.semester || 'Semester I').trim();
+    const [[activePeriod]] = await pool.query(
+      `SELECT academic_year, semester FROM evaluation_periods
+       WHERE LOWER(status) = 'active' ORDER BY id DESC LIMIT 1`
+    );
+    const academicYear = String(req.query.academicYear || activePeriod?.academic_year || '').trim();
+    const semester = String(req.query.semester || activePeriod?.semester || '').trim();
 
     if (!Number.isInteger(instructorId) || instructorId <= 0) {
       return res.status(400).json({ success: false, message: 'A valid instructor id is required.' });
@@ -15,8 +19,9 @@ const getConsolidatedStudentScore = async (req, res) => {
     const [rows] = await pool.query(
       `SELECT
          ca.instructor_id,
-         COALESCE(ed.academic_year, ca.academic_year) AS academic_year,
-         COALESCE(ed.semester, ca.semester) AS semester,
+         MAX(COALESCE(NULLIF(TRIM(ed.academic_year), ''), NULLIF(TRIM(ca.academic_year), ''))) AS academic_year,
+         MAX(COALESCE(NULLIF(TRIM(ed.semester), ''), NULLIF(TRIM(ca.semester), ''))) AS semester,
+         COUNT(DISTINCT ses.id) AS submission_count,
          COUNT(DISTINCT ses.id) AS total_students_evaluated,
          COUNT(DISTINCT ca.course_id) AS total_courses_taught,
          AVG(ses.score) AS overall_raw_score
@@ -26,12 +31,12 @@ const getConsolidatedStudentScore = async (req, res) => {
        WHERE ca.instructor_id = ?
          AND LOWER(COALESCE(ed.target_type, 'instructor')) = 'instructor'
          AND LOWER(COALESCE(ses.status, 'submitted')) IN ('submitted', 'completed', 'approved', 'published')
-         AND COALESCE(ed.academic_year, ca.academic_year) = ?
-         AND COALESCE(ed.semester, ca.semester) = ?
-       GROUP BY ca.instructor_id,
-         COALESCE(ed.academic_year, ca.academic_year),
-         COALESCE(ed.semester, ca.semester)`,
-      [instructorId, academicYear, semester]
+         AND (? = '' OR LOWER(COALESCE(NULLIF(TRIM(ed.academic_year), ''), NULLIF(TRIM(ca.academic_year), ''), '')) = LOWER(?)
+           OR LOWER(COALESCE(NULLIF(TRIM(ed.academic_year), ''), NULLIF(TRIM(ca.academic_year), ''), '')) = LOWER(SUBSTRING_INDEX(?, '/', 1)))
+         AND (? = '' OR LOWER(REPLACE(COALESCE(NULLIF(TRIM(ed.semester), ''), NULLIF(TRIM(ca.semester), ''), ''), 'semester', ''))
+           = LOWER(REPLACE(?, 'semester', '')))
+       `,
+      [instructorId, academicYear, academicYear, academicYear, semester, semester]
     );
 
     const summary = rows[0] || {};
@@ -44,8 +49,10 @@ const getConsolidatedStudentScore = async (req, res) => {
         instructorId,
         academicYear,
         semester,
+        raw_student_score: rawScore,
+        submission_count: Number(summary.submission_count || 0),
         totalCoursesTaught: Number(summary.total_courses_taught || 0),
-        totalEvaluationsSubmitted: Number(summary.total_students_evaluated || 0),
+        totalEvaluationsSubmitted: Number(summary.submission_count || 0),
         studentRawPercentage: rawScore.toFixed(2),
         studentWeightedScore: weightedContribution.toFixed(2),
       },

@@ -30,6 +30,17 @@ const enforceAdminAccess = (req, res) => {
 
 const clearLocalDevelopmentBlockedIps = async () => {
   if (process.env.NODE_ENV !== 'development') return false;
+  await pool.query(`CREATE TABLE IF NOT EXISTS blocked_ips (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    ip_address VARCHAR(64) NOT NULL,
+    reason VARCHAR(255) NOT NULL,
+    blocked_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NULL,
+    is_permanent TINYINT(1) NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_blocked_ips_ip (ip_address)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
   await pool.query(
     `DELETE FROM blocked_ips WHERE ip_address IN (?, ?, ?)`,
     LOCALHOST_BLOCKLIST
