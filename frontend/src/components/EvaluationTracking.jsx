@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { CheckCircle2, Clock3, Eye, Filter, RefreshCw, Search, Users } from 'lucide-react';
 import toast from 'react-hot-toast';
-import { evaluationApi } from '../services/api';
+import { evaluationApi, notificationApi } from '../services/api';
 import InstructorTrackingModal from './InstructorTrackingModal';
 
 const DEFAULT_FILTERS = { searchInstructor: '', academicYear: '', section: '', program: '' };
@@ -116,9 +116,11 @@ const EvaluationTracking = ({ departmentId, onEvaluateNow = () => {} }) => {
     setPendingDetails({ row, students: [], peers: [] });
     setDetailsLoading(true);
     try {
-      const details = row.role === 'Lab Assistant'
-        ? await evaluationApi.getDeptHeadPendingEvaluators({ evaluatee_id: instructorId, target_role: 'lab_assistant', include_completed: 1 })
-        : await evaluationApi.getInstructorEvaluationDetails(instructorId);
+      const details = await evaluationApi.getDeptHeadPendingEvaluators({
+        evaluatee_id: instructorId,
+        target_role: row.role === 'Lab Assistant' ? 'lab_assistant' : 'instructor',
+        include_completed: 1,
+      });
       setPendingDetails({
         row,
         ...details,
@@ -130,14 +132,32 @@ const EvaluationTracking = ({ departmentId, onEvaluateNow = () => {} }) => {
 
   const viewPending = (row) => handleOpenViewModal(row?.instructorId, row);
 
-  const sendReminder = async (row) => {
+  const sendReminder = async (row, recipient = {}) => {
     setReminderSending(true);
     try {
-      const result = await evaluationApi.sendDepartmentHeadEvaluationReminder({
+      const payload = {
         instructorId: row?.instructorId,
         targetRole: row?.role === 'Lab Assistant' ? 'lab_assistant' : 'instructor',
-        audience: 'all',
-      });
+        audience: recipient.type || recipient.audience || 'all',
+        recipient_user_id: recipient.user_id || undefined,
+        target_name: row?.instructorName || 'the assigned staff member',
+      };
+      const isBulkReminder = payload.audience === 'all' && !payload.recipient_user_id;
+      const result = isBulkReminder
+        ? await notificationApi.sendBulkReminders(payload)
+        : await notificationApi.sendReminder(payload);
+      if (isBulkReminder) {
+        const sentCount = Number(result?.sentCount ?? 0);
+        const unlinkedCount = Number(result?.unlinkedCount ?? 0);
+        if (unlinkedCount > 0) {
+          toast(`ማስታወቂያው ለ ${sentCount} ተጠቃሚዎች ደረሷል:: ${unlinkedCount} ተጠቃሚዎች የቴሌግራም ቦት ስላላያያዙ አልደረሳቸውም::`, { icon: 'ℹ️' });
+        } else if (sentCount > 0) {
+          toast.success('የማስታወቂያ መልእክት ለሁሉም ተላክዋል!');
+        } else {
+          toast('ለማሳሰብ የሚጠበቁ ተጠቃሚዎች የሉም::', { icon: 'ℹ️' });
+        }
+        return;
+      }
       toast.success(`Reminders sent to ${result?.sent || 0} pending evaluators; ${result?.telegramSent || 0} urgent Telegram messages sent.`);
     } catch (error) { toast.error(error?.message || 'Unable to send reminders.'); }
     finally { setReminderSending(false); }
@@ -171,7 +191,7 @@ const EvaluationTracking = ({ departmentId, onEvaluateNow = () => {} }) => {
     <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white shadow-sm"><table className="min-w-[1050px] w-full text-left text-sm"><thead className="bg-slate-50 text-xs uppercase text-slate-500"><tr><th className="px-4 py-3">#</th><th className="px-4 py-3">INSTRUCTOR</th><th className="px-4 py-3">STUDENT COMPLETION</th><th className="px-4 py-3">PEER COMPLETION</th><th className="px-4 py-3">DEPT HEAD STATUS</th><th className="px-4 py-3">OVERALL PROGRESS</th><th className="px-4 py-3">ACTION</th></tr></thead><tbody className="divide-y divide-slate-100">
       {loading ? <tr><td colSpan="7" className="px-4 py-12 text-center text-slate-500">Loading evaluation tracking...</td></tr> : currentItems.length ? currentItems.map((row, index) => { const student = row.studentCompletion || { completed: 0, total: 0, percentage: 0 }; const peer = row.peerCompletion || { completed: 0, total: 0, percentage: 0 }; const overall = asNumber(row.overallProgress); const progressStatus = getProgressStatus(overall); const deptSubmitted = row.deptHeadStatus === 'Submitted'; return <tr key={row.instructorId}><td className="px-4 py-4">{indexOfFirstItem + index + 1}</td><td className="px-4 py-4 font-semibold text-slate-900">{row.instructorName}<span className="mt-1 block text-xs font-normal text-slate-500">{row.role} · {row.department}</span></td><td className="px-4 py-4"><span>{student.completed}/{student.total} Students - {student.percentage.toFixed(1)}%</span><div className="mt-2 h-1.5 w-36 rounded-full bg-slate-100"><div className="h-full rounded-full bg-blue-600" style={{ width: `${Math.min(100, student.percentage)}%` }} /></div></td><td className="px-4 py-4"><span>{peer.completed}/{peer.total} Peers - {peer.percentage.toFixed(1)}%</span><div className="mt-2 h-1.5 w-28 rounded-full bg-slate-100"><div className="h-full rounded-full bg-emerald-500" style={{ width: `${Math.min(100, peer.percentage)}%` }} /></div></td><td className="px-4 py-4"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${deptSubmitted ? statusClasses.complete : statusClasses.pending}`}>{deptSubmitted ? 'Submitted' : 'Pending'}</span></td><td className="px-4 py-4"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${progressStatus.classes}`}>{progressStatus.label} · {overall.toFixed(1)}%</span></td><td className="px-4 py-4"><button type="button" onClick={() => void viewPending(row)} className="inline-flex items-center gap-1 rounded-xl border border-blue-200 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-50"><Eye size={15} /> View</button></td></tr>; }) : <tr><td colSpan="7" className="px-4 py-12 text-center text-slate-500">No instructors match the selected view.</td></tr>}
     </tbody></table><div className="flex flex-col gap-4 border-t border-slate-200 p-4 text-sm text-slate-600 sm:flex-row sm:items-center sm:justify-between"><div className="flex flex-wrap items-center gap-4"><span>Showing <strong className="text-slate-900">{firstVisibleItem}</strong> to <strong className="text-slate-900">{lastVisibleItem}</strong> of <strong className="text-slate-900">{filteredRows.length}</strong> results</span><label className="flex items-center gap-2 text-xs text-slate-500" htmlFor="evaluation-tracking-rows">Rows:<select id="evaluation-tracking-rows" value={rowsPerPage} onChange={(event) => setRowsPerPage(Number(event.target.value))} className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-blue-500"><option value={5}>5</option><option value={10}>10</option><option value={20}>20</option></select></label></div><div className="flex items-center gap-1" aria-label="Evaluation tracking pagination"><button type="button" onClick={() => setCurrentPage((page) => Math.max(1, page - 1))} disabled={currentPage === 1} className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">Previous</button>{Array.from({ length: totalPages }, (_, index) => index + 1).map((page) => <button type="button" key={page} onClick={() => setCurrentPage(page)} aria-current={currentPage === page ? 'page' : undefined} className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition ${currentPage === page ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-200 text-slate-700 hover:bg-slate-50'}`}>{page}</button>)}<button type="button" onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))} disabled={currentPage === totalPages || !filteredRows.length} className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">Next</button></div></div></div>
-    <InstructorTrackingModal details={pendingDetails} loading={detailsLoading} onClose={() => setPendingDetails(null)} onSendReminder={() => void sendReminder(pendingDetails?.row)} onEvaluateNow={(row) => { setPendingDetails(null); onEvaluateNow(row); }} reminderSending={reminderSending} />
+    <InstructorTrackingModal details={pendingDetails} loading={detailsLoading} onClose={() => setPendingDetails(null)} onSendReminder={(recipient) => void sendReminder(pendingDetails?.row, recipient)} onEvaluateNow={(row) => { setPendingDetails(null); onEvaluateNow(row); }} reminderSending={reminderSending} />
   </section>;
 };
 

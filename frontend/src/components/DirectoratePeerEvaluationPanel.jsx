@@ -7,11 +7,23 @@ import LanguageToggle from './LanguageToggle';
 import { useEvaluation } from '../context/useEvaluation';
 import { LIKERT_OPTIONS, hasLikertResponse } from '../utils/likertScoring';
 import { deadlineToneClasses, getDeadlineState } from '../utils/evaluationDeadline';
+import { validatePeerEvaluationFeedbackPair } from '../utils/validationUtility';
 
 const formatPeerPercentage = (rawScore) => {
   const score = Math.max(Number(rawScore) || 0, 0);
   const percentage = score <= 5 ? (score / 5) * 100 : score;
   return `${Number(Math.min(percentage, 100).toFixed(1))}%`;
+};
+
+const getPeerDeadlineState = (item = {}) => {
+  const state = getDeadlineState(item.deadline);
+  const autoLock = item.deadline_auto_lock === undefined || Number(item.deadline_auto_lock) !== 0;
+  return {
+    ...state,
+    expired: autoLock && state.expired,
+    label: state.expired ? (autoLock ? 'Expired' : 'Open (auto-lock off)') : state.daysRemaining == null ? '' : `${state.daysRemaining}d left`,
+    tone: state.expired && !autoLock ? 'neutral' : state.tone,
+  };
 };
 
 const DirectoratePeerEvaluationPanel = () => {
@@ -41,15 +53,18 @@ const DirectoratePeerEvaluationPanel = () => {
       const isPublished = !Array.isArray(response) && response?.published === true;
       const data = isPublished ? response.data : [];
       setPublished(isPublished);
-      setInstructors((Array.isArray(data) ? data : []).map((instructor) => ({
+      const normalizedInstructors = (Array.isArray(data) ? data : []).map((instructor) => ({
         ...instructor,
         isEvaluated: Boolean(instructor.isEvaluated)
           || ['submitted', 'completed', 'approved'].includes(String(instructor.status || instructor.submission_status || '').toLowerCase()),
-      })));
+      }));
+      setInstructors(normalizedInstructors);
+      return normalizedInstructors;
     } catch (loadError) {
       setInstructors([]);
       setPublished(false);
       setError(loadError?.message || 'Unable to load peer evaluations.');
+      return [];
     } finally {
       setLoading(false);
     }
@@ -66,17 +81,23 @@ const DirectoratePeerEvaluationPanel = () => {
       .catch(() => setCriteria([]));
   }, [showModal]);
 
-  const handleOpenEvaluation = (instructor, mode = 'create') => {
-    setSelectedInstructor(instructor);
+  const handleOpenEvaluation = async (instructor, mode = 'create') => {
+    const latestInstructors = await loadInstructors();
+    const selectedInstructorRecord = latestInstructors.find((row) => Number(row.instructor_id) === Number(instructor.instructor_id));
+    if (!selectedInstructorRecord) {
+      setFormError('This peer evaluation is no longer available. Refresh the page and try again.');
+      return;
+    }
+    setSelectedInstructor(selectedInstructorRecord);
     setModalMode(mode);
-    if (mode === 'edit' && instructor.isEvaluated) {
-      const responses = typeof instructor.responses === 'string' ? (() => {
-        try { return JSON.parse(instructor.responses); } catch { return {}; }
-      })() : (instructor.responses || {});
+    if (mode === 'edit' && selectedInstructorRecord.isEvaluated) {
+      const responses = typeof selectedInstructorRecord.responses === 'string' ? (() => {
+        try { return JSON.parse(selectedInstructorRecord.responses); } catch { return {}; }
+      })() : (selectedInstructorRecord.responses || {});
       setFormData({
         scores: responses,
-        strengths: instructor.strengths || '',
-        suggestions: instructor.suggestions || '',
+        strengths: selectedInstructorRecord.strengths || '',
+        suggestions: selectedInstructorRecord.suggestions || '',
       });
     } else {
       setFormData({ scores: {}, strengths: '', suggestions: '' });
@@ -88,10 +109,20 @@ const DirectoratePeerEvaluationPanel = () => {
   const handleSubmitEvaluation = async (event) => {
     event.preventDefault();
     if (!selectedInstructor) return;
+    if (getPeerDeadlineState(selectedInstructor).expired) {
+      setFormError('The evaluation deadline has passed. Please contact your Department Head.');
+      return;
+    }
 
     const criteriaIds = groupCriteriaByCategory(criteria).flatMap(g => g.criteria.map(c => c.id));
     if (criteriaIds.some((id) => !hasLikertResponse(formData.scores[id]))) {
       setFormError('Please rate every criterion before submitting.');
+      return;
+    }
+
+    const feedbackValidation = validatePeerEvaluationFeedbackPair(formData.strengths, formData.suggestions);
+    if (!feedbackValidation.valid) {
+      setFormError(feedbackValidation.errors[0]);
       return;
     }
 
@@ -223,7 +254,10 @@ const DirectoratePeerEvaluationPanel = () => {
                       {instructor.instructor_name || instructor.name || instructor.email}
                     </td>
                     <td className="px-4 py-4 text-slate-600">{instructor.department_name || '-'}</td>
-                    <td className="px-4 py-4 text-slate-600">{instructor.deadline || '-'}</td>
+                    <td className="px-4 py-4 text-slate-600">
+                      <span>{instructor.deadline || '-'}</span>
+                      {instructor.deadline && getPeerDeadlineState(instructor).label && <span className={`ml-2 inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${deadlineToneClasses[getPeerDeadlineState(instructor).tone]}`}>{getPeerDeadlineState(instructor).label}</span>}
+                    </td>
                     <td className="px-4 py-4">
                       {instructor.isEvaluated || ['submitted', 'completed', 'approved'].includes(String(instructor.status || instructor.submission_status || '').toLowerCase()) ? (
                         <div className="space-y-1">
@@ -241,6 +275,7 @@ const DirectoratePeerEvaluationPanel = () => {
                             <button
                               type="button"
                               onClick={() => handleOpenEvaluation(instructor, 'edit')}
+                              disabled={getPeerDeadlineState(instructor).expired}
                               className="block text-xs font-semibold text-blue-700 underline-offset-2 hover:underline"
                             >
                               {t.editUpdate}
@@ -251,6 +286,7 @@ const DirectoratePeerEvaluationPanel = () => {
                         <button
                           type="button"
                           onClick={() => handleOpenEvaluation(instructor, 'create')}
+                          disabled={getPeerDeadlineState(instructor).expired}
                           className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-blue-700"
                         >
                           <FaStar className="h-3 w-3" /> {t.evaluate}
@@ -314,7 +350,7 @@ const PeerEvaluationFormModal = ({
 }) => {
   const t = labels[language] || labels.en;
   const criteriaSections = groupCriteriaByCategory(criteria);
-  const deadlineState = getDeadlineState(instructor.deadline);
+  const deadlineState = getPeerDeadlineState(instructor);
   const staffName = instructor.instructor_name || instructor.name || instructor.email || 'Evaluated Staff';
 
   return (
@@ -340,7 +376,7 @@ const PeerEvaluationFormModal = ({
           </div>
           <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 lg:col-span-2"><p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">Staff Name (Evaluated Staff)</p><p className="mt-1 font-semibold text-slate-900">{staffName}</p></div>
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3"><p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">Deadline</p><div className="mt-1 flex flex-wrap items-center gap-2"><span className="font-semibold text-slate-900">{instructor.deadline || 'Not specified'}</span>{deadlineState.daysRemaining !== null && <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${deadlineToneClasses[deadlineState.tone]}`}>{deadlineState.expired ? 'Expired' : `${deadlineState.daysRemaining}d left`}</span>}</div></div>
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3"><p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">Deadline</p><div className="mt-1 flex flex-wrap items-center gap-2"><span className="font-semibold text-slate-900">{instructor.deadline || 'Not specified'}</span>{deadlineState.label && <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${deadlineToneClasses[deadlineState.tone]}`}>{deadlineState.label}</span>}</div></div>
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3"><p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">Department & College</p><p className="mt-1 font-semibold text-slate-900">{instructor.department || 'Not assigned'}</p><p className="text-xs text-slate-500">{instructor.college_name || 'Mekdela Amba University'}</p></div>
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3"><p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">Academic Year</p><p className="mt-1 font-semibold text-slate-900">{instructor.academic_year || new Date().getFullYear()}</p><p className="text-xs text-slate-500">Semester {instructor.semester || 'I'}</p></div>
           </div>
@@ -415,14 +451,14 @@ const PeerEvaluationFormModal = ({
             <button
               type="button"
               onClick={onClose}
-              disabled={submitting}
+              disabled={submitting || deadlineState.expired}
               className="rounded-xl border border-slate-200 px-5 py-3 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
             >
               {t.cancel}
             </button>
             <button
               type="submit"
-              disabled={submitting}
+              disabled={submitting || deadlineState.expired}
               className="rounded-xl bg-blue-700 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-800 disabled:opacity-50"
             >
               {submitting ? t.submitting : mode === 'edit' ? t.update : t.submit}

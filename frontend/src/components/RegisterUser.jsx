@@ -3,6 +3,7 @@ import toast from 'react-hot-toast';
 import { RefreshCw, Upload } from 'lucide-react';
 import { authApi, studentApi } from '../services/api';
 import DepartmentCombobox from './DepartmentCombobox';
+import { YEAR_LEVEL_ASSIGNMENT_OPTIONS } from '../data/adminOptions';
 
 const controlClass = 'h-11 min-h-[44px] w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm leading-normal text-slate-900 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500 disabled:cursor-not-allowed disabled:bg-slate-100';
 const initialStudent = { first_name: '', last_name: '', student_id: '', department_id: '', semester: 'i', year_level: '1st Year (Freshman)', section: 'A', program_type: 'regular' };
@@ -247,7 +248,7 @@ const RegisterUser = ({ departments = [], onRegistered }) => {
 
         {role === 'student' ? <>
           <label className="text-sm font-medium text-slate-700">Semester<select name="semester" value={student.semester} onChange={updateForm(setStudent)} className={`${controlClass} mt-2`}><option value="i">I</option><option value="ii">II</option></select></label>
-          <label className="text-sm font-medium text-slate-700">Year<select name="year_level" value={student.year_level} onChange={updateForm(setStudent)} className={`${controlClass} mt-2`}><option>1st Year (Freshman)</option><option>2nd Year</option><option>3rd Year</option><option>4th Year</option></select></label>
+          <label className="text-sm font-medium text-slate-700">Year<select name="year_level" value={student.year_level} onChange={updateForm(setStudent)} className={`${controlClass} mt-2`}>{YEAR_LEVEL_ASSIGNMENT_OPTIONS.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}</select></label>
           <label className="text-sm font-medium text-slate-700">Section<select name="section" value={student.section} onChange={updateForm(setStudent)} className={`${controlClass} mt-2`}><option>A</option><option>B</option><option>C</option></select></label>
         </> : role === 'instructor' ? <label className="text-sm font-medium text-slate-700">Program type<select name="program_type" value={instructor.program_type} onChange={updateForm(setInstructor)} className={`${controlClass} mt-2`}><option value="regular">Regular</option><option value="extension">Extension</option></select></label> : null }
 

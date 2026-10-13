@@ -3,6 +3,7 @@ import { Clock3, X } from 'lucide-react';
 import LanguageToggle from './LanguageToggle';
 import { LanguageContext } from '../context/LanguageContext';
 import { deadlineToneClasses, getDeadlineState } from '../utils/evaluationDeadline';
+import { formatEvaluationDeadline } from '../utils/formatEvaluationDeadline';
 
 const criteriaGroups = [
   {
@@ -50,6 +51,7 @@ const labels = {
     submitting: 'Submitting...',
     viewOnly: 'Evaluation details',
     noDeadline: 'No deadline set',
+    open: 'Open (auto-lock off)',
     dayShort: 'd',
     left: 'left',
     passed: 'Deadline passed',
@@ -76,6 +78,7 @@ const labels = {
     submitting: 'በመላክ ላይ...',
     viewOnly: 'የግምገማ ዝርዝር',
     noDeadline: 'የመጨረሻ ቀን አልተወሰነም',
+    open: 'ክፍት (ራስ-ሰር መቆለፊያ ጠፍቷል)',
     dayShort: 'ቀን',
     left: 'ቀርቷል',
     passed: 'የመጨረሻ ቀን አልፏል',
@@ -93,14 +96,14 @@ const parseRatings = (value) => {
   try { return JSON.parse(value); } catch { return {}; }
 };
 
-const formatDeadline = (deadline, language) => {
+const formatDeadline = (deadline, language, autoLock = true) => {
   const copy = labels[language] || labels.en;
-  if (!deadline) return { date: copy.noDeadline, badge: copy.noDeadline, tone: 'neutral' };
+  if (!deadline) return { date: copy.noDeadline, badge: copy.noDeadline, tone: 'neutral', expired: false };
   const state = getDeadlineState(deadline);
-  const date = state.date ? state.date.toLocaleString(language === 'am' ? 'am-ET' : 'en-US', { dateStyle: 'medium', timeStyle: 'short' }) : String(deadline);
-  if (state.expired) return { date, badge: copy.passed, tone: state.tone };
-  if (state.daysRemaining == null) return { date, badge: copy.noDeadline, tone: state.tone };
-  return { date, badge: `${state.daysRemaining}${copy.dayShort} ${copy.left}`, tone: state.tone };
+  const date = state.date ? formatEvaluationDeadline(deadline, language === 'am' ? 'am-ET' : 'en-US') : String(deadline);
+  if (state.expired) return { date, badge: autoLock ? copy.passed : copy.open, tone: autoLock ? state.tone : 'neutral', expired: autoLock };
+  if (state.daysRemaining == null) return { date, badge: copy.noDeadline, tone: state.tone, expired: false };
+  return { date, badge: `${state.daysRemaining}${copy.dayShort} ${copy.left}`, tone: state.tone, expired: false };
 };
 
 const scoreFromRatings = (ratings) => {
@@ -120,7 +123,8 @@ const VicePresidentEvaluationModal = ({ open, candidate, mode = 'create', isSubm
   const isReadOnly = mode === 'view';
   const copy = labels[language] || labels.en;
   const score = useMemo(() => scoreFromRatings(ratings), [ratings]);
-  const deadline = useMemo(() => formatDeadline(candidate?.deadline, language), [candidate?.deadline, language]);
+  const autoLock = candidate?.deadline_auto_lock === undefined || Number(candidate.deadline_auto_lock) !== 0;
+  const deadline = useMemo(() => formatDeadline(candidate?.deadline, language, autoLock), [candidate?.deadline, language, autoLock]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -149,6 +153,10 @@ const VicePresidentEvaluationModal = ({ open, candidate, mode = 'create', isSubm
     setFormError('');
     if (score === null) {
       setFormError(copy.validationError);
+      return;
+    }
+    if (deadline.expired) {
+      setFormError(copy.passed);
       return;
     }
     await onSubmit({ candidate, ratings, strengths, weaknesses });
@@ -232,7 +240,7 @@ const VicePresidentEvaluationModal = ({ open, candidate, mode = 'create', isSubm
 
           <footer className="flex flex-col-reverse gap-3 border-t border-slate-200 bg-white px-5 py-4 sm:flex-row sm:justify-end sm:px-7">
             <button type="button" onClick={onClose} disabled={isSubmitting} className="min-h-11 rounded-lg border border-slate-300 bg-white px-5 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">{isReadOnly ? copy.close : copy.cancel}</button>
-            {!isReadOnly && <button type="submit" disabled={isSubmitting || score === null} className="min-h-11 rounded-lg bg-blue-700 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:bg-slate-300">{isSubmitting ? copy.submitting : mode === 'edit' ? copy.update : copy.submit}</button>}
+            {!isReadOnly && <button type="submit" disabled={isSubmitting || score === null || deadline.expired} className="min-h-11 rounded-lg bg-blue-700 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 disabled:cursor-not-allowed disabled:bg-slate-300">{isSubmitting ? copy.submitting : mode === 'edit' ? copy.update : copy.submit}</button>}
           </footer>
         </form>
       </section>

@@ -3,6 +3,7 @@ import { Clock3 } from 'lucide-react';
 import { criteriaApi, evaluationApi } from '../services/api';
 import LanguageToggle from './LanguageToggle';
 import { getQuestionText, groupCriteriaByCategory } from '../utils/evaluationCriteria';
+import { formatEvaluationDeadline } from '../utils/formatEvaluationDeadline';
 
 // Simple 1-5 rating scale
 const RATING_SCALE = [1, 2, 3, 4, 5];
@@ -82,13 +83,7 @@ export default function InstructorEvaluationCriteriaModal({
   const hasValidDeadline = parsedDeadline && !Number.isNaN(parsedDeadline.getTime());
   const deadlineExpired = Boolean(hasValidDeadline && parsedDeadline.getTime() <= currentTime);
   const formattedDeadline = hasValidDeadline
-    ? parsedDeadline.toLocaleString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        hour: 'numeric',
-        minute: '2-digit',
-      })
+    ? formatEvaluationDeadline(activeDeadline, 'en-US')
     : 'Not specified';
 
   const handleScoreChange = (criteriaId, score) => {

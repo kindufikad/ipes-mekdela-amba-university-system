@@ -115,7 +115,6 @@ const AIInsightsWidget = ({
   const sentiment = getSentiment(data.sentiment);
   const topKeywords = useMemo(() => getTopKeywords(data), [data]);
   const averageScore = clampPercent(data.averageScore ?? data.average_score ?? data.aggregateScore ?? data.aggregate_score);
-  const hasContent = summary.length > 0 || recommendations.length > 0 || Object.values(sentiment).some(Boolean) || averageScore > 0 || topKeywords.length > 0;
   const completionRate = clampPercent(
     data.completionRate
       ?? data.completion_rate
@@ -124,6 +123,11 @@ const AIInsightsWidget = ({
       ?? data.metrics?.completionRate
       ?? data.metrics?.completion_rate
   );
+  const totalRequired = Number(data.totalRequired ?? data.total_required ?? data.metrics?.totalRequired ?? data.metrics?.total_required ?? 0);
+  const totalSubmitted = Number(data.totalSubmitted ?? data.total_submitted ?? data.completedCount ?? data.metrics?.totalSubmitted ?? data.metrics?.total_submitted ?? 0);
+  const pendingCount = Number(data.pendingCount ?? data.pending_count ?? data.metrics?.pendingCount ?? data.metrics?.pending_count ?? 0);
+  const hasMetrics = Object.hasOwn(data, 'completionRate') || Object.hasOwn(data, 'completion_rate') || Object.hasOwn(data, 'totalRequired') || Object.hasOwn(data, 'total_required') || Object.hasOwn(data, 'totalSubmitted') || Object.hasOwn(data, 'total_submitted') || Object.hasOwn(data, 'pendingCount') || Object.hasOwn(data, 'pending_count');
+  const hasContent = summary.length > 0 || recommendations.length > 0 || Object.values(sentiment).some(Boolean) || averageScore > 0 || topKeywords.length > 0 || hasMetrics;
   const benchmark = data.benchmark || {};
   const completionTone = completionRate >= 80
     ? 'border-emerald-300/35 bg-emerald-400/15 text-emerald-100'
@@ -200,8 +204,8 @@ const AIInsightsWidget = ({
           <div className="space-y-6 lg:col-span-2">
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
               <div className="rounded-xl border border-white/10 bg-white/[0.07] p-4"><p className="text-xs font-bold uppercase tracking-[0.16em] text-indigo-200/70">Average Evaluation Score</p><p className="mt-2 text-2xl font-bold text-white">{isLoading ? '--' : data.averageScore === undefined && data.average_score === undefined ? 'Awaiting data' : `${averageScore.toFixed(1)}%`}</p></div>
-              <div className="rounded-xl border border-white/10 bg-white/[0.07] p-4"><p className="text-xs font-bold uppercase tracking-[0.16em] text-indigo-200/70">Completion Rate</p><p className="mt-2 text-2xl font-bold text-white">{isLoading ? '--' : `${completionRate.toFixed(1)}%`}</p><div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10" role="meter" aria-label="Evaluation completion rate" aria-valuemin={0} aria-valuemax={100} aria-valuenow={completionRate}><span className={`block h-full rounded-full transition-all duration-700 ${completionRate >= 80 ? 'bg-emerald-400' : completionRate >= 50 ? 'bg-amber-300' : 'bg-rose-400'}`} style={{ width: `${completionRate}%` }} /></div><p className="mt-2 text-xs text-indigo-100/70">{Number(data.totalSubmitted || 0)} of {Number(data.totalRequired || 0)} required</p></div>
-              <div className="rounded-xl border border-white/10 bg-white/[0.07] p-4"><p className="text-xs font-bold uppercase tracking-[0.16em] text-indigo-200/70">Top Feedback Keywords</p>{topKeywords.length > 0 ? <div className="mt-2 flex flex-wrap gap-2">{topKeywords.map((keyword) => <span key={keyword} className="rounded-full bg-indigo-400/20 px-2.5 py-1 text-xs text-indigo-100">{keyword}</span>)}</div> : <p className="mt-2 text-sm text-indigo-100/70">Awaiting more written feedback</p>}</div>
+              <div className="rounded-xl border border-white/10 bg-white/[0.07] p-4"><p className="text-xs font-bold uppercase tracking-[0.16em] text-indigo-200/70">Completion Rate</p><p className="mt-2 text-2xl font-bold text-white">{isLoading ? '--' : `${completionRate.toFixed(1)}%`}</p><div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10" role="meter" aria-label="Evaluation completion rate" aria-valuemin={0} aria-valuemax={100} aria-valuenow={completionRate}><span className={`block h-full rounded-full transition-all duration-700 ${completionRate >= 80 ? 'bg-emerald-400' : completionRate >= 50 ? 'bg-amber-300' : 'bg-rose-400'}`} style={{ width: `${completionRate}%` }} /></div><p className="mt-2 text-xs text-indigo-100/70">{totalSubmitted} of {totalRequired} required · {pendingCount} pending</p></div>
+              <div className="rounded-xl border border-white/10 bg-white/[0.07] p-4"><p className="text-xs font-bold uppercase tracking-[0.16em] text-indigo-200/70">Top Feedback Keywords</p>{topKeywords.length > 0 ? <div className="mt-2 flex flex-wrap gap-2">{topKeywords.map((keyword) => <span key={keyword} className="rounded-full bg-indigo-400/20 px-2.5 py-1 text-xs text-indigo-100">{keyword}</span>)}</div> : <p className="mt-2 text-sm text-indigo-100/70">{data.feedbackTip || 'Awaiting more written feedback'}</p>}</div>
             </div>
             {summary.length > 0 && (
               <div>

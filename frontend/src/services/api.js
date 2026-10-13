@@ -96,7 +96,7 @@ export const authApi = {
   createDepartment: (payload) => request('/auth/departments', { method: 'POST', data: payload }),
   login: (payload) => request('/auth/login', { method: 'POST', data: payload }),
   logout: () => request('/auth/logout', { method: 'POST' }),
-  me: () => request('/auth/me'),
+  me: () => request('/profile'),
   changePassword: (payload) => request('/auth/change-password', { method: 'POST', data: payload }),
   forgotPassword: (email) => request('/auth/forgot-password', { method: 'POST', data: { email } }),
   resetPassword: (payload) => request('/auth/reset-password', { method: 'POST', data: payload }),
@@ -121,8 +121,13 @@ export const contactApi = {
 };
 
 export const adminApi = {
+  sendProfileEmailVerification: (email) => request('/admin/profile/email-verification', { method: 'POST', data: { email } }),
   updateProfile: (payload) => request('/admin/profile', { method: 'PUT', data: payload }),
   changePassword: (payload) => request('/admin/change-password', { method: 'PUT', data: payload }),
+  getAutoLockDeadlineSetting: () => request('/admin/evaluation-auto-lock'),
+  updateAutoLockDeadlineSetting: (enabled) => request('/admin/evaluation-auto-lock', { method: 'POST', data: { auto_lock_enabled: enabled } }),
+  getEmailServiceSettings: () => request('/admin/email-service-settings'),
+  updateEmailServiceSettings: (payload) => request('/admin/email-service-settings', { method: 'PUT', data: payload }),
   getDashboardStats: () => request('/admin/dashboard-stats'),
   getDepartmentAnalytics: () => request('/admin/department-analytics'),
   getSecurityLogs: (params = {}) => request('/admin/security-logs', { params }),
@@ -219,7 +224,7 @@ export const departmentApi = {
   getAll: () => request('/departments'),
   getDepartmentCourses: (department) => request('/dept-head/courses', { method: 'GET', params: { department } }),
   getDepartmentInstructors: (department) => request('/dept-head/instructors', { method: 'GET', params: { department } }),
-  getDepartmentStudents: (department) => request('/dept-head/students', { method: 'GET', params: { department } }),
+  getDepartmentStudents: (department, filters = {}) => request('/dept-head/students', { method: 'GET', params: { department, ...filters } }),
   getLabAssistants: (department_id) => request('/dept-head/lab-assistants', { method: 'GET', params: { department_id } }),
   getAnalytics: () => request('/dept-head/analytics'),
 };
@@ -340,6 +345,8 @@ export const notificationApi = {
   markAllRead: (userId) => request(`/notifications/mark-all-read/${userId}`, { method: 'PUT' }),
   clearAll: (userId) => request(`/notifications/clear-all/${userId}`, { method: 'DELETE' }),
   send: (payload) => request('/notifications/send', { method: 'POST', data: payload }),
+  sendReminder: (payload = {}) => request('/notifications/send-reminder', { method: 'POST', data: payload }),
+  sendBulkReminders: (payload = {}) => request('/notifications/send-bulk-reminders', { method: 'POST', data: payload }),
   sendReminders: (payload = {}) => request('/notifications/send-reminders', { method: 'POST', data: payload }),
 };
 

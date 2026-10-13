@@ -1,7 +1,7 @@
 import React, { useMemo } from 'react';
+import { YEAR_LEVEL_FILTER_OPTIONS } from '../data/adminOptions';
 
 const ACADEMIC_YEARS = ['2023/24', '2024/25', '2025/26'];
-const YEAR_LEVELS = ['1st Year', '2nd Year', '3rd Year', '4th Year', '5th Year'];
 
 export default function DispatchEvaluationModal({ open, onClose, form, setForm, colleges = [], departments = [], courses = [], onSaveTemplate, onEditTemplate, onSend }) {
   if (!open) return null;
@@ -40,7 +40,7 @@ export default function DispatchEvaluationModal({ open, onClose, form, setForm, 
             <span className="mb-1 block font-medium">Year Level</span>
             <select value={form.yearLevel} onChange={(e) => setForm({ ...form, yearLevel: e.target.value })} className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm">
               <option value="">Select year level</option>
-              {YEAR_LEVELS.map((y) => <option key={y} value={y}>{y}</option>)}
+              {YEAR_LEVEL_FILTER_OPTIONS.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
             </select>
           </label>
 

@@ -7,7 +7,18 @@ import socket from '../services/socketClient';
 import NotificationCenter from './NotificationCenter';
 import './NotificationStyles.css';
 
-const soundPreferenceKey = 'ipes-notification-sound-enabled';
+const soundPreferenceKey = 'ipes_notification_sound_enabled';
+
+const readSoundPreference = (fallback = true) => {
+  try {
+    const saved = window.localStorage.getItem(soundPreferenceKey);
+    if (saved === null) return fallback;
+    const parsed = JSON.parse(saved);
+    return typeof parsed === 'boolean' ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+};
 
 const normalizeNotifications = (rows) => (Array.isArray(rows) ? rows : []).map((notification) => ({
   ...notification,
@@ -32,7 +43,7 @@ const playNotificationSound = () => {
     oscillator.start();
     oscillator.stop(context.currentTime + 0.23);
     oscillator.onended = () => { void context.close(); };
-  } catch (_error) {
+  } catch {
     // Audio is optional and can be blocked by the browser.
   }
 };
@@ -48,13 +59,7 @@ const NotificationBell = () => {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [busyAction, setBusyAction] = useState(false);
-  const [soundEnabled, setSoundEnabled] = useState(() => {
-    try {
-      return window.localStorage.getItem(soundPreferenceKey) === 'true';
-    } catch (_error) {
-      return false;
-    }
-  });
+  const [soundEnabled, setSoundEnabled] = useState(() => readSoundPreference());
   const [hasNewNotification, setHasNewNotification] = useState(false);
   const containerRef = useRef(null);
   const pulseTimerRef = useRef(null);
@@ -109,7 +114,9 @@ const NotificationBell = () => {
       setHasNewNotification(true);
       window.clearTimeout(pulseTimerRef.current);
       pulseTimerRef.current = window.setTimeout(() => setHasNewNotification(false), 1800);
-      if (soundEnabled) playNotificationSound();
+      const shouldPlaySound = readSoundPreference(soundEnabled);
+      if (shouldPlaySound !== soundEnabled) setSoundEnabled(shouldPlaySound);
+      if (shouldPlaySound) playNotificationSound();
       toast.custom((toastItem) => (
         <div className={`notification-toast${toastItem.visible ? ' is-visible' : ''}`} role="status">
           <span className="notification-toast__icon"><Megaphone size={17} /></span>
@@ -222,13 +229,15 @@ const NotificationBell = () => {
   };
 
   const toggleSound = () => {
-    const nextValue = !soundEnabled;
-    setSoundEnabled(nextValue);
-    try {
-      window.localStorage.setItem(soundPreferenceKey, String(nextValue));
-    } catch (_error) {
-      // Keep the preference active for this session if storage is unavailable.
-    }
+    setSoundEnabled((previous) => {
+      const updatedState = !previous;
+      try {
+        window.localStorage.setItem(soundPreferenceKey, JSON.stringify(updatedState));
+      } catch {
+        // Keep the preference active for this session if storage is unavailable.
+      }
+      return updatedState;
+    });
   };
 
   const toggleNotifications = () => {

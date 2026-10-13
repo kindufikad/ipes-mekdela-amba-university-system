@@ -7,8 +7,9 @@ import VicePresidentEvaluationModal from '../components/VicePresidentEvaluationM
 import AcademicDirectorateReportPrint from '../components/VicePresidentPrintableReport';
 import useLandingContent from '../hooks/useLandingContent';
 import { vicePresidentApi } from '../services/api';
+import { formatEvaluationDeadline } from '../utils/formatEvaluationDeadline';
 
-const formatDate = (value, language) => value ? new Date(value).toLocaleDateString(language === 'am' ? 'am-ET' : 'en-US') : '—';
+const formatDate = (value, language) => formatEvaluationDeadline(value, language === 'am' ? 'am-ET' : 'en-US');
 const isEvaluated = (candidate) => Boolean(candidate.evaluation_id || ['submitted', 'completed', 'approved'].includes(String(candidate.evaluation_status || '').toLowerCase()));
 const isPerformanceComplete = (performance) => performance?.isComplete === true && performance.totalScore != null;
 
@@ -119,10 +120,20 @@ const VicePresidentDashboard = () => {
     };
   }, [printReportData]);
 
-  const openEvaluation = (candidate, mode) => {
+  const openEvaluation = async (candidate, mode) => {
     setModalError('');
-    setModalCandidate(candidate);
-    setModalMode(mode);
+    try {
+      const latestCandidates = await vicePresidentApi.getAcademicDirectorateCandidates();
+      const latestCandidate = (Array.isArray(latestCandidates) ? latestCandidates : []).find(
+        (row) => Number(row.academic_directorate_id) === Number(candidate.academic_directorate_id)
+      );
+      if (!latestCandidate) throw new Error('This evaluation candidate is no longer available. Refresh the page and try again.');
+      setCandidates(latestCandidates);
+      setModalCandidate(latestCandidate);
+      setModalMode(mode);
+    } catch (loadError) {
+      setError(loadError?.message || t('vicePresidentDashboard.unableToLoad'));
+    }
   };
 
   const closeEvaluation = () => {

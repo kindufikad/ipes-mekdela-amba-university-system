@@ -9,6 +9,7 @@ import { aiApi, authApi, courseAssignmentApi, evaluationApi } from '../services/
 import { SUBMISSIONS_UPDATED_EVENT } from '../services/formSubmissions';
 import IPESAISmartInsights from '../components/ai/IPESAISmartInsights';
 import { SetGoalModal } from '../components/ai/AIActionModals';
+import TelegramLinkBanner from '../components/TelegramLinkBanner';
 
 const InstructorDashboard = () => {
   const { strings } = useContext(LanguageContext);
@@ -327,14 +328,20 @@ const InstructorDashboard = () => {
     const totalWeightedScore = Number(report?.totalScore ?? report?.totalWeightedScore ?? 0);
     const breakdown = report?.breakdown || {};
     const studentSubmissionCount = Number(report?.submission_count ?? report?.submissionCount ?? breakdown.student?.submissionCount ?? breakdown.student?.count ?? 0);
-    const studentEvaluated = studentSubmissionCount > 0;
+    const completion = report?.completion || {};
     const hasAssignedCourse = (report?.hasAssignedCourses ?? (report?.hasAssignedCourse !== false))
       || studentSubmissionCount > 0
       || Number(report?.total_assignments ?? report?.totalAssignments ?? 0) > 0;
-    const hasAllEvaluations = [
-      breakdown.deptHead?.rawPercentage,
-      breakdown.peer?.rawPercentage,
-    ].every((score) => Number(score || 0) > 0) && (!hasAssignedCourse || studentEvaluated);
+    const requiredStudentCount = Number(completion.requiredStudentCount ?? report?.student_required ?? report?.required_student_evaluators ?? 0);
+    const hasStudentEval = !hasAssignedCourse
+      || completion.isStudentComplete === true
+      || (requiredStudentCount > 0 && studentSubmissionCount >= Math.ceil(requiredStudentCount / 2));
+    const peerSubmissionCount = Number(completion.incomingPeerCount ?? report?.peer_completed ?? breakdown.peer?.count ?? 0);
+    const hasPeerEval = completion.isPeerComplete === true || peerSubmissionCount >= 1;
+    const hasDeptHeadEval = completion.isDeptHeadComplete === true
+      || breakdown.deptHead?.isAvailable === true
+      || Number(breakdown.deptHead?.count || 0) > 0;
+    const hasAllEvaluations = report?.isComplete === true || (hasStudentEval && hasPeerEval && hasDeptHeadEval);
     const totalScoreLabel = reportLoading
       ? '—'
       : hasAllEvaluations
@@ -355,7 +362,7 @@ const InstructorDashboard = () => {
         label: 'Student Evaluation', 
         weight: Number(breakdown.student?.weight ?? report?.weights?.student ?? (hasAssignedCourse ? 50 : 0)),
         score: hasAssignedCourse ? Number(breakdown.student?.rawPercentage ?? report?.raw_student_score ?? 0) : null,
-        status: !hasAssignedCourse ? 'Not assigned' : studentEvaluated ? 'Evaluated' : 'Active',
+        status: !hasAssignedCourse ? 'Not assigned' : hasStudentEval ? 'Satisfied' : studentSubmissionCount > 0 ? 'In progress' : 'Active',
         contribution: Number(breakdown.student?.weightedContribution ?? ((Number(breakdown.student?.rawPercentage ?? report?.raw_student_score ?? 0) * Number(breakdown.student?.weight ?? report?.weights?.student ?? (hasAssignedCourse ? 50 : 0))) / 100)),
         color: 'blue'
       },
@@ -410,7 +417,7 @@ const InstructorDashboard = () => {
                       {card.weight}% {t('instructorDashboard.weight')}
                     </span>
                   </div>
-                  {card.status && <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${hasAssignedCourse && studentEvaluated ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{card.status}</span>}
+                  {card.status && <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${hasAssignedCourse && hasStudentEval ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{card.status}</span>}
                 </div>
                 <p className={`text-4xl font-bold ${styles.text} mt-4`}>{reportLoading ? '—' : card.score === null ? 'N/A' : `${Number(card.score).toFixed(card.key === 'student' ? 2 : 1)}%`}</p>
                 <p className="mt-1 text-sm text-gray-600">Weighted contribution: {reportLoading ? '—' : `${Number(card.contribution).toFixed(card.key === 'student' ? 2 : 1)}%`}</p>
@@ -435,6 +442,8 @@ const InstructorDashboard = () => {
           </div>
         </div>
       </div>
+
+      <TelegramLinkBanner profile={profile} />
 
       <div className="mb-6">
         <IPESAISmartInsights role="INSTRUCTOR" departmentId={profile?.department_id || authUser?.department_id} userId={profile?.id || authUser?.id} onActionClick={handleAiAction} />

@@ -6,6 +6,7 @@ import LanguageToggle from './LanguageToggle';
 import { getQuestionText, groupCriteriaByCategory } from '../utils/evaluationCriteria';
 import { deadlineToneClasses, getDeadlineState } from '../utils/evaluationDeadline';
 import { LIKERT_OPTIONS, calculateLikertPercentage, hasLikertResponse } from '../utils/likertScoring';
+import { validatePeerEvaluationFeedbackPair } from '../utils/validationUtility';
 
 const araPeerCriteria = [
   { en: 'Continuous update of the subject matter', am: 'ርዕሱን በቅጡ መዘመን' },
@@ -209,6 +210,12 @@ const PeerEvaluationModal = ({
       return;
     }
 
+    const feedbackValidation = validatePeerEvaluationFeedbackPair(strengths, suggestions);
+    if (!feedbackValidation.valid) {
+      setSubmitError(feedbackValidation.errors[0]);
+      return;
+    }
+
     try {
       await onSubmit({
         peer_evaluation_id: peerEvaluationId,
@@ -273,7 +280,7 @@ const PeerEvaluationModal = ({
           </div>
 
           {criteriaError ? <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{criteriaError}</div> : null}
-          {submitError ? <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{submitError}</div> : null}
+          {submitError ? <div role="alert" className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{submitError}</div> : null}
           {submitSuccess ? <div className="rounded-2xl border border-green-200 bg-green-50 p-4 text-sm text-green-700">{submitSuccess}</div> : null}
 
           <form id="peer-evaluation-form" onSubmit={handleSubmit} className="space-y-5">

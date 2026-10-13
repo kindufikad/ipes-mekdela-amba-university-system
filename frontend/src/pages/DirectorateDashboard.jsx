@@ -10,6 +10,7 @@ import MyPerformancePanel from '../components/MyPerformancePanel';
 import HierarchicalReportsView from '../components/HierarchicalReportsView';
 import { Bar, BarChart, CartesianGrid, LabelList, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import IPESAISmartInsights from '../components/ai/IPESAISmartInsights';
+import { formatEvaluationDeadline } from '../utils/formatEvaluationDeadline';
 const metricCards = [
   { key: 'totalColleges', label: 'Total Colleges', icon: Building2 },
   { key: 'pendingDeans', label: 'Pending Dean Evaluations', icon: ClipboardCheck },
@@ -17,16 +18,17 @@ const metricCards = [
 ];
 const criteria = ['Leadership and institutional management', 'Academic quality assurance', 'Communication and stakeholder engagement', 'Planning, accountability, and reporting', 'Support for departments and faculty'];
 const formatWeightedDeanScore = (score) => (Math.max(0, Number(score) || 0) * 0.3).toFixed(1);
-const formatDeanDeadline = (value) => {
+const formatDeanDeadline = (value, autoLock = true) => {
   if (!value) return 'No active deadline';
-  const dateText = String(value).slice(0, 10);
-  const [year, month, day] = dateText.split('-').map(Number);
-  const deadlineDate = new Date(year, month - 1, day);
+  const deadlineDate = new Date(value);
   if (!Number.isFinite(deadlineDate.getTime())) return 'No active deadline';
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const daysRemaining = Math.ceil((deadlineDate.getTime() - today.getTime()) / 86400000);
-  return `${dateText} (${daysRemaining < 0 ? 'Expired' : `${daysRemaining} day${daysRemaining === 1 ? '' : 's'} remaining`})`;
+  const dateText = formatEvaluationDeadline(value, 'en-US');
+  const daysRemaining = Math.ceil((deadlineDate.getTime() - Date.now()) / 86400000);
+  const lockEnabled = autoLock === undefined || Number(autoLock) !== 0;
+  const status = daysRemaining < 0
+    ? lockEnabled ? 'Expired' : 'Open (auto-lock off)'
+    : `${daysRemaining} day${daysRemaining === 1 ? '' : 's'} remaining`;
+  return `${dateText} (${status})`;
 };
 
 const InstitutionalAnalyticsChart = ({ analytics }) => {
@@ -48,7 +50,7 @@ const DeanEvaluationTable = ({ deans, onSelect }) => {
   const sortBy = (key) => setSort((current) => ({ key, direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc' }));
   const isSubmitted = (dean) => ['submitted', 'completed', 'approved'].includes(String(dean.evaluation_status || dean.status || '').toLowerCase()) || dean.evaluation_id;
 
-  return <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"><h2 className="text-xl font-bold">Evaluate College Deans</h2><p className="mt-1 text-sm text-slate-500">Select a Dean to begin the evaluation.</p><div className="mt-6 overflow-x-auto"><table className="min-w-full text-left text-sm"><thead className="bg-gray-50"><tr>{[['full_name', 'DEAN NAME'], ['college_name', 'COLLEGE'], ['deadline', 'DEADLINE'], ['evaluation_status', 'STATUS']].map(([key, label]) => <th key={key} className="px-4 py-3"><button type="button" onClick={() => sortBy(key)} className="font-semibold uppercase tracking-wide text-slate-500 hover:text-blue-700">{label} {sort.key === key ? (sort.direction === 'asc' ? '↑' : '↓') : ''}</button></th>)}<th className="px-4 py-3 font-semibold uppercase tracking-wide text-slate-500">ACTION</th></tr></thead><tbody className="divide-y divide-slate-100">{sortedDeans.length ? sortedDeans.map((dean) => { const submitted = isSubmitted(dean); return <tr key={dean.deanId}><td className="px-4 py-4 font-medium text-slate-900">{dean.full_name || dean.name || dean.email}</td><td className="px-4 py-4 text-slate-600">{dean.college_name || dean.college || '-'}</td><td className="px-4 py-4 text-slate-600">{formatDeanDeadline(dean.deadline)}</td><td className="px-4 py-4">{submitted ? <span className="inline-flex rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-semibold text-emerald-700">✓ Evaluated ({formatWeightedDeanScore(dean.score)}/30)</span> : <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-700">Pending</span>}</td><td className="px-4 py-4">{submitted ? <div className="flex gap-3"><button type="button" onClick={() => onSelect(dean, 'view')} className="text-sm font-semibold text-blue-700 underline hover:text-blue-900">View Details</button><button type="button" onClick={() => onSelect(dean, 'edit')} className="text-sm font-semibold text-blue-700 underline hover:text-blue-900">Edit</button></div> : <button type="button" onClick={() => onSelect(dean, 'create')} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700">★ Evaluate</button>}</td></tr>; }) : <tr><td colSpan="5" className="px-4 py-8 text-center text-slate-500">No College Deans found.</td></tr>}</tbody></table></div></section>;
+  return <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm"><h2 className="text-xl font-bold">Evaluate College Deans</h2><p className="mt-1 text-sm text-slate-500">Select a Dean to begin the evaluation.</p><div className="mt-6 overflow-x-auto"><table className="min-w-full text-left text-sm"><thead className="bg-gray-50"><tr>{[['full_name', 'DEAN NAME'], ['college_name', 'COLLEGE'], ['deadline', 'DEADLINE'], ['evaluation_status', 'STATUS']].map(([key, label]) => <th key={key} className="px-4 py-3"><button type="button" onClick={() => sortBy(key)} className="font-semibold uppercase tracking-wide text-slate-500 hover:text-blue-700">{label} {sort.key === key ? (sort.direction === 'asc' ? '↑' : '↓') : ''}</button></th>)}<th className="px-4 py-3 font-semibold uppercase tracking-wide text-slate-500">ACTION</th></tr></thead><tbody className="divide-y divide-slate-100">{sortedDeans.length ? sortedDeans.map((dean) => { const submitted = isSubmitted(dean); return <tr key={dean.deanId}><td className="px-4 py-4 font-medium text-slate-900">{dean.full_name || dean.name || dean.email}</td><td className="px-4 py-4 text-slate-600">{dean.college_name || dean.college || '-'}</td><td className="px-4 py-4 text-slate-600">{formatDeanDeadline(dean.deadline, dean.deadline_auto_lock)}</td><td className="px-4 py-4">{submitted ? <span className="inline-flex rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-semibold text-emerald-700">✓ Evaluated ({formatWeightedDeanScore(dean.score)}/30)</span> : <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-700">Pending</span>}</td><td className="px-4 py-4">{submitted ? <div className="flex gap-3"><button type="button" onClick={() => onSelect(dean, 'view')} className="text-sm font-semibold text-blue-700 underline hover:text-blue-900">View Details</button><button type="button" onClick={() => onSelect(dean, 'edit')} className="text-sm font-semibold text-blue-700 underline hover:text-blue-900">Edit</button></div> : <button type="button" onClick={() => onSelect(dean, 'create')} className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700">★ Evaluate</button>}</td></tr>; }) : <tr><td colSpan="5" className="px-4 py-8 text-center text-slate-500">No College Deans found.</td></tr>}</tbody></table></div></section>;
 };
 
 const EvaluateDeansView = ({ deans, onSubmit }) => {

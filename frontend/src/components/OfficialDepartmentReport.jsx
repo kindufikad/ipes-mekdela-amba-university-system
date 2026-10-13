@@ -20,7 +20,7 @@ const getAmharicCollegeName = (name) => {
 
 const getAmharicDeptName = (name) => {
   const value = String(name || '').trim();
-  if (/computer\s+science/i.test(value) || !/[\u1200-\u137F]/.test(value) || /[A-Za-z]/.test(value)) {
+  if (/computer\s+science/i.test(value)) {
     return 'የኮምፒዩተር ሳይንስ ዲፓርትመንት';
   }
   return value;
@@ -100,26 +100,50 @@ const OfficialDepartmentReport = ({ departmentName, academicYear, semester, repo
     : String(rawCourseAssigned).toLowerCase() !== 'false'
       && String(rawCourseAssigned) !== '0'
       && Number(rawCourseAssigned) !== 0;
-  const weights = hasCourseAssigned
+  const defaultWeights = hasCourseAssigned
     ? { student: 50, deptHead: 30, peer: 20 }
     : reportType === 'executive'
       ? { student: 0, deptHead: 30, peer: 20 }
       : { student: 0, deptHead: 60, peer: 40 };
+  const sourceWeights = reportType !== 'executive' && row.weights
+    ? {
+      student: Number(row.weights.student ?? row.student_weight ?? row.studentWeight ?? defaultWeights.student),
+      deptHead: Number(row.weights.deptHead ?? row.weights.dept_head ?? row.dept_head_weight ?? defaultWeights.deptHead),
+      peer: Number(row.weights.peer ?? row.peer_weight ?? defaultWeights.peer),
+    }
+    : defaultWeights;
+  const studentEvaluationFlag = row.has_student_evaluations ?? row.hasStudentEvaluations ?? row.hasStudentEval;
+  const studentWeight = Number(row.weights?.student ?? row.student_weight ?? row.studentWeight ?? sourceWeights.student);
+  const studentEvaluationExcluded = reportType !== 'executive'
+    && (!hasCourseAssigned
+      || (studentEvaluationFlag !== undefined && ['false', '0'].includes(String(studentEvaluationFlag).toLowerCase()))
+      || studentWeight === 0);
+  const remainingWeight = sourceWeights.deptHead + sourceWeights.peer;
+  const weights = studentEvaluationExcluded
+    ? remainingWeight > 0
+      ? {
+        ...sourceWeights,
+        student: 0,
+        deptHead: sourceWeights.deptHead / remainingWeight * 100,
+        peer: sourceWeights.peer / remainingWeight * 100,
+      }
+      : { ...sourceWeights, student: 0, deptHead: 60, peer: 40 }
+    : sourceWeights;
   const rawScores = {
     student: getComponentRawScore(
-      [row.studentRaw, row.student_raw_percentage, row.student_raw_score, row.student_score, row.student_average, row.studentScore],
+      [reportType !== 'executive' ? row.breakdown?.student?.rawPercentage : null, row.studentRaw, row.student_raw_percentage, row.student_raw_score, row.student_score, row.student_average, row.studentScore],
       [row.studentWeighted, row.student_weighted, row.student_weighted_score],
-      0.5
+      sourceWeights.student > 0 ? sourceWeights.student / 100 : 0.5
     ),
     peer: getComponentRawScore(
-      [row.peerRaw, row.peer_raw, row.raw_peer_score, row.peer_raw_percentage, row.peer_raw_score, row.peer_score, row.peer_average, row.peerScore],
+      [reportType !== 'executive' ? row.breakdown?.peer?.rawPercentage : null, row.peerRaw, row.peer_raw, row.raw_peer_score, row.peer_raw_percentage, row.peer_raw_score, row.peer_score, row.peer_average, row.peerScore],
       [row.peerWeighted, row.peer_weighted, row.peer_weighted_score],
-      0.2
+      sourceWeights.peer > 0 ? sourceWeights.peer / 100 : 0.2
     ),
     deptHead: getComponentRawScore(
-      [row.deptHeadRaw, row.dean_raw, row.raw_dean_score, row.dept_head_raw_percentage, row.dept_head_raw_score, row.dept_head_score, row.dept_head_average, row.deptHeadScore],
+      [reportType !== 'executive' ? row.breakdown?.deptHead?.rawPercentage : null, row.deptHeadRaw, row.dean_raw, row.raw_dean_score, row.dept_head_raw_percentage, row.dept_head_score, row.dept_head_average, row.dept_head_raw_score, row.deptHeadScore],
       [row.deptHeadWeighted, row.dept_head_weighted, row.dept_head_weighted_score],
-      0.3
+      sourceWeights.deptHead > 0 ? sourceWeights.deptHead / 100 : 0.3
     ),
     directorate: getComponentRawScore(
       [row.directorateRaw, row.directorate_score, row.directorateScore, row.academic_directorate_score],
@@ -142,9 +166,31 @@ const OfficialDepartmentReport = ({ departmentName, academicYear, semester, repo
       weightedRow('peer', labels.peer, weights.peer, rawScores.peer),
     ]
     : [
-      ...(hasCourseAssigned ? [{ key: 'student', label: labels.student, weight: weights.student, value: Number(rawScores.student.toFixed(2)), contribution: Number((rawScores.student * weights.student / 100).toFixed(2)) }] : []),
-      { key: 'deptHead', label: evaluatorLabel, weight: weights.deptHead, value: normalizedDeptHead, contribution: Number((normalizedDeptHead * weights.deptHead / 100).toFixed(2)) },
-      { key: 'peer', label: labels.peer, weight: weights.peer, value: Number(rawScores.peer.toFixed(2)), contribution: Number((rawScores.peer * weights.peer / 100).toFixed(2)) },
+      ...(studentEvaluationExcluded ? [] : [{
+        key: 'student',
+        label: labels.student,
+        weight: weights.student,
+        value: Number(rawScores.student.toFixed(2)),
+        contribution: Number(row.breakdown?.student?.weightedContribution ?? row.student_weighted ?? (rawScores.student * weights.student / 100).toFixed(2)),
+      }]),
+      {
+        key: 'deptHead',
+        label: evaluatorLabel,
+        weight: weights.deptHead,
+        value: normalizedDeptHead,
+        contribution: studentEvaluationExcluded
+          ? Number((normalizedDeptHead * weights.deptHead / 100).toFixed(2))
+          : Number(row.breakdown?.deptHead?.weightedContribution ?? row.dept_head_weighted ?? (normalizedDeptHead * weights.deptHead / 100).toFixed(2)),
+      },
+      {
+        key: 'peer',
+        label: labels.peer,
+        weight: weights.peer,
+        value: Number(rawScores.peer.toFixed(2)),
+        contribution: studentEvaluationExcluded
+          ? Number((rawScores.peer * weights.peer / 100).toFixed(2))
+          : Number(row.breakdown?.peer?.weightedContribution ?? row.peer_weighted ?? (rawScores.peer * weights.peer / 100).toFixed(2)),
+      },
     ];
   const calculatedTotal = scoreRows.reduce((sum, scoreRow) => sum + scoreRow.contribution, 0);
   const executiveCalculation = reportType === 'executive'
@@ -155,7 +201,11 @@ const OfficialDepartmentReport = ({ departmentName, academicYear, semester, repo
       hasAssignedCourses: hasCourseAssigned,
     })
     : null;
-  const finalScore = executiveCalculation?.totalScore ?? Number(calculatedTotal.toFixed(2));
+  const backendFinalScore = row.final_score ?? row.finalScore ?? row.total_score ?? row.totalScore ?? row.totalWeightedScore;
+  const finalScore = executiveCalculation?.totalScore
+    ?? (studentEvaluationExcluded || backendFinalScore === undefined || backendFinalScore === null
+      ? Number(calculatedTotal.toFixed(2))
+      : Number(backendFinalScore));
   const yearLabel = formatAcademicYear(row.academic_year ?? academicYear);
   const semesterLabel = formatSemester(row.semester ?? semester);
   const instructorName = row.name || row.full_name || row.instructorName || '________________';
@@ -165,10 +215,12 @@ const OfficialDepartmentReport = ({ departmentName, academicYear, semester, repo
   const amharicDepartmentName = getAmharicDeptName(row.department_name_am || row.dept_name_am || row.departmentNameAm || department);
   const recipientName = row.recipient_name || instructorName;
   const reference = row.reference_number || row.referenceNumber || '________________';
+  const signerRole = evaluatorLabel === 'Evaluation by College Dean' ? 'College Dean' : 'Department Head';
   const totalScore = finalScore;
   const studentCompletionRate = Number(row.studentCompletionRate ?? row.student_completion_rate ?? 0);
   const deptHeadStatus = String(row.deptHeadStatus ?? row.dept_head_status ?? '').toLowerCase();
   const isEligibleForPrint = totalScore > 0
+    || String(row.evaluation_status ?? row.status ?? '').trim().toLowerCase() === 'completed'
     || (studentCompletionRate === 100 && deptHeadStatus === 'submitted');
 
   if (!isEligibleForPrint) {
@@ -181,7 +233,7 @@ const OfficialDepartmentReport = ({ departmentName, academicYear, semester, repo
       <div className="official-report__english" dir="ltr">
         <h1>MEKDELA AMBA UNIVERSITY</h1>
         <p>College of Computing and Informatics</p>
-        <p>Department of Computer Science</p>
+        <p>Department of {department}</p>
       </div>
       <div className="official-report__brand-mark"><img src={mauLogo} alt="Mekdela Amba University Logo" /></div>
       <div className="official-report__amharic" dir="rtl">
@@ -208,17 +260,17 @@ const OfficialDepartmentReport = ({ departmentName, academicYear, semester, repo
     <table className="official-report__table">
       <thead><tr><th>S/No</th><th>Evaluation Type</th><th>Weight (%)</th><th>Raw Score (%)</th><th>Weighted Contribution (%)</th></tr></thead>
       <tbody>
-        {scoreRows.map((scoreRow, index) => <tr key={scoreRow.key}><td>{index + 1}</td><td><strong>{scoreRow.label}</strong></td><td>{scoreRow.weight}%</td><td>{scoreRow.value.toFixed(2)}%</td><td>{scoreRow.contribution.toFixed(2)}%</td></tr>)}
+        {scoreRows.map((scoreRow, index) => <tr key={scoreRow.key}><td>{index + 1}</td><td><strong>{scoreRow.label}</strong></td><td>{scoreRow.weight}%</td><td>{scoreRow.isNA ? 'N/A' : `${scoreRow.value.toFixed(2)}%`}</td><td>{scoreRow.contribution.toFixed(2)}%</td></tr>)}
         {reportType === 'executive' && !hasCourseAssigned
           ? <>
             <tr><td colSpan="2" className="official-report__total-label">Total Evaluation Weight</td><td><strong>{executiveCalculation.activeWeight}%</strong></td><td></td><td><strong>{executiveCalculation.weightedSubtotal.toFixed(2)}%</strong></td></tr>
             <tr><td colSpan="2" className="official-report__total-label">Final Re-scaled Score (100% Equivalent)</td><td><strong>100%</strong></td><td></td><td><strong>{finalScore.toFixed(2)}%</strong></td></tr>
           </>
-          : <tr><td colSpan="2" className="official-report__total-label">{reportType === 'executive' ? 'Overall Total Score' : 'Total Score'}</td><td><strong>100%</strong></td><td></td><td><strong>{finalScore.toFixed(2)}%</strong></td></tr>}
+          : <tr><td colSpan="2" className="official-report__total-label">{reportType === 'executive' ? 'Overall Total Score' : 'Total Score'}</td><td><strong>100%</strong></td><td></td><td><strong>{finalScore.toFixed(1)}%</strong></td></tr>}
       </tbody>
     </table>
 
-    <p className="official-report__classification"><strong>Final Grade Classification:</strong> {getGradeClassification(finalScore)} ({finalScore.toFixed(2)}%)</p>
+    <p className="official-report__classification"><strong>Final Grade Classification:</strong> {getGradeClassification(finalScore)} ({finalScore.toFixed(1)}%)</p>
 
     <p>With best regard!</p>
 
@@ -226,8 +278,8 @@ const OfficialDepartmentReport = ({ departmentName, academicYear, semester, repo
       <div className="official-report__signer">
         {certificateImages.signature ? <img className="official-report__signature-image" src={certificateImages.signature} alt="Department Head signature" /> : null}
         <div className="official-report__signature-line" />
-        <strong>{departmentHeadName || 'Department Head'}</strong>
-        <span>Department Head</span>
+        <strong>{departmentHeadName || signerRole}</strong>
+        <span>{signerRole}</span>
         <span>Date: ____________________</span>
       </div>
       <div className={`official-report__stamp${certificateImages.stamp ? ' official-report__stamp--image' : ''}`}>

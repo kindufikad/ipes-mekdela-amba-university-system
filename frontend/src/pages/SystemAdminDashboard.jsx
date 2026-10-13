@@ -1459,7 +1459,7 @@ const SystemAdminDashboard = () => {
   return (
     <div className="relative flex min-h-screen min-w-0 flex-col bg-[radial-gradient(circle_at_top_left,_rgba(96,165,250,0.20),_transparent_28%),radial-gradient(circle_at_top_right,_rgba(14,165,233,0.14),_transparent_34%),linear-gradient(135deg,_#e8f0fb_0%,_#dfeaf8_48%,_#edf4ff_100%)] text-slate-900 lg:flex-row">
       <div className={`fixed inset-x-0 bottom-0 top-16 z-40 transition-opacity lg:hidden ${isMobileMenuOpen ? 'visible opacity-100' : 'pointer-events-none invisible opacity-0'}`}>
-        <button type="button" className="absolute inset-0 bg-slate-950/45" onClick={() => setIsMobileMenuOpen(false)} aria-label="Close system admin navigation" tabIndex={isMobileMenuOpen ? 0 : -1} />
+        <button type="button" className="absolute inset-0 bg-slate-950/45" onClick={() => setIsMobileMenuOpen(false)} aria-label={t('closeNavigation', 'Close system admin navigation', 'የስርዓት አስተዳደር ዳሰሳን ዝጋ')} tabIndex={isMobileMenuOpen ? 0 : -1} />
       </div>
       <header className="sticky top-0 z-30 flex items-center justify-between border-b border-slate-200 bg-white/95 px-4 py-3 shadow-sm backdrop-blur lg:hidden">
         <h1 className="text-base font-bold text-slate-900">{t('systemAdminTitle', 'System Admin', 'የስርዓት አስተዳደር')}</h1>
@@ -1467,7 +1467,7 @@ const SystemAdminDashboard = () => {
           type="button"
           onClick={() => setIsMobileMenuOpen((open) => !open)}
           className="rounded-lg p-2 text-slate-700 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
-          aria-label={isMobileMenuOpen ? 'Close navigation menu' : 'Open navigation menu'}
+          aria-label={isMobileMenuOpen ? t('closeNavigation', 'Close navigation menu', 'የዳሰሳ ምናሌውን ዝጋ') : t('openNavigation', 'Open navigation menu', 'የዳሰሳ ምናሌውን ክፈት')}
           aria-expanded={isMobileMenuOpen}
           aria-controls="system-admin-sidebar"
         >
@@ -1486,14 +1486,14 @@ const SystemAdminDashboard = () => {
           {[
             { id: 'overview', icon: LayoutDashboard, label: t('overview', 'Overview', 'አጠቃላይ') },
             { id: 'department-course', icon: ClipboardList, label: t('collegeDepartmentRegistration', 'College and Department Registration', 'ኮሌጅ እና ዲፓርትመንት ምዝገባ') },
-            { id: 'criteria', icon: ClipboardList, label: 'Evaluation Criteria' },
+            { id: 'criteria', icon: ClipboardList, label: t('evaluationCriteriaMenu', 'Evaluation Criteria', 'የግምገማ መስፈርቶች') },
             { id: 'register-head', icon: UserPlus, label: t('registerHead', 'Register User', 'ምዝገባ') },
-            { id: 'manage-roles', icon: ShieldCheck, label: 'Manage Roles' },
+            { id: 'manage-roles', icon: ShieldCheck, label: t('manageRoles', 'Manage Roles', 'ሚናዎችን አስተዳድር') },
             { id: 'view-data', icon: Database, label: t('viewData', 'View Data', 'ውሂብ ይመልከቱ') },
             { id: 'broadcast', icon: Megaphone, label: t('broadcastManager', 'Broadcast Manager', 'የስርጭት አስተዳደር') },
             { id: 'security', icon: ShieldCheck, label: t('securityLogs', 'Security & Logs', 'ደህንነት እና መዝገቦች') },
             { id: 'health', icon: Activity, label: t('systemHealth', 'System Health', 'የስርዓት ጤና') },
-            { id: 'landing-content', icon: Megaphone, label: 'Landing Page' },
+            { id: 'landing-content', icon: Megaphone, label: t('landingPage', 'Landing Page', 'የላንዲንግ ገጽ') },
           ].map((item) => {
             const Icon = item.icon;
             return (
@@ -1546,9 +1546,9 @@ const SystemAdminDashboard = () => {
               ? 'Unavailable'
               : countLabel(dashboardStats?.totalUsers);
           const quickActions = [
-            { label: 'Register user', icon: UserPlus, color: 'text-blue-700', action: () => { setRegistrationMode(null); setActiveTab('register-head'); } },
-            { label: 'Manage roles', icon: ShieldCheck, color: 'text-indigo-700', action: () => setActiveTab('manage-roles') },
-            { label: 'Add college / department', icon: Building2, color: 'text-cyan-700', action: () => { setDepartmentCourseTab('college'); setActiveTab('department-course'); } },
+            { label: t('registerHead', 'Register User', 'ተጠቃሚ ይመዝግቡ'), icon: UserPlus, color: 'text-blue-700', action: () => { setRegistrationMode(null); setActiveTab('register-head'); } },
+            { label: t('manageRoles', 'Manage Roles', 'ሚናዎችን አስተዳድር'), icon: ShieldCheck, color: 'text-indigo-700', action: () => setActiveTab('manage-roles') },
+            { label: t('addCollegeDepartment', 'Add college / department', 'ኮሌጅ / ዲፓርትመንት ያክሉ'), icon: Building2, color: 'text-cyan-700', action: () => { setDepartmentCourseTab('college'); setActiveTab('department-course'); } },
           ];
 
           return (
@@ -1556,8 +1556,8 @@ const SystemAdminDashboard = () => {
               <header className="flex flex-col justify-between gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:flex-row sm:items-center">
                 <div>
                   <p className="text-xs font-semibold uppercase text-blue-700">IPES · Administration</p>
-                  <h2 className="mt-1 text-xl font-bold text-slate-950">System Command Center</h2>
-                  <p className="mt-1 text-sm text-slate-500">Live institutional metrics and evaluation operations</p>
+                  <h2 className="mt-1 text-xl font-bold text-slate-950">{t('commandCenterTitle', 'System Command Center', 'የስርዓት ትዕዛዝ ማዕከል')}</h2>
+                  <p className="mt-1 text-sm text-slate-500">{t('commandCenterSubtitle', 'Live institutional metrics and evaluation operations', 'የተቋሙን የቀጥታ መረጃዎችና የግምገማ ሥራዎችን ይቆጣጠሩ')}</p>
                 </div>
                 <div className={`inline-flex w-fit items-center gap-2 rounded-full border px-3 py-2 text-xs font-semibold ${isHealthReady && systemHealth.status === 'healthy' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : isHealthReady ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
                   <span className={`h-2 w-2 rounded-full ${isHealthReady && systemHealth.status === 'healthy' ? 'bg-emerald-500' : isHealthReady ? 'bg-amber-500' : 'bg-slate-400'}`} />
@@ -1744,14 +1744,14 @@ const SystemAdminDashboard = () => {
           <section className="space-y-8">
             <div className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-[0_18px_55px_-34px_rgba(37,99,235,0.24)]">
               <div className="mb-8">
-                <h3 className="text-2xl font-bold text-slate-900">College and Department Registration</h3>
-                <p className="mt-1 text-slate-600">Create colleges and departments from one place and keep their records updated instantly.</p>
+                <h3 className="text-2xl font-bold text-slate-900">{t('collegeDepartmentRegistration', 'College and Department Registration', 'የኮሌጅ እና የዲፓርትመንት ምዝገባ')}</h3>
+                <p className="mt-1 text-slate-600">{t('collegeDepartmentRegistrationDescription', 'Create colleges and departments from one place and keep their records updated instantly.', 'ኮሌጆችንና ዲፓርትመንቶችን ከአንድ ቦታ ይፍጠሩ እና መዝገቦቻቸውን በቅጽበት ያዘምኑ።')}</p>
               </div>
 
               <div className="mb-8 flex flex-wrap gap-3 rounded-2xl bg-slate-100 p-2">
                 {[
-                  { id: 'college', label: 'College Registration' },
-                  { id: 'department', label: 'Department Registration' },
+                  { id: 'college', label: t('collegeRegistration', 'College Registration', 'የኮሌጅ ምዝገባ') },
+                  { id: 'department', label: t('departmentRegistration', 'Department Registration', 'የዲፓርትመንት ምዝገባ') },
                 ].map((tab) => (
                   <button
                     key={tab.id}
@@ -1768,15 +1768,15 @@ const SystemAdminDashboard = () => {
                 <form onSubmit={handleCollegeRegistrationSubmit} className="space-y-6">
                   <div className="grid gap-6 lg:grid-cols-2 rounded-2xl border border-slate-200 bg-slate-50 p-6">
                     <label className="block">
-                      <span className="text-sm font-medium text-slate-700">College Name:</span>
+                      <span className="text-sm font-medium text-slate-700">{t('collegeName', 'College Name:', 'የኮሌጅ ስም:')}</span>
                       <input value={collegeNameInput} onChange={(event) => setCollegeNameInput(event.target.value)} className="mt-2 w-full rounded-2xl border border-slate-300 bg-white p-4 text-slate-900 outline-none focus:border-blue-500" placeholder="Enter college name" required />
                     </label>
                     <label className="block">
-                      <span className="text-sm font-medium text-slate-700">College Code:</span>
+                      <span className="text-sm font-medium text-slate-700">{t('collegeCode', 'College Code:', 'የኮሌጅ ኮድ:')}</span>
                       <input value={collegeCodeInput} onChange={(event) => setCollegeCodeInput(event.target.value)} className="mt-2 w-full rounded-2xl border border-slate-300 bg-white p-4 text-slate-900 outline-none focus:border-blue-500" placeholder="Enter college code" required />
                     </label>
                   </div>
-                  <button type="submit" className="inline-flex items-center justify-center rounded-2xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white transition hover:bg-blue-500">Register College</button>
+                  <button type="submit" className="inline-flex items-center justify-center rounded-2xl bg-blue-600 px-6 py-3 text-sm font-semibold text-white transition hover:bg-blue-500">{t('registerCollege', 'Register College', 'ኮሌጅ ይመዝግቡ')}</button>
                 </form>
               ) : (
                 <DepartmentRegistration onRegistered={(record) => {

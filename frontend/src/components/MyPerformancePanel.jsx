@@ -9,6 +9,21 @@ const componentMeta = [
   { key: 'student', label: 'Student / Institutional Evaluation', color: 'amber' },
 ];
 
+const collectFeedbackItems = (details, fields) => {
+  const rows = Object.values(details || {}).flatMap((categoryRows) => (
+    Array.isArray(categoryRows) ? categoryRows : []
+  ));
+  const comments = rows.flatMap((row) => fields.flatMap((field) => {
+    const value = row?.[field];
+    const values = Array.isArray(value) ? value : [value];
+    return values
+      .filter((item) => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }));
+  return [...new Set(comments)];
+};
+
 export const calculateDirectorateTotalScore = (components = {}) => {
   const peerRaw = components.peer?.rawScore;
   const vicePresidentRaw = components.vicePresident?.rawScore;
@@ -59,6 +74,8 @@ const MyPerformancePanel = () => {
 
   const components = report?.components || {};
   const details = report?.details || {};
+  const strengths = collectFeedbackItems(details, ['strengths']);
+  const improvements = collectFeedbackItems(details, ['suggestions', 'weaknesses', 'improvements']);
   const isComplete = report?.isComplete === true;
   const studentNotApplicable = components.student?.isNA === true;
   const totalScore = report?.totalScore ?? calculateDirectorateTotalScore(components);
@@ -88,7 +105,13 @@ const MyPerformancePanel = () => {
 
       <div className="grid gap-4 md:grid-cols-3">
         {componentMeta.map(({ key, label, color }) => {
-          const component = components[key] || {};
+          const sourceComponent = components[key] || {};
+          const component = {
+            rawScore: sourceComponent.rawScore,
+            weightedScore: sourceComponent.weightedScore,
+            maxWeight: sourceComponent.maxWeight,
+            isNA: sourceComponent.isNA,
+          };
           const maxWeight = component.maxWeight || (key === 'peer' ? 20 : key === 'vicePresident' ? 30 : 50);
           const tone = color === 'emerald' ? 'text-emerald-700' : color === 'amber' ? 'text-amber-700' : 'text-blue-700';
           return (
@@ -98,7 +121,6 @@ const MyPerformancePanel = () => {
                 <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">/{maxWeight}%</span>
               </div>
               <p className={`mt-5 text-3xl font-bold ${tone}`}>{component.isNA ? 'N/A' : formatPercent(component.rawScore)}</p>
-              <p className="mt-1 text-sm text-slate-500">{component.isNA ? 'Not applicable' : `${component.count || 0} evaluation${component.count === 1 ? '' : 's'}`}</p>
               <div className="mt-4 border-t border-slate-100 pt-3">
                 <p className="text-sm text-slate-500">Weighted contribution</p>
                 <p className="text-xl font-bold text-slate-900">{formatPercent(component.weightedScore)}</p>
@@ -108,20 +130,20 @@ const MyPerformancePanel = () => {
         })}
       </div>
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-        <h3 className="text-lg font-bold text-slate-900">Evaluation Details and Feedback</h3>
-        <div className="mt-4 space-y-3">
-          {componentMeta.map(({ key, label }) => {
-            const rows = Array.isArray(details[key]) ? details[key] : [];
-            return (
-              <details key={key} className="rounded-xl border border-slate-200 p-4">
-                <summary className="cursor-pointer font-semibold text-slate-800">{label} ({rows.length})</summary>
-                {rows.length ? <div className="mt-4 space-y-3">{rows.map((row, index) => <div key={`${key}-${index}`} className="border-t border-slate-100 pt-3 text-sm"><p className="font-semibold text-slate-900">Score: {formatPercent(row.score)}{row.evaluator ? ` - ${row.evaluator}` : ''}</p>{row.strengths ? <p className="mt-1 text-slate-600">Strengths: {row.strengths}</p> : null}{row.suggestions ? <p className="mt-1 text-slate-600">Suggestions: {row.suggestions}</p> : null}{row.weaknesses ? <p className="mt-1 text-slate-600">Areas for improvement: {row.weaknesses}</p> : null}{row.feedback ? <p className="mt-1 text-slate-600">Feedback: {row.feedback}</p> : null}</div>)}</div> : <p className="mt-3 text-sm text-slate-500">No submitted evaluations are available yet.</p>}
-              </details>
-            );
-          })}
-        </div>
-      </section>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <section className="rounded-2xl border border-emerald-100 bg-emerald-50/50 p-6 text-emerald-950">
+          <h3 className="mb-4 text-lg font-bold text-emerald-800">Strengths &amp; Positive Highlights</h3>
+          {strengths.length
+            ? <ul className="list-disc space-y-2 pl-5 text-sm">{strengths.map((item, index) => <li key={`${index}-${item}`} className="whitespace-pre-wrap">{item}</li>)}</ul>
+            : <p className="text-sm text-emerald-900/70">No strengths have been recorded yet.</p>}
+        </section>
+        <section className="rounded-2xl border border-amber-100 bg-amber-50/50 p-6 text-amber-950">
+          <h3 className="mb-4 text-lg font-bold text-amber-800">Areas for Improvement</h3>
+          {improvements.length
+            ? <ul className="list-disc space-y-2 pl-5 text-sm">{improvements.map((item, index) => <li key={`${index}-${item}`} className="whitespace-pre-wrap">{item}</li>)}</ul>
+            : <p className="text-sm text-amber-900/70">No improvement areas have been recorded yet.</p>}
+        </section>
+      </div>
     </section>
   );
 };

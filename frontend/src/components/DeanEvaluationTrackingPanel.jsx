@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import toast from 'react-hot-toast';
 import { deanApi, evaluationApi } from '../services/api';
 import { useEvaluation } from '../context/useEvaluation';
+import { YEAR_LEVEL_ASSIGNMENT_OPTIONS } from '../data/adminOptions';
 
 const round = (value) => Number(Number(value || 0).toFixed(2));
 
@@ -282,8 +283,7 @@ const DeanEvaluationTrackingPanel = () => {
             <label className="mt-5 block text-sm font-medium text-slate-700">
               Target Academic Year / Batch
               <select value={batchYear} onChange={(event) => setBatchYear(event.target.value)} className="mt-2 w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm">
-                <option value="3rd Year">3rd Year</option>
-                <option value="4th Year">4th Year</option>
+                {YEAR_LEVEL_ASSIGNMENT_OPTIONS.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
                 <option value="All Batches">All Batches</option>
               </select>
             </label>

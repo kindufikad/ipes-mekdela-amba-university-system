@@ -4,7 +4,6 @@ import { useLocation } from 'react-router-dom';
 import { labAssistantApi } from '../services/api';
 import PeerEvaluationModal from '../components/PeerEvaluationModal';
 import IPESAISmartInsights from '../components/ai/IPESAISmartInsights';
-import calculateEvaluationScores from '../utils/calculateEvaluationScores';
 
 const LabAssistantDashboard = () => {
   const location = useLocation();
@@ -117,9 +116,16 @@ const LabAssistantDashboard = () => {
           const safeStudentScore = Number(perfData.student_score ?? perfData.studentScore ?? 0);
           const safeDeptHeadScore = Number(perfData.dept_head_score ?? perfData.deptHeadScore ?? 0);
           const safePeerScore = Number(perfData.peer_score ?? perfData.peerScore ?? 0);
-          const computedScore = calculateEvaluationScores(safeStudentScore, safeDeptHeadScore, safePeerScore);
-          const safeTotalScore = Number(perfData.final_score ?? perfData.totalPerformance ?? perfData.totalScore ?? computedScore.totalScore ?? 0);
+          const hasAssignedCourses = perfData.has_assigned_courses ?? perfData.hasAssignedCourses ?? true;
+          const weights = perfData.weights || perfRes?.data?.weights || {
+            student: hasAssignedCourses ? 50 : 0,
+            peer: hasAssignedCourses ? 20 : 40,
+            deptHead: hasAssignedCourses ? 30 : 60,
+          };
           const isComplete = perfData.isComplete === true || perfRes?.data?.isComplete === true;
+          const safeTotalScore = isComplete
+            ? Number(perfData.final_score ?? perfData.totalPerformance ?? perfData.totalScore ?? 0)
+            : 0;
           const strengths = Array.isArray(perfData.strengths) ? perfData.strengths : (Array.isArray(perfRes?.data?.strengths) ? perfRes.data.strengths : []);
           const improvements = Array.isArray(perfData.improvements) ? perfData.improvements : (Array.isArray(perfRes?.data?.improvements) ? perfRes.data.improvements : []);
 
@@ -129,6 +135,8 @@ const LabAssistantDashboard = () => {
             peerScore: Number.isFinite(safePeerScore) ? safePeerScore.toFixed(1) : '0.0',
             totalScore: Number.isFinite(safeTotalScore) ? safeTotalScore.toFixed(1) : '0.0',
             isComplete,
+            hasAssignedCourses,
+            weights,
             statusBadge: isComplete ? 'Completed' : (perfData.statusBadge || perfRes?.data?.statusBadge || 'Pending Complete Evaluation'),
             strengths,
             improvements,
@@ -141,6 +149,8 @@ const LabAssistantDashboard = () => {
             peerScore: '0.0',
             totalScore: '0.0',
             isComplete: false,
+            hasAssignedCourses: true,
+            weights: { student: 50, peer: 20, deptHead: 30 },
             statusBadge: 'Pending Complete Evaluation',
             strengths: [],
             improvements: [],
@@ -213,14 +223,20 @@ const LabAssistantDashboard = () => {
                         {(() => {
                           const normalizedStatus = String(item.status || item.submission_status || '').toLowerCase();
                           const isComplete = normalizedStatus === 'completed' || normalizedStatus === 'submitted' || item.is_evaluated;
+                          const scoreValue = item.score_percentage ?? item.total_score;
+                          const score = Number(scoreValue);
+                          const hasScore = isComplete && scoreValue !== null && scoreValue !== undefined && Number.isFinite(score);
                           return (
                             <>
                         <td className="px-4 py-4 text-sm font-medium text-gray-900">{item.name || 'N/A'}</td>
                         <td className="px-4 py-4 text-sm text-gray-600">{item.employee_id || 'N/A'}</td>
                         <td className="px-4 py-4 text-sm">
-                          <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${isComplete ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
-                            {isComplete ? 'Completed' : 'Pending'}
-                          </span>
+                          <div className="flex items-center gap-2">
+                            <span className={`inline-flex px-2.5 py-1 rounded-full text-xs font-semibold ${isComplete ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
+                              {isComplete ? 'Completed' : 'Pending'}
+                            </span>
+                            {hasScore && <span className="font-semibold text-gray-700">{score.toFixed(2)}%</span>}
+                          </div>
                         </td>
                         <td className="px-4 py-4 text-sm"><button type="button" onClick={() => setSelectedPeer(item)} className="font-semibold text-blue-600 hover:underline">{isComplete ? 'Edit Evaluation' : 'Evaluate'}</button></td>
                             </>
@@ -260,7 +276,7 @@ const LabAssistantDashboard = () => {
           score: payload.score,
         })}
         onSubmitted={() => {
-          setPeerEvaluations((current) => current.map((item) => item.id === selectedPeer.id ? { ...item, status: 'completed', is_evaluated: true } : item));
+          void loadPeerEvaluations();
           setSelectedPeer(null);
         }}
       />}
@@ -274,22 +290,22 @@ const LabAssistantDashboard = () => {
               <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
                 <p className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Total Weighted Evaluation Score</p>
                 <h2 className={`text-5xl font-bold mt-3 ${performance.isComplete ? 'text-ieps-blue-700' : 'text-slate-500'}`}>{performance.isComplete ? `${performance.totalScore}%` : 'Pending Completion'}</h2>
-                {!performance.isComplete && <p className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">Total score will be published after all evaluation categories (Student, Peer, and Department Head) complete their submissions.</p>}
+                {!performance.isComplete && <p className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">{performance.hasAssignedCourses ? 'At least half of registered students, one peer, and the Department Head must submit evaluations.' : 'One peer and the Department Head must submit evaluations.'}</p>}
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                 <div className="bg-blue-50 p-6 rounded-2xl border border-gray-200 shadow-sm">
                   <div className="flex justify-between items-center mb-3">
                     <span className="text-sm font-medium text-blue-600">Student Evaluation</span>
-                    <span className="bg-blue-200 text-blue-700 text-xs px-2.5 py-1 rounded font-semibold">50% Weight</span>
+                    <span className="bg-blue-200 text-blue-700 text-xs px-2.5 py-1 rounded font-semibold">{performance.weights.student}% Weight</span>
                   </div>
-                  <p className="text-4xl font-bold text-blue-600">{performance.studentScore}%</p>
+                  <p className="text-4xl font-bold text-blue-600">{performance.hasAssignedCourses ? `${performance.studentScore}%` : 'N/A'}</p>
                 </div>
 
                 <div className="bg-amber-50 p-6 rounded-2xl border border-gray-200 shadow-sm">
                   <div className="flex justify-between items-center mb-3">
                     <span className="text-sm font-medium text-amber-600">Dept Head Evaluation</span>
-                    <span className="bg-amber-200 text-amber-700 text-xs px-2.5 py-1 rounded font-semibold">30% Weight</span>
+                    <span className="bg-amber-200 text-amber-700 text-xs px-2.5 py-1 rounded font-semibold">{performance.weights.deptHead}% Weight</span>
                   </div>
                   <p className="text-4xl font-bold text-amber-600">{performance.deptHeadScore}%</p>
                 </div>
@@ -297,7 +313,7 @@ const LabAssistantDashboard = () => {
                 <div className="bg-purple-50 p-6 rounded-2xl border border-gray-200 shadow-sm">
                   <div className="flex justify-between items-center mb-3">
                     <span className="text-sm font-medium text-purple-600">Peer Evaluation</span>
-                    <span className="bg-purple-200 text-purple-700 text-xs px-2.5 py-1 rounded font-semibold">20% Weight</span>
+                    <span className="bg-purple-200 text-purple-700 text-xs px-2.5 py-1 rounded font-semibold">{performance.weights.peer}% Weight</span>
                   </div>
                   <p className="text-4xl font-bold text-purple-600">{performance.peerScore}%</p>
                 </div>

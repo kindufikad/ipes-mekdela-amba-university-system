@@ -7,6 +7,7 @@ import { SUBMISSIONS_UPDATED_EVENT } from '../services/formSubmissions';
 import { criteriaApi, evaluationApi, studentApi } from '../services/api';
 import LanguageToggle from '../components/LanguageToggle';
 import StudentEvaluationModal from '../components/StudentEvaluationModal';
+import TelegramLinkBanner from '../components/TelegramLinkBanner';
 import { useAuth } from '../context/useAuth';
 import IPESAISmartInsights from '../components/ai/IPESAISmartInsights';
 import { calculateLikertPercentage, hasLikertResponse } from '../utils/likertScoring';
@@ -457,9 +458,6 @@ const StudentDashboard = () => {
                 <h2 className="text-xl font-bold text-ieps-blue-600">{t('studentDashboard.myEvaluationsTitle')}</h2>
                 <p className="text-sm text-gray-500">{t('studentDashboard.myEvaluationsDesc')}</p>
 
-          <div className="mb-8">
-            <IPESAISmartInsights role="STUDENT" onActionClick={handleAiAction} />
-          </div>
               </div>
               <div className="rounded-full bg-yellow-50 px-3 py-2 text-sm font-semibold text-yellow-700">
                 {pendingCount} {t('studentDashboard.pendingLabel')}
@@ -668,6 +666,7 @@ const StudentDashboard = () => {
       default:
         return (
           <div className="space-y-6">
+            <IPESAISmartInsights role="STUDENT" onActionClick={handleAiAction} />
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <div className="rounded-3xl border border-gray-200 bg-white p-5 text-center shadow-sm">
                 <p className="text-3xl font-bold text-ieps-blue-600">{totalCourses}</p>
@@ -725,6 +724,8 @@ const StudentDashboard = () => {
           </span>
         </div>
       </div>
+
+      <TelegramLinkBanner profile={profile} />
 
       <div className="grid grid-cols-1 lg:grid-cols-[220px_minmax(0,1fr)] gap-6 mb-8">
         <aside className="rounded-none border-0 bg-transparent p-0 shadow-none">

@@ -1,18 +1,33 @@
 import React, { useEffect, useState } from 'react';
+import { useLocation } from 'react-router-dom';
+import { useAuth } from './useAuth';
 import { ThemeContext } from './ThemeContextValue';
+import { getThemeStorageKey } from '../utils/themePreference';
 
-const THEME_STORAGE_KEY = 'ipes-theme-preference';
+const readTheme = (storageKey) => {
+  try {
+    const savedTheme = window.localStorage.getItem(storageKey);
+    if (savedTheme) return savedTheme === 'dark';
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  } catch {
+    return false;
+  }
+};
 
 export const ThemeProvider = ({ children }) => {
-  const [isDark, setIsDark] = useState(() => {
-    try {
-      const savedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
-      if (savedTheme) return savedTheme === 'dark';
-      return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-    } catch (e) {
-      return true;
-    }
-  });
+  const { pathname } = useLocation();
+  const { user, role } = useAuth();
+  const storageKey = getThemeStorageKey({ pathname, user, role });
+  const [themeState, setThemeState] = useState(() => ({ storageKey, isDark: readTheme(storageKey) }));
+  const isDark = themeState.storageKey === storageKey
+    ? themeState.isDark
+    : readTheme(storageKey);
+
+  useEffect(() => {
+    setThemeState((current) => current.storageKey === storageKey
+      ? current
+      : { storageKey, isDark: readTheme(storageKey) });
+  }, [storageKey]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -23,13 +38,13 @@ export const ThemeProvider = ({ children }) => {
       root.classList.remove('dark');
     }
     try {
-      window.localStorage.setItem(THEME_STORAGE_KEY, isDark ? 'dark' : 'light');
+      window.localStorage.setItem(storageKey, isDark ? 'dark' : 'light');
     } catch (error) {
       console.warn('Unable to save theme preference:', error);
     }
-  }, [isDark]);
+  }, [isDark, storageKey]);
 
-  const toggleTheme = () => setIsDark((v) => !v);
+  const toggleTheme = () => setThemeState({ storageKey, isDark: !isDark });
 
   return (
     <ThemeContext.Provider value={{ isDark, toggleTheme }}>

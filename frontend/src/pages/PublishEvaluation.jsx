@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
 import { evaluationApi, registrationApi } from '../services/api';
 import PublishEvaluationTable from '../components/PublishEvaluationTable';
+import { getYearLevelLabel, getYearLevelNumber, YEAR_LEVEL_ASSIGNMENT_OPTIONS, YEAR_LEVEL_FILTER_OPTIONS } from '../data/adminOptions';
 
 const PublishEvaluation = ({ departmentId, role = 'dept_head' }) => {
   const isDepartmentHead = ['dept_head', 'depthead', 'department_head'].includes(String(role).toLowerCase());
@@ -161,7 +162,15 @@ const PublishEvaluation = ({ departmentId, role = 'dept_head' }) => {
     && !targetAlreadyPublished
     && (!targetEvaluationStarted || targetEvaluationFullyCompleted);
   const canUnpublishTarget = target === 'instructor' ? !peerHasSubmissions : canUnpublish;
-  const options = (field) => [...new Set(assignments.map((assignment) => assignment[field]).filter(Boolean))];
+  const options = (field) => {
+    const assignmentOptions = assignments.map((assignment) => assignment[field]).filter(Boolean);
+    if (field !== 'year_level') return [...new Set(assignmentOptions)];
+    const existingYearNumbers = new Set(assignmentOptions.map(getYearLevelNumber).filter(Boolean));
+    const missingYearOptions = YEAR_LEVEL_FILTER_OPTIONS
+      .filter(({ value }) => !existingYearNumbers.has(getYearLevelNumber(value)))
+      .map(({ value }) => value);
+    return [...new Set([...assignmentOptions, ...missingYearOptions])];
+  };
 
   const publish = async () => {
     if (targetAlreadyPublished || (targetEvaluationStarted && !targetEvaluationFullyCompleted)) {
@@ -221,7 +230,7 @@ const PublishEvaluation = ({ departmentId, role = 'dept_head' }) => {
 
         {target === 'student' ? (
           <div className="mt-6 grid gap-4 md:grid-cols-5">
-            {Object.entries(labels).map(([field, label]) => <label key={field} className="text-sm text-slate-600"><span className="mb-1 block font-medium">{label}</span><select value={filters[field]} onChange={updateFilter(field)} className={selectClass}><option value="">All</option>{options(field).map((option) => <option key={option} value={option}>{option}</option>)}</select></label>)}
+            {Object.entries(labels).map(([field, label]) => <label key={field} className="text-sm text-slate-600"><span className="mb-1 block font-medium">{label}</span><select value={filters[field]} onChange={updateFilter(field)} className={selectClass}><option value="">All</option>{options(field).map((option) => <option key={option} value={option}>{field === 'year_level' ? getYearLevelLabel(option) : option}</option>)}</select></label>)}
             <label className="text-sm text-slate-600"><span className="mb-1 block font-medium">Staff Type</span><select value={filters.staff_type} onChange={updateFilter('staff_type')} className={selectClass}><option value="all">All Staff Types</option><option value="instructor">Instructors Only</option><option value="lab_assistant">Lab Assistants Only</option></select></label>
           </div>
         ) : (
@@ -247,8 +256,7 @@ const PublishEvaluation = ({ departmentId, role = 'dept_head' }) => {
             <label className="mt-5 block text-sm font-medium text-slate-700">
               Target Academic Year / Batch
               <select value={batchYear} onChange={(event) => setBatchYear(event.target.value)} className={`${selectClass} mt-2`}>
-                <option value="3rd Year">3rd Year</option>
-                <option value="4th Year">4th Year</option>
+                {YEAR_LEVEL_ASSIGNMENT_OPTIONS.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
                 <option value="All Batches">All Batches</option>
               </select>
             </label>

@@ -1,7 +1,9 @@
 import { io } from 'socket.io-client';
 
+const isLocalHost = typeof window !== 'undefined'
+  && ['localhost', '127.0.0.1'].includes(window.location.hostname);
 const socketUrl = import.meta.env.VITE_SOCKET_URL
-  || (typeof window === 'undefined' ? 'http://127.0.0.1:5005' : window.location.origin);
+  || (typeof window === 'undefined' || isLocalHost ? 'http://localhost:5005' : window.location.origin);
 
 const getSocketAuthToken = () => {
   if (typeof window === 'undefined') return '';
@@ -11,7 +13,7 @@ const getSocketAuthToken = () => {
 const socket = io(socketUrl, {
   autoConnect: false,
   path: '/socket.io',
-  transports: ['polling', 'websocket'],
+  transports: ['websocket', 'polling'],
   rememberUpgrade: false,
   reconnection: true,
   reconnectionAttempts: Infinity,

@@ -4,17 +4,23 @@ import toast from 'react-hot-toast';
 import { aiApi, notificationApi } from '../../services/api';
 import { useAuth } from '../../context/useAuth';
 import { useEvaluation } from '../../context/useEvaluation';
+import { SUBMISSIONS_UPDATED_EVENT } from '../../services/formSubmissions';
 import AIInsightsWidget from './AIInsightsWidget';
 
 const normalizeRole = (role) => String(role || '').trim().toUpperCase().replace(/[\s-]+/g, '_');
 const csvCell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
-const normalizeInsightData = (result = {}) => ({
-  ...result,
-  summary: Array.isArray(result.aiObservations) ? result.aiObservations : (result.summary || []),
-  recommendations: Array.isArray(result.recommendedActions) ? result.recommendedActions : (result.recommendations || []),
-  topFeedbackKeywords: Array.isArray(result.topKeywords) ? result.topKeywords : (result.topFeedbackKeywords || []),
-  totalSubmitted: result.completedCount ?? result.totalSubmitted ?? 0,
-});
+const normalizeInsightData = (result = {}) => {
+  const payload = result && typeof result === 'object' && result.data && typeof result.data === 'object'
+    ? result.data
+    : result;
+  return {
+    ...payload,
+    summary: Array.isArray(payload.aiObservations) ? payload.aiObservations : (payload.summary || []),
+    recommendations: Array.isArray(payload.recommendedActions) ? payload.recommendedActions : (payload.recommendations || []),
+    topFeedbackKeywords: Array.isArray(payload.topKeywords) ? payload.topKeywords : (payload.topFeedbackKeywords || []),
+    totalSubmitted: payload.completedCount ?? payload.totalSubmitted ?? 0,
+  };
+};
 
 const createSummaryCsv = (data, role) => {
   const rows = [
@@ -56,30 +62,40 @@ const IPESAISmartInsights = ({
     if (departmentId) params.departmentId = departmentId;
     if (userId || user?.id) params.userId = userId || user.id;
 
-    setIsLoading(true);
-    setError('');
-    const insightsRequest = normalizedRole === 'INSTRUCTOR'
-      ? aiApi.getInstructorAiInsights()
-      : aiApi.getSummary(normalizedRole, params);
-    insightsRequest
-      .then((result) => {
-        if (!active) return;
-        const nextData = normalizeInsightData(result && typeof result === 'object' ? result : {});
-        setInsightsData(nextData);
-        onDataChange?.(nextData);
-      })
-      .catch((error) => {
-        if (!active) return;
-        const message = error?.message || 'Insights are temporarily unavailable.';
-        setError(message);
-        setInsightsData({});
-        onDataChange?.({});
-      })
-      .finally(() => {
-        if (active) setIsLoading(false);
-      });
+    const loadInsights = () => {
+      setIsLoading(true);
+      setError('');
+      const insightsRequest = normalizedRole === 'INSTRUCTOR'
+        ? aiApi.getInstructorAiInsights()
+        : aiApi.getSummary(normalizedRole, params);
+      insightsRequest
+        .then((result) => {
+          if (!active) return;
+          const nextData = normalizeInsightData(result && typeof result === 'object' ? result : {});
+          setInsightsData(nextData);
+          onDataChange?.(nextData);
+        })
+        .catch((error) => {
+          if (!active) return;
+          const message = error?.message || 'Insights are temporarily unavailable.';
+          setError(message);
+          setInsightsData({});
+          onDataChange?.({});
+        })
+        .finally(() => {
+          if (active) setIsLoading(false);
+        });
+    };
 
-    return () => { active = false; };
+    loadInsights();
+    if (normalizedRole === 'STUDENT') {
+      window.addEventListener(SUBMISSIONS_UPDATED_EVENT, loadInsights);
+    }
+
+    return () => {
+      active = false;
+      window.removeEventListener(SUBMISSIONS_UPDATED_EVENT, loadInsights);
+    };
   }, [departmentId, normalizedRole, onDataChange, refreshVersion, retryCount, user?.id, userId]);
 
   const scrollToPending = () => {

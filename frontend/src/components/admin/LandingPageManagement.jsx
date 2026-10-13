@@ -13,6 +13,7 @@ import {
   X,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { useTranslation } from '../../context/useTranslation';
 import { adminApi } from '../../services/api';
 import './LandingPageManagement.css';
 
@@ -57,10 +58,10 @@ const defaultSettings = {
 };
 
 const tabs = [
-  { id: 'public', label: 'Public information' },
-  { id: 'assets', label: 'Images & logos' },
-  { id: 'institution', label: 'Vision & objectives' },
-  { id: 'announcements', label: 'Calendar & notices' },
+  { id: 'public', labelKey: 'publicInformation' },
+  { id: 'assets', labelKey: 'imagesLogos' },
+  { id: 'institution', labelKey: 'visionObjectives' },
+  { id: 'announcements', labelKey: 'calendarNotices' },
 ];
 
 const normalizeSettings = (value = {}) => ({
@@ -99,7 +100,7 @@ class LandingPageErrorBoundary extends Component {
 
   componentDidCatch(error) {
     console.error('Landing page management render failed:', error);
-    toast.error('Landing Page Management could not be displayed.');
+    toast.error(this.props.t('landingPageManagement.unavailableToast'));
   }
 
   render() {
@@ -107,10 +108,10 @@ class LandingPageErrorBoundary extends Component {
       return (
         <div className="landing-manager__fatal" role="alert">
           <div>
-            <h2>Landing Page Management is unavailable</h2>
-            <p>Reload this section to try again.</p>
+            <h2>{this.props.t('landingPageManagement.unavailableTitle')}</h2>
+            <p>{this.props.t('landingPageManagement.reloadSection')}</p>
           </div>
-          <button type="button" onClick={() => this.setState({ hasError: false })}>Retry</button>
+          <button type="button" onClick={() => this.setState({ hasError: false })}>{this.props.t('landingPageManagement.retry')}</button>
         </div>
       );
     }
@@ -119,6 +120,9 @@ class LandingPageErrorBoundary extends Component {
 }
 
 const LandingPageManagementContent = () => {
+  const { t, language } = useTranslation();
+  const translationRef = useRef(t);
+  translationRef.current = t;
   const [settings, setSettings] = useState(defaultSettings);
   const [activeTab, setActiveTab] = useState('public');
   const [loading, setLoading] = useState(true);
@@ -138,7 +142,7 @@ const LandingPageManagementContent = () => {
       setSettings(normalizeSettings(result));
       setHasLoadedSettings(true);
     } catch (loadError) {
-      const message = loadError?.message || 'Failed to retrieve landing page settings.';
+      const message = loadError?.message || translationRef.current('landingPageManagement.loadError');
       setError(message);
       toast.error(message);
     } finally {
@@ -150,7 +154,7 @@ const LandingPageManagementContent = () => {
     void loadSettings();
   }, [loadSettings]);
 
-  const persistSettings = async (nextSettings, successMessage = 'Landing page settings saved.') => {
+  const persistSettings = async (nextSettings, successMessage = t('landingPageManagement.settingsSaved')) => {
     setSaving(true);
     setError('');
     try {
@@ -159,7 +163,7 @@ const LandingPageManagementContent = () => {
       toast.success(successMessage);
       return true;
     } catch (saveError) {
-      const message = saveError?.message || 'Unable to save landing page settings.';
+      const message = saveError?.message || t('landingPageManagement.saveError');
       setError(message);
       toast.error(message);
       return false;
@@ -193,9 +197,9 @@ const LandingPageManagementContent = () => {
       files.forEach((file) => formData.append('files', file));
       const result = await adminApi.createLandingPageSetting(formData);
       setSettings(normalizeSettings(result));
-      toast.success('Image uploaded and published.');
+      toast.success(t('landingPageManagement.imageUploaded'));
     } catch (uploadError) {
-      const message = uploadError?.message || 'Unable to upload image.';
+      const message = uploadError?.message || t('landingPageManagement.uploadError');
       setError(message);
       toast.error(message);
     } finally {
@@ -211,9 +215,9 @@ const LandingPageManagementContent = () => {
     try {
       const result = await adminApi.deleteLandingPageSetting({ key, ...extras });
       setSettings(normalizeSettings(result));
-      toast.success(key === 'announcements' ? 'Notice deleted.' : 'Image removed.');
+      toast.success(t(key === 'announcements' ? 'landingPageManagement.noticeDeleted' : 'landingPageManagement.imageRemoved'));
     } catch (deleteError) {
-      const message = deleteError?.message || 'Unable to delete landing page content.';
+      const message = deleteError?.message || t('landingPageManagement.deleteError');
       setError(message);
       toast.error(message);
     } finally {
@@ -226,7 +230,7 @@ const LandingPageManagementContent = () => {
     const targetIndex = index + offset;
     if (targetIndex < 0 || targetIndex >= images.length) return;
     [images[index], images[targetIndex]] = [images[targetIndex], images[index]];
-    await persistSettings({ ...settings, assets: { ...settings.assets, home_hero_images: images } }, 'Hero image order updated.');
+    await persistSettings({ ...settings, assets: { ...settings.assets, home_hero_images: images } }, t('landingPageManagement.heroOrderUpdated'));
   };
 
   const editAnnouncement = (announcement) => {
@@ -245,7 +249,7 @@ const LandingPageManagementContent = () => {
       const announcements = settings.announcements.map((announcement) => (
         announcement.id === editingAnnouncementId ? { ...announcementDraft, id: editingAnnouncementId } : announcement
       ));
-      if (await persistSettings({ ...settings, announcements }, 'Notice updated.')) resetAnnouncementDraft();
+      if (await persistSettings({ ...settings, announcements }, t('landingPageManagement.noticeUpdated'))) resetAnnouncementDraft();
       return;
     }
 
@@ -254,9 +258,9 @@ const LandingPageManagementContent = () => {
       const result = await adminApi.createLandingPageSetting({ announcement: announcementDraft });
       setSettings(normalizeSettings(result));
       resetAnnouncementDraft();
-      toast.success('Notice published.');
+      toast.success(t('landingPageManagement.noticePublished'));
     } catch (createError) {
-      const message = createError?.message || 'Unable to publish notice.';
+      const message = createError?.message || t('landingPageManagement.publishError');
       setError(message);
       toast.error(message);
     } finally {
@@ -268,7 +272,7 @@ const LandingPageManagementContent = () => {
     const announcements = settings.announcements.map((item) => (
       item.id === announcement.id ? { ...item, active: !item.active } : item
     ));
-    void persistSettings({ ...settings, announcements }, announcement.active ? 'Notice hidden.' : 'Notice published.');
+    void persistSettings({ ...settings, announcements }, t(announcement.active ? 'landingPageManagement.noticeHidden' : 'landingPageManagement.noticePublished'));
   };
 
   const renderImageCard = (key, title, description, multiple = false) => {
@@ -285,18 +289,18 @@ const LandingPageManagementContent = () => {
         <div className={`landing-manager__previews${multiple ? ' is-carousel' : ''}`}>
           {savedImages.map((image, index) => (
             <div className="landing-manager__preview" key={`${image}-${index}`}>
-              <img src={image} alt={`${title} preview ${index + 1}`} />
+                <img src={image} alt={`${title} ${t('landingPageManagement.preview')} ${index + 1}`} />
               {multiple && <span className="landing-manager__image-order">{String(index + 1).padStart(2, '0')}</span>}
               {multiple && <div className="landing-manager__image-actions">
-                <button type="button" onClick={() => void moveHeroImage(index, -1)} disabled={saving || index === 0} aria-label={`Move image ${index + 1} earlier`}><ArrowUp size={16} /></button>
-                <button type="button" onClick={() => void moveHeroImage(index, 1)} disabled={saving || index === savedImages.length - 1} aria-label={`Move image ${index + 1} later`}><ArrowDown size={16} /></button>
-                <button type="button" onClick={() => void deleteContent(key, { index })} disabled={saving} aria-label={`Delete image ${index + 1}`}><Trash2 size={16} /></button>
+                <button type="button" onClick={() => void moveHeroImage(index, -1)} disabled={saving || index === 0} aria-label={`${t('landingPageManagement.moveImage')} ${index + 1} ${t('landingPageManagement.earlier')}`}><ArrowUp size={16} /></button>
+                <button type="button" onClick={() => void moveHeroImage(index, 1)} disabled={saving || index === savedImages.length - 1} aria-label={`${t('landingPageManagement.moveImage')} ${index + 1} ${t('landingPageManagement.later')}`}><ArrowDown size={16} /></button>
+                <button type="button" onClick={() => void deleteContent(key, { index })} disabled={saving} aria-label={`${t('landingPageManagement.deleteImage')} ${index + 1}`}><Trash2 size={16} /></button>
               </div>}
-                {!multiple && <button type="button" className="landing-manager__remove-image" onClick={() => void deleteContent(key)} disabled={saving} aria-label={`Remove ${title}`}><X size={16} /></button>}
+                {!multiple && <button type="button" className="landing-manager__remove-image" onClick={() => void deleteContent(key)} disabled={saving} aria-label={`${t('landingPageManagement.remove')} ${title}`}><X size={16} /></button>}
             </div>
           ))}
-          {previews.map((preview, index) => <div className="landing-manager__preview is-uploading" key={preview}><img src={preview} alt={`Uploading ${title} ${index + 1}`} /><span><LoaderCircle className="is-spinning" size={18} /> Uploading</span></div>)}
-          {!savedImages.length && !previews.length && <div className="landing-manager__empty-image"><ImagePlus size={22} /><span>Default image in use</span></div>}
+          {previews.map((preview, index) => <div className="landing-manager__preview is-uploading" key={preview}><img src={preview} alt={`${t('landingPageManagement.uploading')} ${title} ${index + 1}`} /><span><LoaderCircle className="is-spinning" size={18} /> {t('landingPageManagement.uploading')}</span></div>)}
+          {!savedImages.length && !previews.length && <div className="landing-manager__empty-image"><ImagePlus size={22} /><span>{t('landingPageManagement.defaultImage')}</span></div>}
         </div>
         <input
           ref={(element) => { fileInputs.current[key] = element; }}
@@ -307,119 +311,122 @@ const LandingPageManagementContent = () => {
           onChange={(event) => { void uploadImages(key, event.target.files); event.target.value = ''; }}
         />
         <button type="button" className="landing-manager__button landing-manager__button--primary" onClick={() => fileInputs.current[key]?.click()} disabled={saving}>
-          <Upload size={16} /> {multiple ? 'Add carousel images' : value ? 'Replace image' : 'Upload image'}
+          <Upload size={16} /> {multiple ? t('landingPageManagement.addCarouselImages') : value ? t('landingPageManagement.replaceImage') : t('landingPageManagement.uploadImage')}
         </button>
       </article>
     );
   };
 
   if (loading) {
-    return <div className="landing-manager__loading" role="status"><LoaderCircle className="is-spinning" size={24} /> Loading landing page settings…</div>;
+    return <div className="landing-manager__loading" role="status"><LoaderCircle className="is-spinning" size={24} /> {t('landingPageManagement.loading')}</div>;
   }
 
   if (!hasLoadedSettings) {
-    return <div className="landing-manager__fatal" role="alert"><div><h2>Landing page settings could not be loaded</h2><p>{error || 'Check the connection and retry.'}</p></div><button type="button" onClick={() => void loadSettings()}><RefreshCw size={15} /> Retry</button></div>;
+    return <div className="landing-manager__fatal" role="alert"><div><h2>{t('landingPageManagement.loadFailed')}</h2><p>{error || t('landingPageManagement.checkConnection')}</p></div><button type="button" onClick={() => void loadSettings()}><RefreshCw size={15} /> {t('landingPageManagement.retry')}</button></div>;
   }
 
   return (
     <section className="landing-manager" aria-labelledby="landing-manager-title">
       <header className="landing-manager__header">
         <div>
-          <p className="landing-manager__eyebrow">PUBLIC SITE · CONTENT CONTROL</p>
-          <h2 id="landing-manager-title">Landing Page Management</h2>
-          <p>Manage the content, assets, and public notices shown across the university site.</p>
+          <p className="landing-manager__eyebrow">{t('landingPageManagement.eyebrow')}</p>
+          <h2 id="landing-manager-title">{t('landingPageManagement.title')}</h2>
+          <p>{t('landingPageManagement.description')}</p>
         </div>
         <button type="button" className="landing-manager__button landing-manager__button--secondary" onClick={() => void loadSettings()} disabled={loading || saving}>
-          <RefreshCw size={16} className={loading ? 'is-spinning' : ''} /> Refresh
+          <RefreshCw size={16} className={loading ? 'is-spinning' : ''} /> {t('landingPageManagement.refresh')}
         </button>
       </header>
 
-      {error && <div className="landing-manager__error" role="alert"><span>{error}</span><button type="button" onClick={() => void loadSettings()}><RefreshCw size={15} /> Retry</button></div>}
+      {error && <div className="landing-manager__error" role="alert"><span>{error}</span><button type="button" onClick={() => void loadSettings()}><RefreshCw size={15} /> {t('landingPageManagement.retry')}</button></div>}
 
-      <div className="landing-manager__tabs" role="tablist" aria-label="Landing page settings">
+      <div className="landing-manager__tabs" role="tablist" aria-label={t('landingPageManagement.settings')}>
         {tabs.map((tab) => (
           <button type="button" role="tab" aria-selected={activeTab === tab.id} className={activeTab === tab.id ? 'is-active' : ''} key={tab.id} onClick={() => setActiveTab(tab.id)}>
-            {tab.label}
+            {t(`landingPageManagement.tabs.${tab.labelKey}`)}
           </button>
         ))}
       </div>
 
       {activeTab === 'public' && <div className="landing-manager__panel">
         <form className="landing-manager__form" onSubmit={saveForm}>
-          <div className="landing-manager__section-heading"><div><h3>Contact information</h3><p>Published in the public footer and Contact page.</p></div></div>
+          <div className="landing-manager__section-heading"><div><h3>{t('landingPageManagement.contactInformation')}</h3><p>{t('landingPageManagement.contactDescription')}</p></div></div>
           <div className="landing-manager__field-grid">
-            <label>Admin email<input type="email" required value={settings.contact.email} onChange={(event) => updateField('contact', 'email', event.target.value)} /></label>
-            <label>Support phone number<input type="tel" required value={settings.contact.phone} onChange={(event) => updateField('contact', 'phone', event.target.value)} /></label>
-            <label>Office hours<input type="text" required value={settings.contact.office_hours} onChange={(event) => updateField('contact', 'office_hours', event.target.value)} /></label>
+            <label>{t('landingPageManagement.adminEmail')}<input type="email" required value={settings.contact.email} onChange={(event) => updateField('contact', 'email', event.target.value)} /></label>
+            <label>{t('landingPageManagement.supportPhone')}<input type="tel" required value={settings.contact.phone} onChange={(event) => updateField('contact', 'phone', event.target.value)} /></label>
+            <label>{t('landingPageManagement.officeHours')}<input type="text" required value={settings.contact.office_hours} onChange={(event) => updateField('contact', 'office_hours', event.target.value)} /></label>
           </div>
-          <div className="landing-manager__section-heading landing-manager__section-heading--spaced"><div><h3>Social media links</h3><p>Leave a field empty to hide that social link from the footer.</p></div></div>
+          <div className="landing-manager__section-heading landing-manager__section-heading--spaced"><div><h3>{t('landingPageManagement.socialLinks')}</h3><p>{t('landingPageManagement.socialLinksDescription')}</p></div></div>
           <div className="landing-manager__field-grid landing-manager__field-grid--two">
-            {Object.entries({ facebook: 'Facebook URL', telegram: 'Telegram URL', linkedin: 'LinkedIn URL', youtube: 'YouTube URL' }).map(([key, label]) => (
-              <label key={key}>{label}<span className="landing-manager__url-field"><ExternalLink size={15} /><input type="url" value={settings.social_links[key] || ''} onChange={(event) => updateField('social_links', key, event.target.value)} placeholder="https://" /></span></label>
+            {Object.entries({ facebook: 'facebookUrl', telegram: 'telegramUrl', linkedin: 'linkedinUrl', youtube: 'youtubeUrl' }).map(([key, labelKey]) => (
+              <label key={key}>{t(`landingPageManagement.${labelKey}`)}<span className="landing-manager__url-field"><ExternalLink size={15} /><input type="url" value={settings.social_links[key] || ''} onChange={(event) => updateField('social_links', key, event.target.value)} placeholder="https://" /></span></label>
             ))}
           </div>
-          <div className="landing-manager__form-actions"><button type="submit" className="landing-manager__button landing-manager__button--primary" disabled={saving}><Save size={16} />{saving ? 'Saving…' : 'Save public information'}</button></div>
+          <div className="landing-manager__form-actions"><button type="submit" className="landing-manager__button landing-manager__button--primary" disabled={saving}><Save size={16} />{saving ? t('landingPageManagement.saving') : t('landingPageManagement.savePublicInformation')}</button></div>
         </form>
       </div>}
 
       {activeTab === 'assets' && <div className="landing-manager__asset-grid">
-        {renderImageCard('home_hero_images', 'Hero carousel images', 'Add, reorder, preview, or remove images from the home-page carousel.', true)}
-        {renderImageCard('system_logo', 'System logo', 'Used for the IPES identity across public pages.')}
-        {renderImageCard('university_logo', 'University crest / logo', 'Used to represent Mekdela Amba University.')}
-        {renderImageCard('about_page_image', 'About page image', 'The lead image shown on the About page.')}
+        {renderImageCard('home_hero_images', t('landingPageManagement.heroImages'), t('landingPageManagement.heroImagesDescription'), true)}
+        {renderImageCard('system_logo', t('landingPageManagement.systemLogo'), t('landingPageManagement.systemLogoDescription'))}
+        {renderImageCard('university_logo', t('landingPageManagement.universityLogo'), t('landingPageManagement.universityLogoDescription'))}
+        {renderImageCard('about_page_image', t('landingPageManagement.aboutImage'), t('landingPageManagement.aboutImageDescription'))}
       </div>}
 
       {activeTab === 'institution' && <form className="landing-manager__panel landing-manager__form" onSubmit={saveForm}>
-        <div className="landing-manager__section-heading"><div><h3>Vision & mission</h3><p>Enter public-facing text in both languages.</p></div></div>
+        <div className="landing-manager__section-heading"><div><h3>{t('landingPageManagement.visionMission')}</h3><p>{t('landingPageManagement.bothLanguages')}</p></div></div>
         <div className="landing-manager__field-grid landing-manager__field-grid--two">
-          <label>Vision · English<textarea rows={4} value={settings.vision.en} onChange={(event) => updateField('vision', 'en', event.target.value)} /></label>
-          <label>Vision · Amharic<textarea rows={4} lang="am" value={settings.vision.am} onChange={(event) => updateField('vision', 'am', event.target.value)} /></label>
-          <label>Mission · English<textarea rows={4} value={settings.mission.en} onChange={(event) => updateField('mission', 'en', event.target.value)} /></label>
-          <label>Mission · Amharic<textarea rows={4} lang="am" value={settings.mission.am} onChange={(event) => updateField('mission', 'am', event.target.value)} /></label>
+          <label>{t('landingPageManagement.visionEnglish')}<textarea rows={4} value={settings.vision.en} onChange={(event) => updateField('vision', 'en', event.target.value)} /></label>
+          <label>{t('landingPageManagement.visionAmharic')}<textarea rows={4} lang="am" value={settings.vision.am} onChange={(event) => updateField('vision', 'am', event.target.value)} /></label>
+          <label>{t('landingPageManagement.missionEnglish')}<textarea rows={4} value={settings.mission.en} onChange={(event) => updateField('mission', 'en', event.target.value)} /></label>
+          <label>{t('landingPageManagement.missionAmharic')}<textarea rows={4} lang="am" value={settings.mission.am} onChange={(event) => updateField('mission', 'am', event.target.value)} /></label>
         </div>
-        <div className="landing-manager__section-heading landing-manager__section-heading--spaced"><div><h3>Academic quality objectives</h3><p>Use one objective per line.</p></div></div>
+        <div className="landing-manager__section-heading landing-manager__section-heading--spaced"><div><h3>{t('landingPageManagement.qualityObjectives')}</h3><p>{t('landingPageManagement.oneObjectivePerLine')}</p></div></div>
         <div className="landing-manager__field-grid landing-manager__field-grid--two">
-          <label>Objectives · English<textarea rows={7} value={listToLines(settings.objectives.en)} onChange={(event) => updateField('objectives', 'en', linesToList(event.target.value))} /></label>
-          <label>Objectives · Amharic<textarea rows={7} lang="am" value={listToLines(settings.objectives.am)} onChange={(event) => updateField('objectives', 'am', linesToList(event.target.value))} /></label>
+          <label>{t('landingPageManagement.objectivesEnglish')}<textarea rows={7} value={listToLines(settings.objectives.en)} onChange={(event) => updateField('objectives', 'en', linesToList(event.target.value))} /></label>
+          <label>{t('landingPageManagement.objectivesAmharic')}<textarea rows={7} lang="am" value={listToLines(settings.objectives.am)} onChange={(event) => updateField('objectives', 'am', linesToList(event.target.value))} /></label>
         </div>
-        <div className="landing-manager__form-actions"><button type="submit" className="landing-manager__button landing-manager__button--primary" disabled={saving}><Save size={16} />{saving ? 'Saving…' : 'Save vision & objectives'}</button></div>
+        <div className="landing-manager__form-actions"><button type="submit" className="landing-manager__button landing-manager__button--primary" disabled={saving}><Save size={16} />{saving ? t('landingPageManagement.saving') : t('landingPageManagement.saveVisionObjectives')}</button></div>
       </form>}
 
       {activeTab === 'announcements' && <div className="landing-manager__announcement-layout">
         <form className="landing-manager__form landing-manager__announcement-form" onSubmit={saveAnnouncement}>
-          <div className="landing-manager__section-heading"><div><h3>{editingAnnouncementId ? 'Edit evaluation notice' : 'New evaluation notice'}</h3><p>Active notices appear on the public home page.</p></div><CalendarDays size={20} /></div>
-          <label>Title · English<input required maxLength={180} value={announcementDraft.title_en} onChange={(event) => setAnnouncementDraft((current) => ({ ...current, title_en: event.target.value }))} placeholder="Semester I 2026 E.C Evaluation Active" /></label>
-          <label>Title · Amharic<input required maxLength={180} lang="am" value={announcementDraft.title_am} onChange={(event) => setAnnouncementDraft((current) => ({ ...current, title_am: event.target.value }))} /></label>
-          <label>Message · English<textarea rows={3} value={announcementDraft.message_en} onChange={(event) => setAnnouncementDraft((current) => ({ ...current, message_en: event.target.value }))} /></label>
-          <label>Message · Amharic<textarea rows={3} lang="am" value={announcementDraft.message_am} onChange={(event) => setAnnouncementDraft((current) => ({ ...current, message_am: event.target.value }))} /></label>
+          <div className="landing-manager__section-heading"><div><h3>{t(editingAnnouncementId ? 'landingPageManagement.editNotice' : 'landingPageManagement.newNotice')}</h3><p>{t('landingPageManagement.activeNoticeDescription')}</p></div><CalendarDays size={20} /></div>
+          <label>{t('landingPageManagement.titleEnglish')}<input required maxLength={180} value={announcementDraft.title_en} onChange={(event) => setAnnouncementDraft((current) => ({ ...current, title_en: event.target.value }))} placeholder={t('landingPageManagement.noticeTitlePlaceholder')} /></label>
+          <label>{t('landingPageManagement.titleAmharic')}<input required maxLength={180} lang="am" value={announcementDraft.title_am} onChange={(event) => setAnnouncementDraft((current) => ({ ...current, title_am: event.target.value }))} /></label>
+          <label>{t('landingPageManagement.messageEnglish')}<textarea rows={3} value={announcementDraft.message_en} onChange={(event) => setAnnouncementDraft((current) => ({ ...current, message_en: event.target.value }))} /></label>
+          <label>{t('landingPageManagement.messageAmharic')}<textarea rows={3} lang="am" value={announcementDraft.message_am} onChange={(event) => setAnnouncementDraft((current) => ({ ...current, message_am: event.target.value }))} /></label>
           <div className="landing-manager__form-actions">
-            <button type="submit" className="landing-manager__button landing-manager__button--primary" disabled={saving}><Save size={16} />{saving ? 'Saving…' : editingAnnouncementId ? 'Save notice' : 'Publish notice'}</button>
-            {editingAnnouncementId && <button type="button" className="landing-manager__button landing-manager__button--secondary" onClick={resetAnnouncementDraft}>Cancel edit</button>}
+            <button type="submit" className="landing-manager__button landing-manager__button--primary" disabled={saving}><Save size={16} />{saving ? t('landingPageManagement.saving') : editingAnnouncementId ? t('landingPageManagement.saveNotice') : t('landingPageManagement.publishNotice')}</button>
+            {editingAnnouncementId && <button type="button" className="landing-manager__button landing-manager__button--secondary" onClick={resetAnnouncementDraft}>{t('landingPageManagement.cancelEdit')}</button>}
           </div>
         </form>
 
         <div className="landing-manager__notice-list">
-          <div className="landing-manager__section-heading"><div><h3>Evaluation cycle notices</h3><p>{settings.announcements.length} notice{settings.announcements.length === 1 ? '' : 's'}</p></div></div>
+          <div className="landing-manager__section-heading"><div><h3>{t('landingPageManagement.evaluationNotices')}</h3><p>{settings.announcements.length} {t('landingPageManagement.noticeCount')}</p></div></div>
           {settings.announcements.length ? settings.announcements.map((announcement) => (
             <article className={`landing-manager__notice${announcement.active ? ' is-active' : ''}`} key={announcement.id}>
-              <div className="landing-manager__notice-copy"><span className={`landing-manager__status${announcement.active ? ' is-active' : ''}`}>{announcement.active ? 'Published' : 'Hidden'}</span><h4>{announcement.title_en || announcement.title_am}</h4><p lang="am">{announcement.title_am}</p>{announcement.message_en && <p>{announcement.message_en}</p>}</div>
+              <div className="landing-manager__notice-copy"><span className={`landing-manager__status${announcement.active ? ' is-active' : ''}`}>{announcement.active ? t('landingPageManagement.published') : t('landingPageManagement.hidden')}</span><h4>{(language === 'am' ? announcement.title_am || announcement.title_en : announcement.title_en || announcement.title_am)}</h4>{announcement.title_am && language !== 'am' && <p lang="am">{announcement.title_am}</p>}{(language === 'am' ? announcement.message_am || announcement.message_en : announcement.message_en || announcement.message_am) && <p>{language === 'am' ? announcement.message_am || announcement.message_en : announcement.message_en || announcement.message_am}</p>}</div>
               <div className="landing-manager__notice-actions">
-                <label className="landing-manager__toggle"><input type="checkbox" checked={Boolean(announcement.active)} onChange={() => toggleAnnouncement(announcement)} disabled={saving} /><span>{announcement.active ? 'Visible' : 'Hidden'}</span></label>
-                <button type="button" className="landing-manager__icon-button" onClick={() => editAnnouncement(announcement)} aria-label={`Edit ${announcement.title_en || 'notice'}`}>Edit</button>
-                <button type="button" className="landing-manager__icon-button is-danger" onClick={() => void deleteContent('announcements', { id: announcement.id })} disabled={saving} aria-label={`Delete ${announcement.title_en || 'notice'}`}><Trash2 size={16} /></button>
+                <label className="landing-manager__toggle"><input type="checkbox" checked={Boolean(announcement.active)} onChange={() => toggleAnnouncement(announcement)} disabled={saving} /><span>{announcement.active ? t('landingPageManagement.visible') : t('landingPageManagement.hidden')}</span></label>
+                <button type="button" className="landing-manager__icon-button" onClick={() => editAnnouncement(announcement)} aria-label={`${t('landingPageManagement.edit')} ${announcement.title_en || t('landingPageManagement.notice')}`}>{t('landingPageManagement.edit')}</button>
+                <button type="button" className="landing-manager__icon-button is-danger" onClick={() => void deleteContent('announcements', { id: announcement.id })} disabled={saving} aria-label={`${t('landingPageManagement.delete')} ${announcement.title_en || t('landingPageManagement.notice')}`}><Trash2 size={16} /></button>
               </div>
             </article>
-          )) : <div className="landing-manager__empty-notices"><CalendarDays size={24} /><p>No evaluation notices have been added.</p></div>}
+          )) : <div className="landing-manager__empty-notices"><CalendarDays size={24} /><p>{t('landingPageManagement.noNotices')}</p></div>}
         </div>
       </div>}
     </section>
   );
 };
 
-const LandingPageManagement = () => (
-  <LandingPageErrorBoundary>
+const LandingPageManagement = () => {
+  const { t } = useTranslation();
+  return (
+  <LandingPageErrorBoundary t={t}>
     <LandingPageManagementContent />
   </LandingPageErrorBoundary>
-);
+  );
+};
 
 export default LandingPageManagement;

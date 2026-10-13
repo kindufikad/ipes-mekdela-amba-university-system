@@ -1,5 +1,5 @@
 import { useContext, useEffect, useRef, useState } from 'react';
-import { ChevronDown, KeyRound, LayoutDashboard, LogOut, Menu, MoonStar, Settings, SunMedium, UserCircle, UserRound, X } from 'lucide-react';
+import { ChevronDown, KeyRound, LogOut, Menu, MoonStar, Settings, SunMedium, UserCircle, UserRound, X } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { toast } from 'react-hot-toast';
 import { useAuth } from '../context/useAuth';
@@ -79,6 +79,10 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
   const [deadlineSettings, setDeadlineSettings] = useState({ deadlineAt: '', autoLock: true });
   const [savedDeadlineAt, setSavedDeadlineAt] = useState('');
   const [deadlineSaving, setDeadlineSaving] = useState(false);
+  const [autoLockSettingLoading, setAutoLockSettingLoading] = useState(false);
+  const [smtpSettings, setSmtpSettings] = useState({ senderEmail: '', appPassword: '', host: 'smtp.gmail.com', port: 587, appPasswordConfigured: false });
+  const [smtpSettingsLoading, setSmtpSettingsLoading] = useState(false);
+  const [smtpSettingsSaving, setSmtpSettingsSaving] = useState(false);
   const [passwordForm, setPasswordForm] = useState({ currentPassword: '', newPassword: '', confirmPassword: '' });
   const [settingsState, setSettingsState] = useState(() => {
     try {
@@ -87,7 +91,7 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
         emailNotifications: saved.emailNotifications ?? true,
         systemNotifications: saved.systemNotifications ?? true,
         language: saved.language ?? language,
-        theme: saved.theme ?? (isDark ? 'dark' : 'light'),
+        theme: isDark ? 'dark' : 'light',
         autoRemindersEnabled: saved.autoRemindersEnabled ?? false,
         reminderFrequency: saved.reminderFrequency ?? 'Every 3 Days',
         reminderAudience: {
@@ -150,6 +154,7 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
   }, [isMobileMenuOpen]);
 
   const normalizedRole = String(user?.role || role || storedUser?.role || '').trim().toLowerCase();
+  const isSystemAdmin = ['admin', 'systemadmin', 'system_admin'].includes(normalizedRole);
   const canUploadSignature = ALLOWED_SIGNATURE_ROLES.includes(String(user?.role || '').toLowerCase());
   const currentUser = { ...storedUser, ...user };
   const deadlineDepartmentScope = currentUser.department_id || currentUser.departmentId || currentUser.department || 'unknown';
@@ -226,7 +231,7 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
   useEffect(() => {
     try {
       const nextSettings = {
-        ...settingsState,
+        ...Object.fromEntries(Object.entries(settingsState).filter(([key]) => key !== 'theme')),
         language,
       };
       window.localStorage.setItem(settingsStorageKey, JSON.stringify(nextSettings));
@@ -235,10 +240,77 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
     }
   }, [language, settingsState]);
 
+  useEffect(() => {
+    if (!isSettingsOpen || !isSystemAdmin) return undefined;
+    let active = true;
+    setAutoLockSettingLoading(true);
+    adminApi.getAutoLockDeadlineSetting()
+      .then((setting) => {
+        const enabled = setting?.enabled ?? setting?.auto_lock_enabled;
+        if (active && typeof enabled === 'boolean') {
+          setSettingsState((current) => ({ ...current, autoLockFormsOnDeadline: enabled }));
+        }
+      })
+      .catch((error) => {
+        if (active) toast.error(error?.message || t('header.settingsLoadError'), { id: 'auto-lock-setting-load-error' });
+      })
+      .finally(() => {
+        if (active) setAutoLockSettingLoading(false);
+      });
+    return () => { active = false; };
+  }, [isSettingsOpen, isSystemAdmin]);
+
+  useEffect(() => {
+    if (!isSettingsOpen || !isSystemAdmin) return undefined;
+    let active = true;
+    setSmtpSettingsLoading(true);
+    adminApi.getEmailServiceSettings()
+      .then((settings) => {
+        if (active) setSmtpSettings({
+          senderEmail: settings?.senderEmail || '',
+          appPassword: '',
+          host: settings?.host || 'smtp.gmail.com',
+          port: Number(settings?.port || 587),
+          appPasswordConfigured: settings?.appPasswordConfigured === true,
+        });
+      })
+      .catch((error) => {
+        if (active) toast.error(error?.message || 'Unable to load Email Service Settings.');
+      })
+      .finally(() => {
+        if (active) setSmtpSettingsLoading(false);
+      });
+    return () => { active = false; };
+  }, [isSettingsOpen, isSystemAdmin]);
+
+  const saveSmtpSettings = async () => {
+    setSmtpSettingsSaving(true);
+    try {
+      const saved = await adminApi.updateEmailServiceSettings(smtpSettings);
+      setSmtpSettings((current) => ({
+        ...current,
+        ...saved,
+        appPassword: '',
+        appPasswordConfigured: saved?.appPasswordConfigured === true,
+      }));
+      toast.success('Email Service Settings saved securely.');
+    } catch (error) {
+      toast.error(error?.message || 'Unable to save Email Service Settings.');
+    } finally {
+      setSmtpSettingsSaving(false);
+    }
+  };
+
   const handleLogout = async () => {
     setIsOpen(false);
     setIsMobileMenuOpen(false);
-    if (typeof window !== 'undefined') window.localStorage.clear();
+    if (typeof window !== 'undefined') {
+      const themePreferences = Object.keys(window.localStorage)
+        .filter((key) => key.startsWith('ipes-theme-preference:'))
+        .map((key) => [key, window.localStorage.getItem(key)]);
+      window.localStorage.clear();
+      themePreferences.forEach(([key, value]) => window.localStorage.setItem(key, value));
+    }
     await logout();
   };
 
@@ -353,6 +425,17 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
 
   const handleSettingsSave = async () => {
     if ((settingsState.theme === 'dark') !== isDark) toggleTheme();
+    if (isSystemAdmin) {
+      setDeadlineSaving(true);
+      try {
+        await adminApi.updateAutoLockDeadlineSetting(settingsState.autoLockFormsOnDeadline);
+      } catch (error) {
+        toast.error(error?.message || t('header.settingsSaveError'));
+        return;
+      } finally {
+        setDeadlineSaving(false);
+      }
+    }
     if (['dept_head', 'depthead', 'department_head'].includes(normalizedRole)) {
       setDeadlineSaving(true);
       const result = await saveDeadlineWithFallback({
@@ -417,7 +500,7 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
         const settings = await evaluationApi.getEvaluationDeadline();
         if (!active) return;
         const autoLock = settings?.autoLock !== false;
-        const serverDeadline = formatForInput(settings?.currentDeadline || settings?.deadlineAt);
+        const serverDeadline = formatForInput(settings?.currentDeadline || settings?.deadlineAt || settings?.deadline);
         let pendingExtension;
         try {
           pendingExtension = JSON.parse(window.localStorage.getItem(scopedDeadlineFallbackKey) || 'null');
@@ -434,7 +517,6 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
         setSettingsState((current) => ({ ...current, autoLockFormsOnDeadline: autoLock }));
         if (pendingIsNewer) void syncPendingExtension();
       } catch (error) {
-        console.error('Unable to load evaluation deadline:', error);
         try {
           const pendingExtension = JSON.parse(window.localStorage.getItem(scopedDeadlineFallbackKey) || 'null');
           if (pendingExtension?.deadlineAt && active) {
@@ -515,9 +597,8 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
                   <span className="mt-3 inline-flex rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">{roleLabel}</span>
                 </div>
                 <nav className="p-2" aria-label={t('header.accountMenuAria')}>
-                  <button type="button" onClick={() => navigateAndClose(dashboardPath)} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"><LayoutDashboard className="h-4 w-4" /> {t('header.myDashboard')}</button>
                   <button type="button" onClick={() => navigateAndClose('/profile')} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"><UserRound className="h-4 w-4" /> {t('header.viewProfile')}</button>
-                  <button type="button" onClick={() => { setIsOpen(false); setIsMobileMenuOpen(false); setIsChangePasswordOpen(true); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"><KeyRound className="h-4 w-4" /> {t('header.changePassword')}</button>
+                  {!isSystemAdmin && <button type="button" onClick={() => { setIsOpen(false); setIsMobileMenuOpen(false); setIsChangePasswordOpen(true); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"><KeyRound className="h-4 w-4" /> {t('header.changePassword')}</button>}
                   <button type="button" onClick={() => { setIsOpen(false); setIsMobileMenuOpen(false); setIsSettingsOpen(true); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white"><Settings className="h-4 w-4" /> {t('header.dashboardSettings')}</button>
                   <button type="button" onClick={handleLogout} className="mt-1 flex w-full items-center gap-3 border-t border-slate-100 px-3 py-2.5 text-left text-sm text-red-600 hover:bg-red-50 dark:border-slate-700 dark:hover:bg-red-950/40"><LogOut className="h-4 w-4" /> {t('header.signOut')}</button>
                 </nav>
@@ -525,7 +606,7 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
             )}
           </div>
         </div>
-        {hasMobileNavigation && <button type="button" onClick={() => setIsMobileMenuOpen((open) => !open)} className="shrink-0 rounded-lg p-2 text-white hover:bg-white/10 md:hidden" aria-label={isMobileMenuOpen ? 'Close navigation menu' : 'Open navigation menu'} aria-expanded={isMobileMenuOpen} aria-controls="dashboard-mobile-drawer">
+        {hasMobileNavigation && <button type="button" onClick={() => setIsMobileMenuOpen((open) => !open)} className="shrink-0 rounded-lg p-2 text-white hover:bg-white/10 md:hidden" aria-label={isMobileMenuOpen ? t('sidebar.closeNavigation') : t('sidebar.openNavigation')} aria-expanded={isMobileMenuOpen} aria-controls="dashboard-mobile-drawer">
           {isMobileMenuOpen ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}
         </button>}
       </div>
@@ -628,8 +709,33 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
               </div>
             </div>
 
+            {isSystemAdmin && <section className="rounded-xl border border-slate-200 p-4">
+              <div className="mb-4">
+                <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">System Settings</p>
+                <h3 className="mt-1 text-lg font-semibold text-slate-900">Email Service Settings</h3>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="block text-sm font-medium text-slate-700 sm:col-span-2">SMTP Sender Email
+                  <input type="email" autoComplete="email" value={smtpSettings.senderEmail} onChange={(event) => setSmtpSettings((current) => ({ ...current, senderEmail: event.target.value }))} className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100" />
+                </label>
+                <label className="block text-sm font-medium text-slate-700 sm:col-span-2">SMTP App Password
+                  <input type="password" autoComplete="new-password" value={smtpSettings.appPassword} placeholder={smtpSettings.appPasswordConfigured ? 'Saved; enter a new password to replace it' : '16-character Gmail App Password'} onChange={(event) => setSmtpSettings((current) => ({ ...current, appPassword: event.target.value }))} className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100" />
+                  <span className="mt-1 block text-xs text-slate-500">{smtpSettings.appPasswordConfigured ? 'A password is configured and encrypted at rest.' : 'The app password is encrypted before it is stored.'}</span>
+                </label>
+                <label className="block text-sm font-medium text-slate-700">SMTP Host
+                  <input value={smtpSettings.host} onChange={(event) => setSmtpSettings((current) => ({ ...current, host: event.target.value }))} className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100" />
+                </label>
+                <label className="block text-sm font-medium text-slate-700">SMTP Port
+                  <input type="number" min="1" max="65535" step="1" value={smtpSettings.port} onChange={(event) => setSmtpSettings((current) => ({ ...current, port: event.target.value }))} className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100" />
+                </label>
+              </div>
+              <button type="button" onClick={saveSmtpSettings} disabled={smtpSettingsLoading || smtpSettingsSaving || !smtpSettings.senderEmail || !smtpSettings.host || (!smtpSettings.appPasswordConfigured && !smtpSettings.appPassword)} className="mt-4 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">
+                {smtpSettingsSaving ? 'Saving...' : 'Save SMTP Settings'}
+              </button>
+            </section>}
+
             {['dept_head', 'depthead', 'department_head'].includes(normalizedRole) && <div className="rounded-xl border border-blue-200 bg-blue-50/50 p-4">
-              <div><p className="font-semibold text-slate-800">{t('header.evaluationPeriod')}</p><p className="mt-1 text-sm text-slate-500">{t('header.deadlineDescription')}</p><p className="mt-1 text-xs font-medium text-blue-800">This deadline applies only to {currentUser.department_name || currentUser.department || 'your department'}.</p></div>
+              <div><p className="font-semibold text-slate-800">{t('header.evaluationPeriod')}</p><p className="mt-1 text-sm text-slate-500">{t('header.deadlineDescription')}</p><p className="mt-1 text-xs font-medium text-blue-800">{t('header.deadlineAppliesOnly')} {currentUser.department_name || currentUser.department || t('header.yourDepartment')}.</p></div>
               <label className="mt-4 block text-sm font-medium text-slate-700">{t('header.academicDeadline')}<input type="datetime-local" min={formatForInput(new Date())} value={deadlineSettings.deadlineAt} onChange={(event) => setDeadlineSettings((current) => ({ ...current, deadlineAt: event.target.value }))} className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5" /></label>
               <div className="mt-3 flex flex-wrap gap-2"><span className="self-center text-xs font-semibold text-slate-500">{t('header.quickExtension')}</span>{[1, 3, 7, 14].map((days) => <button key={days} type="button" onClick={() => extendDeadline(days)} className="rounded-lg border border-blue-200 bg-white px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-50">{days === 1 ? t('header.oneDay') : `+${days} ${t('header.days')}`}</button>)}</div>
               <button type="button" onClick={saveEvaluationDeadline} disabled={deadlineSaving} className="mt-4 w-full rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{deadlineSaving ? t('header.savingDeadline') : t('header.saveDeadline')}</button>
@@ -638,67 +744,70 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
             {['dept_head', 'depthead', 'department_head'].includes(normalizedRole) && <>
               <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="mb-4">
-                  <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">Reminders & notifications</p>
-                  <h3 className="mt-1 text-lg font-semibold text-slate-900">Auto-Reminder Alerts</h3>
-                  <p className="mt-1 text-sm text-slate-500">Configure reminders for incomplete evaluation forms.</p>
+                  <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">{t('header.remindersNotifications')}</p>
+                  <h3 className="mt-1 text-lg font-semibold text-slate-900">{t('header.autoReminderAlerts')}</h3>
+                  <p className="mt-1 text-sm text-slate-500">{t('header.configureReminders')}</p>
                 </div>
                 <div className="flex items-center justify-between gap-4 rounded-xl border border-slate-200 p-3">
-                  <span><span className="block text-sm font-semibold text-slate-800">Enable Automated Evaluation Reminders</span><span className="mt-1 block text-xs text-slate-500">Send reminders to selected evaluator groups.</span></span>
-                  <button type="button" role="switch" aria-checked={settingsState.autoRemindersEnabled} aria-label="Enable Automated Evaluation Reminders" onClick={() => setSettingsState((current) => ({ ...current, autoRemindersEnabled: !current.autoRemindersEnabled }))} className={`relative h-6 w-11 shrink-0 rounded-full transition ${settingsState.autoRemindersEnabled ? 'bg-blue-600' : 'bg-slate-300'}`}><span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition ${settingsState.autoRemindersEnabled ? 'left-[22px]' : 'left-0.5'}`} /></button>
+                  <span><span className="block text-sm font-semibold text-slate-800">{t('header.enableReminders')}</span><span className="mt-1 block text-xs text-slate-500">{t('header.sendSelectedReminders')}</span></span>
+                  <button type="button" role="switch" aria-checked={settingsState.autoRemindersEnabled} aria-label={t('header.enableReminders')} onClick={() => setSettingsState((current) => ({ ...current, autoRemindersEnabled: !current.autoRemindersEnabled }))} className={`relative h-6 w-11 shrink-0 rounded-full transition ${settingsState.autoRemindersEnabled ? 'bg-blue-600' : 'bg-slate-300'}`}><span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition ${settingsState.autoRemindersEnabled ? 'left-[22px]' : 'left-0.5'}`} /></button>
                 </div>
-                <label className="mt-4 block text-sm font-medium text-slate-700">Reminder Frequency
+                <label className="mt-4 block text-sm font-medium text-slate-700">{t('header.reminderFrequency')}
                   <select value={settingsState.reminderFrequency} onChange={(event) => setSettingsState((current) => ({ ...current, reminderFrequency: event.target.value }))} className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-slate-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100">
-                    <option>Every 2 Days</option>
-                    <option>Every 3 Days</option>
-                    <option>48 Hours Before Deadline</option>
+                    <option>{t('header.everyTwoDays')}</option>
+                    <option>{t('header.everyThreeDays')}</option>
+                    <option>{t('header.hoursBeforeDeadline')}</option>
                   </select>
                 </label>
                 <fieldset className="mt-4 space-y-3">
-                  <legend className="mb-2 text-sm font-semibold text-slate-800">Target Audience</legend>
-                  <label className="flex items-center gap-3 text-sm text-slate-700"><input type="checkbox" checked={settingsState.reminderAudience.pendingStudentEvaluators} onChange={(event) => setSettingsState((current) => ({ ...current, reminderAudience: { ...current.reminderAudience, pendingStudentEvaluators: event.target.checked } }))} className="h-4 w-4 accent-blue-600" />Pending Student Evaluators</label>
-                  <label className="flex items-center gap-3 text-sm text-slate-700"><input type="checkbox" checked={settingsState.reminderAudience.pendingPeerFacultyEvaluators} onChange={(event) => setSettingsState((current) => ({ ...current, reminderAudience: { ...current.reminderAudience, pendingPeerFacultyEvaluators: event.target.checked } }))} className="h-4 w-4 accent-blue-600" />Pending Peer/Faculty Evaluators</label>
+                  <legend className="mb-2 text-sm font-semibold text-slate-800">{t('header.targetAudience')}</legend>
+                  <label className="flex items-center gap-3 text-sm text-slate-700"><input type="checkbox" checked={settingsState.reminderAudience.pendingStudentEvaluators} onChange={(event) => setSettingsState((current) => ({ ...current, reminderAudience: { ...current.reminderAudience, pendingStudentEvaluators: event.target.checked } }))} className="h-4 w-4 accent-blue-600" />{t('header.pendingStudentEvaluators')}</label>
+                  <label className="flex items-center gap-3 text-sm text-slate-700"><input type="checkbox" checked={settingsState.reminderAudience.pendingPeerFacultyEvaluators} onChange={(event) => setSettingsState((current) => ({ ...current, reminderAudience: { ...current.reminderAudience, pendingPeerFacultyEvaluators: event.target.checked } }))} className="h-4 w-4 accent-blue-600" />{t('header.pendingPeerEvaluators')}</label>
                 </fieldset>
               </section>
 
               <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="mb-4">
-                  <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">Evaluation configuration</p>
-                  <h3 className="mt-1 text-lg font-semibold text-slate-900">Evaluation Weight Distribution</h3>
-                  <p className="mt-1 text-sm text-slate-500">Set the contribution of each evaluation source.</p>
+                  <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">{t('header.evaluationConfiguration')}</p>
+                  <h3 className="mt-1 text-lg font-semibold text-slate-900">{t('header.evaluationWeightDistribution')}</h3>
+                  <p className="mt-1 text-sm text-slate-500">{t('header.evaluationContribution')}</p>
                 </div>
                 <div className="grid gap-4 sm:grid-cols-3">
-                  {[['student', 'Student Evaluation Weight'], ['peer', 'Peer Evaluation Weight'], ['deptHead', 'Dept Head Evaluation Weight']].map(([key, label]) => (
+                  {[['student', 'studentEvaluationWeight'], ['peer', 'peerEvaluationWeight'], ['deptHead', 'deptHeadEvaluationWeight']].map(([key, labelKey]) => {
+                    const label = t(`header.${labelKey}`);
+                    return (
                     <label key={key} className="text-sm font-medium text-slate-700">{label}
                       <div className="mt-2 flex items-center rounded-xl border border-slate-200 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-100">
                         <input type="number" min="0" max="100" step="1" value={settingsState.evaluationWeights[key]} onChange={(event) => setSettingsState((current) => ({ ...current, evaluationWeights: { ...current.evaluationWeights, [key]: Number(event.target.value) } }))} className="w-full rounded-l-xl border-0 bg-white px-3 py-2.5 text-slate-800 focus:outline-none" aria-label={label} />
                         <span className="px-3 text-slate-500">%</span>
                       </div>
                     </label>
-                  ))}
+                    );
+                  })}
                 </div>
                 {evaluationWeightsTotal !== 100
-                  ? <p role="status" className="mt-4 inline-flex rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-800">Weight total must equal 100% (currently {evaluationWeightsTotal}%).</p>
-                  : <p role="status" className="mt-4 inline-flex rounded-full border border-green-200 bg-green-50 px-3 py-1 text-xs font-semibold text-green-700">Weights total 100%.</p>}
+                  ? <p role="status" className="mt-4 inline-flex rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-800">{t('header.weightTotalMustEqual')} ({evaluationWeightsTotal}%).</p>
+                  : <p role="status" className="mt-4 inline-flex rounded-full border border-green-200 bg-green-50 px-3 py-1 text-xs font-semibold text-green-700">{t('header.weightsTotal100')}</p>}
               </section>
 
               <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="mb-4">
-                  <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">Privacy & protection</p>
-                  <h3 className="mt-1 text-lg font-semibold text-slate-900">Anonymity & Security Safeguards</h3>
-                  <p className="mt-1 text-sm text-slate-500">Protect student identities and close forms automatically.</p>
+                  <p className="text-xs font-bold uppercase tracking-[0.16em] text-blue-600">{t('header.privacyProtection')}</p>
+                  <h3 className="mt-1 text-lg font-semibold text-slate-900">{t('header.anonymitySafeguards')}</h3>
+                  <p className="mt-1 text-sm text-slate-500">{t('header.privacyDescription')}</p>
                 </div>
                 <div className="space-y-3">
                   <div className="flex items-center justify-between gap-4 rounded-xl border border-slate-200 p-3">
-                    <span><span className="block text-sm font-semibold text-slate-800">Strict Student Anonymity Mode</span><span className="mt-1 block text-xs text-slate-500">Hide student names, IDs, and avatars in feedback reports.</span></span>
-                    <button type="button" role="switch" aria-checked={settingsState.strictStudentAnonymity} aria-label="Strict Student Anonymity Mode" onClick={() => setSettingsState((current) => ({ ...current, strictStudentAnonymity: !current.strictStudentAnonymity }))} className={`relative h-6 w-11 shrink-0 rounded-full transition ${settingsState.strictStudentAnonymity ? 'bg-blue-600' : 'bg-slate-300'}`}><span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition ${settingsState.strictStudentAnonymity ? 'left-[22px]' : 'left-0.5'}`} /></button>
+                    <span><span className="block text-sm font-semibold text-slate-800">{t('header.strictAnonymity')}</span><span className="mt-1 block text-xs text-slate-500">{t('header.hideStudentDetails')}</span></span>
+                    <button type="button" role="switch" aria-checked={settingsState.strictStudentAnonymity} aria-label={t('header.strictAnonymity')} onClick={() => setSettingsState((current) => ({ ...current, strictStudentAnonymity: !current.strictStudentAnonymity }))} className={`relative h-6 w-11 shrink-0 rounded-full transition ${settingsState.strictStudentAnonymity ? 'bg-blue-600' : 'bg-slate-300'}`}><span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition ${settingsState.strictStudentAnonymity ? 'left-[22px]' : 'left-0.5'}`} /></button>
                   </div>
                   <div className="flex items-center justify-between gap-4 rounded-xl border border-slate-200 p-3">
-                    <span><span className="block text-sm font-semibold text-slate-800">Auto-Lock Forms on Deadline</span><span className="mt-1 block text-xs text-slate-500">Freeze form submissions after the evaluation deadline.</span></span>
-                    <button type="button" role="switch" aria-checked={settingsState.autoLockFormsOnDeadline} aria-label="Auto-Lock Forms on Deadline" onClick={() => {
+                    <span><span className="block text-sm font-semibold text-slate-800">{t('header.autoLockEvaluation')}</span><span className="mt-1 block text-xs text-slate-500">{t('header.freezeSubmissions')}</span></span>
+                    <button type="button" role="switch" aria-checked={settingsState.autoLockFormsOnDeadline} aria-label={t('header.autoLockEvaluation')} onClick={() => {
                       const autoLock = !settingsState.autoLockFormsOnDeadline;
                       setSettingsState((current) => ({ ...current, autoLockFormsOnDeadline: autoLock }));
                       setDeadlineSettings((current) => ({ ...current, autoLock }));
-                    }} className={`relative h-6 w-11 shrink-0 rounded-full transition ${settingsState.autoLockFormsOnDeadline ? 'bg-blue-600' : 'bg-slate-300'}`}><span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition ${settingsState.autoLockFormsOnDeadline ? 'left-[22px]' : 'left-0.5'}`} /></button>
+                    }} disabled={autoLockSettingLoading || deadlineSaving} className={`relative h-6 w-11 shrink-0 rounded-full transition ${settingsState.autoLockFormsOnDeadline ? 'bg-blue-600' : 'bg-slate-300'} disabled:cursor-wait disabled:opacity-60`}><span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition ${settingsState.autoLockFormsOnDeadline ? 'left-[22px]' : 'left-0.5'}`} /></button>
                   </div>
                 </div>
               </section>
@@ -760,7 +869,7 @@ const Header = ({ isMobileMenuOpen, setIsMobileMenuOpen, hasMobileNavigation }) 
 
           <div className="mt-6 flex justify-end gap-3">
             <button type="button" onClick={() => setIsSettingsOpen(false)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-50">{t('header.close')}</button>
-            <button type="button" onClick={handleSettingsSave} disabled={deadlineSaving || evaluationWeightsTotal !== 100} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60">{deadlineSaving ? t('header.savingDeadline') : t('header.saveSettings')}</button>
+            <button type="button" onClick={handleSettingsSave} disabled={deadlineSaving || (isSystemAdmin && autoLockSettingLoading) || evaluationWeightsTotal !== 100} className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60">{deadlineSaving ? t('header.savingDeadline') : t('header.saveSettings')}</button>
           </div>
         </div>
       </div>

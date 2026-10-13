@@ -1,3 +1,32 @@
+export const YEAR_LEVEL_OPTIONS = [
+  { value: 1, label: 'Year 1' },
+  { value: 2, label: 'Year 2' },
+  { value: 3, label: 'Year 3' },
+  { value: 4, label: 'Year 4' },
+  { value: 5, label: 'Year 5' },
+  { value: 6, label: 'Year 6' },
+  { value: 7, label: 'Year 7' },
+];
+
+const ordinalSuffix = (year) => (year === 1 ? 'st' : year === 2 ? 'nd' : year === 3 ? 'rd' : 'th');
+
+export const YEAR_LEVEL_FILTER_OPTIONS = YEAR_LEVEL_OPTIONS.map(({ value, label }) => ({
+  value: `${value}${ordinalSuffix(value)} Year`,
+  label,
+}));
+
+export const YEAR_LEVEL_ASSIGNMENT_OPTIONS = YEAR_LEVEL_FILTER_OPTIONS.map((option) => ({
+  ...option,
+  value: option.value === '1st Year' ? '1st Year (Freshman)' : option.value,
+}));
+
+export const getYearLevelNumber = (value) => Number(String(value ?? '').match(/\d+/)?.[0]) || null;
+
+export const getYearLevelLabel = (value) => {
+  const year = getYearLevelNumber(value);
+  return YEAR_LEVEL_OPTIONS.find((option) => option.value === year)?.label || String(value ?? '');
+};
+
 export const adminData = {
   colleges: [
     { id: 'college-1', name: 'College of Engineering', code: 'ENG' },

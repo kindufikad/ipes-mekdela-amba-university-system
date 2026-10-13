@@ -1,10 +1,10 @@
 import React, { useContext, useMemo, useState } from 'react';
 import { FaUserGraduate, FaChevronLeft, FaChevronRight, FaSearch } from 'react-icons/fa';
 import { LanguageContext } from '../../context/LanguageContext';
+import { YEAR_LEVEL_FILTER_OPTIONS } from '../../data/adminOptions';
 
 const pageSize = 10;
 
-const yearLevelOptions = ['1st Year', '2nd Year', '3rd Year', '4th Year', '5th Year', '6th Year', '7th Year'];
 const programTypeOptions = ['Regular', 'Extension'];
 const sectionOptions = [
   'Section A', 'Section B', 'Section C', 'Section D', 'Section E', 'Section F',
@@ -141,8 +141,8 @@ const StudentsSection = ({ departmentId, initialStudents = null }) => {
             className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm"
           >
             <option key="all" value="All">All</option>
-            {yearLevelOptions.map((option) => (
-              <option key={option} value={option}>{option}</option>
+            {YEAR_LEVEL_FILTER_OPTIONS.map(({ value, label }) => (
+              <option key={value} value={value}>{label}</option>
             ))}
           </select>
         </label>

@@ -45,13 +45,12 @@ const DepartmentResultCertificates = ({ rows: initialRows = [], currentUser, aca
   const isIndividualCompleted = (instructor = {}) => {
     const rowRole = normalizeRole(instructor.role || instructor.target_role);
     if (!['instructor', 'lab_assistant'].includes(rowRole)) return false;
-    if (instructor.isComplete === true || instructor.can_print === true || instructor.canPrint === true) return true;
-    return false;
+    return getReportCompletion(instructor).canPrint;
   };
 
   const openLetter = async (instructor) => {
-    const completion = getReportCompletion(instructor);
     if (!isIndividualCompleted(instructor)) {
+      const completion = getReportCompletion(instructor);
       window.alert(completion.message || 'Evaluation is still pending for this instructor.');
       return;
     }
@@ -65,6 +64,11 @@ const DepartmentResultCertificates = ({ rows: initialRows = [], currentUser, aca
         window.alert('Unable to refresh the complete evaluation result for printing.');
         return;
       }
+    }
+    if (!isIndividualCompleted(report)) {
+      const refreshedCompletion = getReportCompletion(report);
+      window.alert(refreshedCompletion.message || 'Evaluation is still pending for this instructor.');
+      return;
     }
     setSelectedInstructor({
       ...report,

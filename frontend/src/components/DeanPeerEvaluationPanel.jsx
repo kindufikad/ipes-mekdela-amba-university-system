@@ -6,6 +6,7 @@ import { getQuestionText, groupCriteriaByCategory } from '../utils/evaluationCri
 import LanguageToggle from './LanguageToggle';
 import { LIKERT_OPTIONS, calculateLikertPercentage, hasLikertResponse } from '../utils/likertScoring';
 import { deadlineToneClasses, getDeadlineState } from '../utils/evaluationDeadline';
+import { validatePeerEvaluationFeedbackPair } from '../utils/validationUtility';
 
 const DeanPeerEvaluationPanel = () => {
   const [instructors, setInstructors] = useState([]);
@@ -81,6 +82,12 @@ const DeanPeerEvaluationPanel = () => {
     const criteriaIds = groupCriteriaByCategory(criteria).flatMap(g => g.criteria.map(c => c.id));
     if (criteriaIds.some((id) => !hasLikertResponse(formData.scores[id]))) {
       setFormError('Please rate every criterion before submitting.');
+      return;
+    }
+
+    const feedbackValidation = validatePeerEvaluationFeedbackPair(formData.strengths, formData.suggestions);
+    if (!feedbackValidation.valid) {
+      setFormError(feedbackValidation.errors[0]);
       return;
     }
 
@@ -309,6 +316,9 @@ const PeerEvaluationFormModal = ({
   const t = labels[language] || labels.en;
   const criteriaSections = groupCriteriaByCategory(criteria);
   const deadlineState = getDeadlineState(instructor.deadline);
+  const deadlineText = deadlineState.date
+    ? deadlineState.label.replace(/^Deadline:\s*/, '')
+    : instructor.deadline || 'Not specified';
   const staffName = instructor.name || instructor.full_name || instructor.email || 'Evaluated Staff';
 
   return (
@@ -334,7 +344,7 @@ const PeerEvaluationFormModal = ({
           </div>
           <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3 lg:col-span-2"><p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">Staff Name (Evaluated Staff)</p><p className="mt-1 font-semibold text-slate-900">{staffName}</p></div>
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3"><p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">Deadline</p><div className="mt-1 flex flex-wrap items-center gap-2"><span className="font-semibold text-slate-900">{instructor.deadline || 'Not specified'}</span>{deadlineState.daysRemaining !== null && <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${deadlineToneClasses[deadlineState.tone]}`}>{deadlineState.expired ? 'Expired' : `${deadlineState.daysRemaining}d left`}</span>}</div></div>
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3"><p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">Deadline</p><span className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-xs font-bold ${deadlineToneClasses[deadlineState.tone]}`}>{deadlineText}</span></div>
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3"><p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">Department & College</p><p className="mt-1 font-semibold text-slate-900">{instructor.department || 'Not assigned'}</p><p className="text-xs text-slate-500">{instructor.college_name || 'Mekdela Amba University'}</p></div>
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3"><p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">Academic Year</p><p className="mt-1 font-semibold text-slate-900">{instructor.academic_year || new Date().getFullYear()}</p><p className="text-xs text-slate-500">Semester {instructor.semester || 'I'}</p></div>
           </div>

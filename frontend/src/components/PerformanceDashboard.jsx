@@ -52,10 +52,14 @@ const PerformanceDashboard = () => {
   const isComplete = report?.isComplete === true;
   const totalWeightedScore = Number(report?.totalScore ?? report?.totalWeightedScore ?? 0);
   const studentSubmissionCount = Number(report?.submission_count ?? report?.submissionCount ?? report?.breakdown?.student?.submissionCount ?? report?.breakdown?.student?.count ?? 0);
+  const requiredStudentCount = Number(report?.completion?.requiredStudentCount ?? report?.student_required ?? report?.required_student_evaluators ?? 0);
   const hasAssignedCourse = (report?.hasAssignedCourses ?? (report?.hasAssignedCourse !== false))
     || studentSubmissionCount > 0
     || Number(report?.total_assignments ?? report?.totalAssignments ?? 0) > 0;
   const studentExcluded = !hasAssignedCourse;
+  const studentSatisfied = studentExcluded
+    || report?.completion?.isStudentComplete === true
+    || (requiredStudentCount > 0 && studentSubmissionCount >= Math.ceil(requiredStudentCount / 2));
   const status = getStatus(totalWeightedScore, t);
   const backendStatus = String(report?.status || '').toLowerCase();
   const translatedBackendStatus = ({ excellent: t('performanceDashboard.excellent'), 'very good': t('performanceDashboard.veryGood'), good: t('performanceDashboard.good'), satisfactory: t('performanceDashboard.satisfactory'), unsatisfactory: t('performanceDashboard.unsatisfactory'), pending: t('performanceDashboard.pending') })[backendStatus];
@@ -72,7 +76,7 @@ const PerformanceDashboard = () => {
   const strengths = Array.isArray(feedback.strengths) ? feedback.strengths : [];
   const improvements = Array.isArray(feedback.improvements) ? feedback.improvements : [];
   const breakdown = report?.breakdown || {};
-  const studentEvaluated = studentSubmissionCount > 0;
+          const studentEvaluated = studentSatisfied;
   const breakdownItems = [
     { key: 'student', label: t('performanceDashboard.student'), color: 'blue', available: !studentExcluded },
     { key: 'deptHead', label: t('performanceDashboard.deptHead'), color: 'indigo', available: true },
@@ -111,7 +115,7 @@ const PerformanceDashboard = () => {
           const score = breakdown[item.key] || {};
           const rawPercent = Number(score.rawPercentage ?? score.rawScore ?? (item.key === 'student' ? report?.raw_student_score : 0) ?? 0);
           const weightedPercent = Number(score.weightedContribution ?? (rawPercent * Number(score.weight ?? (hasAssignedCourse ? 50 : 0)) / 100));
-          const studentStatus = !hasAssignedCourse ? 'Not assigned' : studentEvaluated ? 'Evaluated' : 'Active';
+          const studentStatus = !hasAssignedCourse ? 'Not assigned' : studentEvaluated ? 'Satisfied' : studentSubmissionCount > 0 ? 'In progress' : 'Active';
           const displayedValue = item.key === 'student' && studentExcluded
             ? t('performanceDashboard.notAvailable')
             : formatScore(rawPercent, item.key === 'student' ? 2 : 1);

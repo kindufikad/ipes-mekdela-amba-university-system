@@ -194,7 +194,7 @@ const Login = () => {
     setIsLoading(true);
 
     const identifier = String(formData.identifier ?? '').trim();
-    const password = String(formData.password ?? '').trim();
+    const password = String(formData.password ?? '');
 
     if (!identifier || !password) {
       const message = strings.password === 'የይለፍ ቃል'
@@ -246,8 +246,9 @@ const Login = () => {
       setPendingRoute(accessRoute);
       setShowSuccessModal(true);
     } catch (error) {
-      console.error('Login error:', error);
-      console.log('Full Login Error:', error, error?.response);
+      if (error?.response?.status !== 401) {
+        console.error('Login request failed:', error);
+      }
 
       const backendMsg = error?.response?.data?.message || error?.response?.data?.error;
       const normalizedBackendMsg = typeof backendMsg === 'string'

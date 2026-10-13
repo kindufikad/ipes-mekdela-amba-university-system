@@ -42,15 +42,15 @@ const DeanPerformanceView = () => {
     || report?.hasAssignedCourses === true
     || report?.hasCourseAssigned === true;
   const isComplete = report?.isComplete === true;
-  const hasSubmittedEvaluations = report?.hasSubmittedEvaluations === true
-    || Number(report?.studentEvaluationCount || 0) > 0;
   const locallyCalculatedScore = calculateDeanPerformanceScore({
     student: breakdown.student?.rawPercentage || 0,
     directorate: breakdown.directorate?.rawPercentage || 0,
     peer: breakdown.peer?.rawPercentage || 0,
     hasAssignedCourses: hasCourseAssigned,
   });
-  const totalWeightedScore = locallyCalculatedScore.totalScore;
+  const totalWeightedScore = isComplete
+    ? Number(report?.totalWeightedScore ?? report?.totalScore ?? locallyCalculatedScore.totalScore)
+    : null;
   const status = isComplete ? (report?.status || 'At Risk') : 'Pending Complete Evaluation';
   
   // Define evaluation cards in order: Student, Directorate, Peer
@@ -88,7 +88,7 @@ const DeanPerformanceView = () => {
           <div>
             <p className="text-sm font-medium text-slate-500">Total Weighted Evaluation Score</p>
             <p id="dean-performance-title" className="mt-1 text-5xl font-bold text-ieps-blue-700">
-              {hasSubmittedEvaluations ? formatScore(totalWeightedScore) : 'Pending Completion'}
+              {isComplete ? formatScore(totalWeightedScore) : 'Pending Completion'}
             </p>
             <p className="mt-1 text-xs text-slate-500">
               {!hasCourseAssigned
@@ -112,9 +112,7 @@ const DeanPerformanceView = () => {
           </div>
         </div>
         {!isComplete && <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
-          {hasSubmittedEvaluations
-            ? `The displayed weighted score is provisional until ${hasCourseAssigned ? 'Student, Peer, and Directorate' : 'Peer and Directorate'} evaluations are complete.`
-            : `The weighted score will be available after the first ${hasCourseAssigned ? 'Student, Peer, or Directorate' : 'Peer or Directorate'} evaluation is submitted.`}
+          {`The total weighted score will be available after ${hasCourseAssigned ? 'Student, Peer, and Directorate' : 'Peer and Directorate'} evaluations are complete.`}
         </div>}
       </div>
 

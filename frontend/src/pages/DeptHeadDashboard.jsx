@@ -13,12 +13,12 @@ import {
 } from 'react-icons/fa';
 import { BarChart3, CheckCircle2, Clock3, Eye, Filter, RefreshCw, RotateCcw, Search, Send, Trash2, Users, X } from 'lucide-react';
 import toast from 'react-hot-toast';
-import { adminData } from '../data/adminOptions';
+import { adminData, getYearLevelLabel, getYearLevelNumber, YEAR_LEVEL_ASSIGNMENT_OPTIONS, YEAR_LEVEL_FILTER_OPTIONS, YEAR_LEVEL_OPTIONS } from '../data/adminOptions';
 import InstructorsSection from '../components/admin/InstructorsSection';
 import EvaluationWorkflow from '../components/EvaluationWorkflow';
 import { useTranslation } from '../context/useTranslation';
 import { useAuth } from '../context/useAuth';
-import { departmentApi, registrationApi, evaluationApi, courseAssignmentApi } from '../services/api';
+import { departmentApi, registrationApi, evaluationApi, courseAssignmentApi, notificationApi } from '../services/api';
 import DispatchEvaluationModal from '../components/DispatchEvaluationModal';
 import EvaluationTemplateBuilder from '../components/EvaluationTemplateBuilder';
 import InstructorEvaluationCriteriaModal from '../components/InstructorEvaluationCriteriaModal';
@@ -34,7 +34,7 @@ import { dispatchForm, SUBMISSIONS_UPDATED_EVENT } from '../services/formSubmiss
 import EvaluationTracking from '../components/EvaluationTracking';
 import IPESAISmartInsights from '../components/ai/IPESAISmartInsights';
 import { AnomaliesModal, PendingStudentsModal } from '../components/ai/AIActionModals';
-import calculateEvaluationScores from '../utils/calculateEvaluationScores';
+import { normalizeSemester } from '../utils/semester';
 
 const STUDENT_EVAL_TEMPLATE_KEY = 'ipesStudentEvalTemplate';
 
@@ -134,8 +134,8 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
   const [showEvaluationBreakdown, setShowEvaluationBreakdown] = useState(false);
   const [selectedEvaluation, setSelectedEvaluation] = useState(null);
   const [courseForm, setCourseForm] = useState({ name: '', code: '', yearLevel: '', semester: '', creditHours: '' });
-  const [reportAcademicYear, setReportAcademicYear] = useState(() => String(new Date().getFullYear()));
-  const [reportSemester, setReportSemester] = useState('Semester I');
+  const [reportAcademicYear, setReportAcademicYear] = useState('');
+  const [reportSemester, setReportSemester] = useState('');
   const [officialReportRow, setOfficialReportRow] = useState(null);
   const [courseCsvFile, setCourseCsvFile] = useState(null);
   const [courseCsvUploading, setCourseCsvUploading] = useState(false);
@@ -202,8 +202,10 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
         const search = normalize(studentFilter.search);
         const name = student.name || student.full_name || `${student.first_name || ''} ${student.last_name || ''}`;
         const studentId = student.student_id || student.studentId || '';
+        const studentSemester = normalizeSemester(student.semester);
+        const selectedSemester = normalizeSemester(studentFilter.semester);
         return (studentFilter.year === 'ALL' || yearToken(student.year_level || student.year) === yearToken(studentFilter.year))
-          && (studentFilter.semester === 'ALL' || normalize(student.semester) === normalize(studentFilter.semester))
+          && (studentFilter.semester === 'ALL' || studentSemester === selectedSemester)
           && (studentFilter.section === 'ALL' || section(student.section) === section(studentFilter.section))
           && (studentFilter.program === 'ALL' || normalize(student.program_type || student.program) === normalize(studentFilter.program))
           && (!search || normalize(name).includes(search) || normalize(studentId).includes(search));
@@ -280,7 +282,11 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
         && (!search || `${courseName} ${courseCode} ${instructorName}`.includes(search));
     });
   }, [assignmentFilters, assignments, departmentId]);
-  const assignmentYearOptions = [...new Set(assignments.map((assignment) => String(assignment.year_level || '').trim()).filter(Boolean))].sort();
+  const existingAssignmentYears = [...new Set(assignments.map((assignment) => String(assignment.year_level || '').trim()).filter(Boolean))];
+  const existingAssignmentYearNumbers = new Set(existingAssignmentYears.map(getYearLevelNumber).filter(Boolean));
+  const assignmentYearOptions = [...existingAssignmentYears, ...YEAR_LEVEL_FILTER_OPTIONS
+    .filter(({ value }) => !existingAssignmentYearNumbers.has(getYearLevelNumber(value)))
+    .map(({ value }) => value)].sort();
   const assignmentSectionOptions = [...new Set(assignments.map((assignment) => String(assignment.section || '').trim()).filter(Boolean))].sort();
   const assignmentTotalItems = filteredAssignments.length;
   const assignmentTotalPages = Math.max(1, Math.ceil(assignmentTotalItems / assignmentItemsPerPage));
@@ -474,7 +480,12 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
     const loadViewData = async () => {
       try {
         const result = viewDataTab === 'students'
-          ? await departmentApi.getDepartmentStudents(departmentId)
+          ? await departmentApi.getDepartmentStudents(departmentId, {
+              semester: studentFilter.semester,
+              year_level: studentFilter.year === 'ALL' ? undefined : studentFilter.year,
+              section: studentFilter.section === 'ALL' ? undefined : studentFilter.section,
+              program_type: studentFilter.program === 'ALL' ? undefined : studentFilter.program,
+            })
           : viewDataTab === 'lab_assistants'
             ? await departmentApi.getLabAssistants(departmentId)
             : await departmentApi.getDepartmentData(viewDataTab, departmentId);
@@ -489,7 +500,7 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
     };
     void loadViewData();
     return () => { cancelled = true; };
-  }, [activeTab, viewDataTab, departmentId]);
+  }, [activeTab, viewDataTab, departmentId, studentFilter]);
 
   const handleStudentFilterChange = (field) => (value) => {
     setStudentFilters((current) => ({ ...current, [field]: value }));
@@ -665,15 +676,38 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
     setReminderTarget(evaluatorId ? String(evaluatorId) : 'all');
     try {
       const result = evaluatorId
-        ? await evaluationApi.sendReminder({ target_id: evaluatorId, evaluation_type: evaluationType, department_id: departmentId })
-        : await evaluationApi.sendReminder({ send_to_all_pending: true, department_id: departmentId });
+        ? evaluationType === 'peer'
+          ? await notificationApi.sendReminder({
+            send_to_all_pending: true,
+            recipient_user_id: evaluatorId,
+            audience: 'peer',
+            department_id: departmentId,
+          })
+          : await evaluationApi.sendReminder({ target_id: evaluatorId, evaluation_type: evaluationType, department_id: departmentId })
+        : await notificationApi.sendBulkReminders({ send_to_all_pending: true, department_id: departmentId });
+      if (!evaluatorId) {
+        const sentCount = Number(result?.sentCount ?? 0);
+        const unlinkedCount = Number(result?.unlinkedCount ?? 0);
+        if (unlinkedCount > 0) {
+          toast(`ማስታወቂያው ለ ${sentCount} ተጠቃሚዎች ደርሷል:: ${unlinkedCount} ተጠቃሚዎች የቴሌግራም ቦት ስላላያያዙ አልደረሳቸውም::`, { icon: 'ℹ️' });
+        } else if (sentCount > 0) {
+          toast.success('የማስታወቂያ መልእክት ለሁሉም ተላክዋል!');
+        } else {
+          toast('ለማሳሰብ የሚጠበቁ ተጠቃሚዎች የሉም::', { icon: 'ℹ️' });
+        }
+        return;
+      }
       const reminderCount = Number(result?.sent ?? result?.data?.sent ?? 0);
       const telegramCount = Number(result?.telegramSent ?? result?.data?.telegramSent ?? 0);
       toast.success(evaluatorId
         ? `Reminder sent to ${name || 'the pending evaluator'}; ${telegramCount} urgent Telegram messages sent.`
         : `Reminders sent to ${reminderCount} pending evaluators; ${telegramCount} urgent Telegram messages sent.`);
     } catch (error) {
-      toast.error(error?.message || 'Unable to send evaluation reminder.');
+      if (error?.response?.data?.notLinked === true) {
+        toast.error('መልእክቱ አልተላከም: ተጠቃሚው የቴሌግራም ቦት አላያያዘም::');
+      } else {
+        toast.error(error?.message || 'Unable to send evaluation reminder.');
+      }
     } finally {
       setReminderSending(false);
       setReminderTarget('');
@@ -935,35 +969,74 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
       const peerScore = Number(evaluation.peer_score ?? evaluation.peerScore ?? evaluation.peer_average ?? sourceRow.peer_score ?? sourceRow.peerScore ?? sourceRow.peer_average ?? 0);
       const deptHeadScore = Number(evaluation.dept_head_score ?? evaluation.deptHeadScore ?? evaluation.dept_head_average ?? evaluation.deptHeadRaw ?? evaluation.department_score ?? evaluation.score ?? sourceRow.dept_head_score ?? sourceRow.deptHeadScore ?? sourceRow.dept_head_average ?? sourceRow.deptHeadRaw ?? sourceRow.department_score ?? 0);
       const normalizedDeptHeadScore = deptHeadScore > 0 && deptHeadScore <= 30 ? (deptHeadScore / 30) * 100 : deptHeadScore;
-      const studentWeightedValue = Number(evaluation.student_weighted ?? evaluation.studentWeighted ?? sourceRow.student_weighted ?? sourceRow.studentWeighted ?? 0);
-      const deptHeadWeightedValue = Number(evaluation.dept_head_weighted ?? evaluation.deptHeadWeighted ?? sourceRow.dept_head_weighted ?? sourceRow.deptHeadWeighted ?? 0);
-      const peerWeightedValue = Number(evaluation.peer_weighted ?? evaluation.peerWeighted ?? sourceRow.peer_weighted ?? sourceRow.peerWeighted ?? 0);
-      const studentWeighted = studentWeightedValue > 0 ? studentWeightedValue : Number((studentScore * 0.5).toFixed(2));
-      const deptHeadWeighted = deptHeadWeightedValue > 0 ? deptHeadWeightedValue : Number((normalizedDeptHeadScore * 0.3).toFixed(2));
-      const peerWeighted = peerWeightedValue > 0 ? peerWeightedValue : Number((peerScore * 0.2).toFixed(2));
-      const evaluated = calculateEvaluationScores(studentScore, normalizedDeptHeadScore, peerScore);
-      const persistedFinalScore = Number(evaluation.total_score ?? evaluation.totalWeightedScore ?? sourceRow.total_score ?? sourceRow.totalWeightedScore ?? 0);
-      const finalScore = evaluated.totalScore > 0 ? evaluated.totalScore : persistedFinalScore;
-      const totalEvaluators = Number(evaluation.submission_count ?? evaluation.total_students_evaluated_count ?? evaluation.total_student_evaluators ?? evaluation.totalEvaluatorsCount ?? sourceRow.submission_count ?? sourceRow.total_students_evaluated_count ?? sourceRow.total_student_evaluators ?? sourceRow.totalEvaluatorsCount ?? 0);
-      const requiredStudentEvaluators = Number(evaluation.required_student_evaluators ?? sourceRow.required_student_evaluators ?? 0);
-      const totalPeerEvaluators = Number(evaluation.total_peer_evaluators ?? sourceRow.total_peer_evaluators ?? 0);
-      const requiredPeerEvaluators = Number(evaluation.required_peer_evaluators ?? sourceRow.required_peer_evaluators ?? 0);
-      const totalDeptHeadEvaluators = Number(evaluation.total_dept_head_evaluators ?? sourceRow.total_dept_head_evaluators ?? 0);
+      const role = String(evaluation.role ?? sourceRow.role ?? instructor.role ?? '').toLowerCase();
+      const isLabAssistant = role.includes('lab assistant') || role.includes('lab_assistant');
+      const breakdown = evaluation.breakdown || sourceRow.breakdown || {};
+      const courseAssignmentValue = evaluation.has_assigned_course
+        ?? evaluation.hasCourseAssigned
+        ?? evaluation.has_assigned_courses
+        ?? sourceRow.has_assigned_course
+        ?? sourceRow.hasCourseAssigned
+        ?? sourceRow.has_assigned_courses;
+      const hasCourseAssigned = courseAssignmentValue === undefined
+        ? true
+        : !['false', '0'].includes(String(courseAssignmentValue).toLowerCase());
+      const weights = evaluation.weights || sourceRow.weights || (hasCourseAssigned
+        ? { student: 50, deptHead: 30, peer: 20 }
+        : { student: 0, deptHead: 60, peer: 40 });
+      const studentWeighted = Number(breakdown.student?.weightedContribution ?? evaluation.student_weighted ?? evaluation.studentWeighted ?? sourceRow.student_weighted ?? sourceRow.studentWeighted ?? (studentScore * Number(weights.student || 0) / 100));
+      const deptHeadWeighted = Number(breakdown.deptHead?.weightedContribution ?? evaluation.dept_head_weighted ?? evaluation.deptHeadWeighted ?? sourceRow.dept_head_weighted ?? sourceRow.deptHeadWeighted ?? (normalizedDeptHeadScore * Number(weights.deptHead || 0) / 100));
+      const peerWeighted = Number(breakdown.peer?.weightedContribution ?? evaluation.peer_weighted ?? evaluation.peerWeighted ?? sourceRow.peer_weighted ?? sourceRow.peerWeighted ?? (peerScore * Number(weights.peer || 0) / 100));
+      const backendFinalScore = evaluation.final_score ?? evaluation.total_score ?? evaluation.totalWeightedScore ?? sourceRow.final_score ?? sourceRow.total_score ?? sourceRow.totalWeightedScore;
+      const calculatedFinalScore = backendFinalScore !== undefined && backendFinalScore !== null
+        ? Number(backendFinalScore)
+        : Number((studentWeighted + deptHeadWeighted + peerWeighted).toFixed(2));
+      const backendCompletionValue = evaluation.isComplete ?? evaluation.is_complete ?? evaluation.can_print ?? evaluation.canPrint;
+      const hasBackendCompletion = backendCompletionValue !== undefined && backendCompletionValue !== null;
+      const backendComplete = backendCompletionValue === true
+        || backendCompletionValue === 1
+        || String(backendCompletionValue).toLowerCase() === 'true'
+        || String(backendCompletionValue) === '1';
+      const totalEvaluators = Number(evaluation.student_completed ?? evaluation.submission_count ?? evaluation.total_students_evaluated_count ?? evaluation.total_student_evaluators ?? evaluation.totalEvaluatorsCount ?? evaluation.student?.count ?? sourceRow.student_completed ?? sourceRow.submission_count ?? sourceRow.total_students_evaluated_count ?? sourceRow.total_student_evaluators ?? sourceRow.totalEvaluatorsCount ?? 0);
+      const requiredStudentEvaluators = Number(evaluation.student_required ?? evaluation.required_student_evaluators ?? sourceRow.student_required ?? sourceRow.required_student_evaluators ?? 0);
+      const totalPeerEvaluators = Number(evaluation.peer_completed ?? evaluation.peer_submission_count ?? evaluation.total_peers_evaluated_count ?? evaluation.peer?.count ?? sourceRow.peer_completed ?? sourceRow.peer_submission_count ?? sourceRow.total_peers_evaluated_count ?? 0);
+      const requiredPeerEvaluators = Number(evaluation.peer_required ?? evaluation.required_peer_evaluators ?? evaluation.peer?.requiredCount ?? sourceRow.peer_required ?? sourceRow.required_peer_evaluators ?? 0);
+      const totalDeptHeadEvaluators = Number(evaluation.total_dept_head_evaluators ?? evaluation.deptHead?.count ?? sourceRow.total_dept_head_evaluators ?? 0);
       const deptHeadSubmittedValue = evaluation.dept_head_submitted ?? sourceRow.dept_head_submitted ?? evaluation.deptHeadSubmitted ?? sourceRow.deptHeadSubmitted;
+      const requiredDeptHeadEvaluators = Number(evaluation.dept_head_required ?? evaluation.required_dept_head_evaluators ?? sourceRow.dept_head_required ?? sourceRow.required_dept_head_evaluators ?? 1);
       const deptHeadSubmitted = deptHeadSubmittedValue === true
         || deptHeadSubmittedValue === 1
         || deptHeadSubmittedValue === '1'
         || String(deptHeadSubmittedValue || '').toLowerCase() === 'true'
         || totalDeptHeadEvaluators > 0;
-      const hasStudentEval = evaluation.hasStudentEval === true || studentScore > 0 || totalEvaluators > 0;
-      const hasDeptHeadEval = evaluation.hasDeptHeadEval === true || deptHeadScore > 0 || deptHeadSubmitted;
-      const hasPeerEval = evaluation.hasPeerEval === true || peerScore > 0 || totalPeerEvaluators > 0;
+      const hasStudentEval = !hasCourseAssigned
+        || (requiredStudentEvaluators > 0
+          ? totalEvaluators >= Math.ceil(requiredStudentEvaluators / 2)
+          : evaluation.completion?.isStudentComplete ?? evaluation.hasStudentEval ?? totalEvaluators > 0);
+      const hasDeptHeadEval = typeof evaluation.completion?.isDeptHeadComplete === 'boolean'
+        ? evaluation.completion.isDeptHeadComplete
+        : requiredDeptHeadEvaluators > 0
+          ? totalDeptHeadEvaluators >= requiredDeptHeadEvaluators
+          : evaluation.hasDeptHeadEval === true || deptHeadSubmitted;
+      const hasPeerEval = totalPeerEvaluators >= 1
+        || evaluation.completion?.isPeerComplete === true
+        || evaluation.hasPeerEval === true;
+      const requiredCategoriesComplete = backendComplete
+        || ((!hasCourseAssigned || hasStudentEval) && hasPeerEval && hasDeptHeadEval);
+      const finalScore = requiredCategoriesComplete ? calculatedFinalScore : 0;
       const assignedClasses = String(evaluation.assigned_classes || evaluation.assignedClasses || sourceRow.assigned_classes || sourceRow.assignedClasses || '').trim();
 
       existing.studentScore = existing.studentScore || studentScore || 0;
       existing.peerScore = existing.peerScore || peerScore || 0;
       existing.deptHeadScore = existing.deptHeadScore || deptHeadScore || 0;
-      existing.finalScore = Math.max(existing.finalScore || 0, finalScore || 0);
+      existing.finalScore = isLabAssistant ? finalScore : Math.max(existing.finalScore || 0, finalScore || 0);
+      if (isLabAssistant) {
+        existing.role = 'Lab Assistant';
+      }
+      existing.hasCourseAssigned = hasCourseAssigned;
+      existing.weights = weights;
+      existing.breakdown = breakdown;
+      if (hasBackendCompletion) existing.backendComplete = existing.backendComplete || backendComplete;
       existing.totalEvaluators = Math.max(existing.totalEvaluators || 0, totalEvaluators || 0);
       existing.requiredStudentEvaluators = Math.max(existing.requiredStudentEvaluators || 0, requiredStudentEvaluators || 0);
       existing.totalPeerEvaluators = Math.max(existing.totalPeerEvaluators || 0, totalPeerEvaluators || 0);
@@ -973,7 +1046,8 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
       existing.hasDeptHeadEval = existing.hasDeptHeadEval || hasDeptHeadEval;
       existing.hasPeerEval = existing.hasPeerEval || hasPeerEval;
       existing.deptHeadSubmitted = existing.deptHeadSubmitted || deptHeadSubmitted;
-      existing.canPrint = existing.hasStudentEval && existing.hasDeptHeadEval && existing.hasPeerEval;
+      existing.canPrint = Boolean(existing.backendComplete || (existing.hasStudentEval && existing.hasDeptHeadEval && existing.hasPeerEval));
+      existing.isComplete = existing.canPrint;
       existing.missingRoles = evaluation.missing_roles || existing.missingRoles;
       if (assignedClasses) existing.assignedClasses = existing.assignedClasses ? `${existing.assignedClasses}, ${assignedClasses}` : assignedClasses;
       if (existing.full_name === 'Unknown Instructor' && (sourceRow.name || sourceRow.full_name || instructor.fullName || instructor.full_name)) {
@@ -1000,17 +1074,32 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
         dept_head_score: row.deptHeadScore,
         dept_head_submitted: row.deptHeadSubmitted ? 1 : 0,
         final_score: row.finalScore,
+        weights: row.weights,
+        breakdown: row.breakdown,
+        hasCourseAssigned: row.hasCourseAssigned,
+        has_assigned_courses: row.hasCourseAssigned,
         studentRaw: Number(row.studentScore || 0),
-        studentWeighted: Number((Number(row.studentScore || 0) * 0.5).toFixed(2)),
+        studentWeighted: Number(row.breakdown?.student?.weightedContribution ?? (Number(row.studentScore || 0) * Number(row.weights?.student ?? 50) / 100).toFixed(2)),
         deptHeadRaw: Number(row.deptHeadScore > 0 && row.deptHeadScore <= 30 ? ((row.deptHeadScore / 30) * 100).toFixed(2) : Number(row.deptHeadScore || 0).toFixed(2)),
-        deptHeadWeighted: Number((Number(row.deptHeadScore > 0 && row.deptHeadScore <= 30 ? (row.deptHeadScore / 30) * 100 : row.deptHeadScore || 0) * 0.3).toFixed(2)),
+        deptHeadWeighted: Number(row.breakdown?.deptHead?.weightedContribution ?? ((Number(row.deptHeadScore > 0 && row.deptHeadScore <= 30 ? (row.deptHeadScore / 30) * 100 : row.deptHeadScore || 0) * Number(row.weights?.deptHead ?? 30) / 100).toFixed(2))),
         peerRaw: Number(row.peerScore || 0),
-        peerWeighted: Number((Number(row.peerScore || 0) * 0.2).toFixed(2)),
+        peerWeighted: Number(row.breakdown?.peer?.weightedContribution ?? (Number(row.peerScore || 0) * Number(row.weights?.peer ?? 20) / 100).toFixed(2)),
         total_student_evaluators: row.totalEvaluators,
+        student_completed: row.totalEvaluators,
         required_student_evaluators: row.requiredStudentEvaluators,
         total_peer_evaluators: row.totalPeerEvaluators,
+        peer_completed: row.totalPeerEvaluators,
+        total_peers_evaluated_count: row.totalPeerEvaluators,
         required_peer_evaluators: row.requiredPeerEvaluators,
         total_dept_head_evaluators: row.totalDeptHeadEvaluators,
+        dept_head_completed: row.totalDeptHeadEvaluators,
+        completion: {
+          isStudentComplete: row.hasStudentEval,
+          isDeptHeadComplete: row.hasDeptHeadEval,
+          isPeerComplete: row.hasPeerEval,
+        },
+        backendComplete: row.backendComplete,
+        isComplete: row.canPrint,
         totalEvaluatorsCount: row.totalEvaluators,
         finalScore: row.finalScore,
         assignedClasses: row.assignedClasses || 'N/A',
@@ -1025,6 +1114,7 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
         isReadyToPrint: completion.canPrint,
         canPrint: completion.canPrint,
         can_print: completion.canPrint,
+        isComplete: completion.canPrint,
         missingRoles: completion.missing,
         missing_roles: completion.missing,
         status: completion.canPrint ? 'Completed' : 'Pending Submissions',
@@ -1102,7 +1192,7 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
   const [showPublishModal, setShowPublishModal] = useState(false);
   const [assignmentStep, setAssignmentStep] = useState(1);
   const programTypeOptions = ['Regular', 'Extension'];
-  const yearLevelOptions = ['1st Year (Freshman)', '2nd Year', '3rd Year', '4th Year', '5th Year', '6th Year', '7th Year'];
+  const yearLevelOptions = YEAR_LEVEL_ASSIGNMENT_OPTIONS;
   const [assignmentDraft, setAssignmentDraft] = useState({ courseId: '', instructorId: '', section: '', semester: '', programType: '', yearLevel: '' });
   const [publishTarget, setPublishTarget] = useState('both');
   const MAX_CREDIT_LOAD = 12;
@@ -1558,7 +1648,7 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
                 <label className="block"><span className="text-sm font-medium text-slate-700">Credit Hours / ECTS <span className="text-red-600">*</span></span><input type="number" min="1" step="1" value={courseForm.creditHours} onChange={(event) => setCourseForm({ ...courseForm, creditHours: event.target.value })} className="mt-2 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-blue-500" placeholder="3" required /></label>
               </div>
               <div className="mt-0 grid grid-cols-1 gap-4 md:grid-cols-3">
-                <label className="block"><span className="text-sm font-medium text-slate-700">Year Level <span className="text-red-600">*</span></span><select value={courseForm.yearLevel} onChange={(event) => setCourseForm({ ...courseForm, yearLevel: event.target.value })} className="mt-2 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-blue-500" required><option value="">Select year level</option>{[1, 2, 3, 4, 5].map((year) => <option key={year} value={`Year ${year}`}>Year {year}</option>)}</select></label>
+                <label className="block"><span className="text-sm font-medium text-slate-700">Year Level <span className="text-red-600">*</span></span><select value={courseForm.yearLevel} onChange={(event) => setCourseForm({ ...courseForm, yearLevel: event.target.value })} className="mt-2 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-blue-500" required><option value="">Select year level</option>{YEAR_LEVEL_OPTIONS.map(({ value, label }) => <option key={value} value={`Year ${value}`}>{label}</option>)}</select></label>
                 <label className="block"><span className="text-sm font-medium text-slate-700">Semester <span className="text-red-600">*</span></span><select value={courseForm.semester} onChange={(event) => setCourseForm({ ...courseForm, semester: event.target.value })} className="mt-2 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-blue-500" required><option value="">Select semester</option><option value="Semester I">Semester I</option><option value="Semester II">Semester II</option></select></label>
               </div>
               <div className="mt-6 flex gap-3">
@@ -1693,8 +1783,8 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
                     <table className="min-w-full divide-y divide-gray-200 text-left text-sm">
                       <thead className="bg-gray-50 text-gray-600"><tr><th className="px-4 py-3 font-semibold">ID</th><th className="px-4 py-3 font-semibold">Name</th><th className="px-4 py-3 font-semibold">Email</th><th className="px-4 py-3 font-semibold">Employee ID</th><th className="px-4 py-3 font-semibold">Status</th></tr></thead>
                       <tbody className="divide-y divide-gray-100">
-                        {paginatedViewData.map((instructor) => (
-                          <tr key={instructor.id || instructor.instructor_id} className="hover:bg-gray-50"><td className="px-4 py-3">{instructor.id || instructor.instructor_id}</td><td className="px-4 py-3 font-medium text-gray-800">{instructor.instructor_name || instructor.name || instructor.fullName || instructor.username || instructor.email}</td><td className="px-4 py-3">{instructor.email || instructor.username || '-'}</td><td className="px-4 py-3">{instructor.employee_id || instructor.employeeId || '-'}</td><td className="px-4 py-3">Active</td></tr>
+                        {paginatedViewData.map((instructor, rowIndex) => (
+                          <tr key={`instructor-${instructor.id || instructor.instructor_id || instructor.user_id || instructor.email || rowIndex}`} className="hover:bg-gray-50"><td className="px-4 py-3">{instructor.id || instructor.instructor_id}</td><td className="px-4 py-3 font-medium text-gray-800">{instructor.instructor_name || instructor.name || instructor.fullName || instructor.username || instructor.email}</td><td className="px-4 py-3">{instructor.email || instructor.username || '-'}</td><td className="px-4 py-3">{instructor.employee_id || instructor.employeeId || '-'}</td><td className="px-4 py-3">Active</td></tr>
                         ))}
                       </tbody>
                     </table>
@@ -1724,8 +1814,8 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100">
-                        {paginatedViewData.map((assistant) => (
-                          <tr key={assistant.id || assistant.user_id} className="hover:bg-gray-50">
+                        {paginatedViewData.map((assistant, rowIndex) => (
+                          <tr key={`lab-assistant-${assistant.id || assistant.user_id || assistant.employee_id || assistant.email || rowIndex}`} className="hover:bg-gray-50">
                             <td className="px-4 py-3 font-medium text-gray-800">{assistant.first_name || '-'}</td>
                             <td className="px-4 py-3">{assistant.last_name || '-'}</td>
                             <td className="px-4 py-3">{assistant.email || '-'}</td>
@@ -1748,7 +1838,7 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
               <div className="rounded-3xl border border-gray-200 bg-white p-4 shadow-sm sm:p-6 dark:border-slate-700 dark:bg-slate-800">
                 <div className="mb-6"><h3 className="text-lg font-semibold text-slate-900 dark:text-white">Department Students</h3><p className="text-sm text-gray-500 dark:text-slate-400">Students loaded from the department database.</p></div>
                 <div className="mb-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
-                  {[['Year Level', 'year', ['ALL', '1st Year', '2nd Year', '3rd Year', '4th Year', '5th Year']], ['Semester', 'semester', ['ALL', 'Semester I', 'Semester II']], ['Section', 'section', ['ALL', 'Section A', 'Section B', 'Section C', 'Section D']], ['Program Type', 'program', ['ALL', 'Regular', 'Extension', 'Summer']]].map(([label, field, options]) => <label key={field} className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}<select value={studentFilter[field]} onChange={(event) => setStudentFilter((current) => ({ ...current, [field]: event.target.value }))} className="mt-2 h-10 w-full rounded-xl border border-gray-300 bg-white px-3 text-sm font-normal normal-case tracking-normal text-slate-700">{options.map((option) => <option key={option} value={option}>{option === 'ALL' ? `All ${label === 'Program Type' ? 'Programs' : label.replace(' Level', 's')}` : option}</option>)}</select></label>)}
+                  {[['Year Level', 'year', ['ALL', ...YEAR_LEVEL_FILTER_OPTIONS.map(({ value }) => value)], true], ['Semester', 'semester', ['ALL', 'Semester I', 'Semester II']], ['Section', 'section', ['ALL', 'Section A', 'Section B', 'Section C', 'Section D']], ['Program Type', 'program', ['ALL', 'Regular', 'Extension', 'Summer']]].map(([label, field, options, isYearLevel]) => <label key={field} className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}<select value={studentFilter[field]} onChange={(event) => setStudentFilter((current) => ({ ...current, [field]: event.target.value }))} className="mt-2 h-10 w-full rounded-xl border border-gray-300 bg-white px-3 text-sm font-normal normal-case tracking-normal text-slate-700">{options.map((option) => <option key={option} value={option}>{option === 'ALL' ? `All ${label === 'Program Type' ? 'Programs' : label.replace(' Level', 's')}` : isYearLevel ? getYearLevelLabel(option) : option}</option>)}</select></label>)}
                   <label className="text-xs font-semibold uppercase tracking-wide text-slate-500 sm:col-span-2">Search student<input value={studentFilter.search} onChange={(event) => setStudentFilter((current) => ({ ...current, search: event.target.value }))} placeholder="Name or Student ID" className="mt-2 h-10 w-full rounded-xl border border-gray-300 px-3 text-sm font-normal normal-case tracking-normal text-slate-700" /></label>
                   <button type="button" onClick={() => setStudentFilter({ year: 'ALL', semester: 'ALL', section: 'ALL', program: 'ALL', search: '' })} className="inline-flex h-10 items-center justify-center gap-2 self-end rounded-xl border border-gray-300 px-3 text-sm font-semibold text-slate-700 hover:bg-slate-50"><RotateCcw size={15} /> Reset Filters</button>
                 </div>
@@ -1781,7 +1871,7 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
                   </button>
                 </div>
                 <div className="mb-5 flex flex-wrap gap-3">
-                  {['year', 'semester'].map((field) => <label key={field} className="text-xs font-semibold uppercase tracking-wide text-slate-500">{field === 'year' ? 'Year Level' : 'Semester'}<select value={courseFilter[field]} onChange={(event) => setCourseFilter((current) => ({ ...current, [field]: event.target.value }))} className="ml-2 h-10 rounded-xl border border-gray-300 bg-white px-3 text-sm font-normal normal-case tracking-normal text-slate-700"><option value="ALL">All {field === 'year' ? 'Years' : 'Semesters'}</option>{(field === 'year' ? ['1st Year', '2nd Year', '3rd Year', '4th Year', '5th Year'] : ['Semester I', 'Semester II']).map((option) => <option key={option}>{option}</option>)}</select></label>)}
+                  {['year', 'semester'].map((field) => <label key={field} className="text-xs font-semibold uppercase tracking-wide text-slate-500">{field === 'year' ? 'Year Level' : 'Semester'}<select value={courseFilter[field]} onChange={(event) => setCourseFilter((current) => ({ ...current, [field]: event.target.value }))} className="ml-2 h-10 rounded-xl border border-gray-300 bg-white px-3 text-sm font-normal normal-case tracking-normal text-slate-700"><option value="ALL">All {field === 'year' ? 'Years' : 'Semesters'}</option>{(field === 'year' ? YEAR_LEVEL_FILTER_OPTIONS : [{ value: 'Semester I', label: 'Semester I' }, { value: 'Semester II', label: 'Semester II' }]).map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>)}
                   <button type="button" onClick={() => setCourseFilter({ year: 'ALL', semester: 'ALL' })} className="inline-flex h-10 items-center gap-2 rounded-xl border border-gray-300 px-3 text-sm font-semibold text-slate-700 hover:bg-slate-50"><RotateCcw size={15} /> Reset</button>
                 </div>
 
@@ -1888,7 +1978,7 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
                   <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-800"><Filter className="h-4 w-4 text-blue-600" /> Filter assignments</div>
                   <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
                     <select aria-label="Filter by staff type" value={assignmentFilters.staffType} onChange={(event) => setAssignmentFilters((current) => ({ ...current, staffType: event.target.value }))} className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-blue-500"><option value="ALL">All Staff</option><option value="instructor">Instructor</option><option value="lab_assistant">Lab Assistant</option></select>
-                    <select aria-label="Filter by academic year level" value={assignmentFilters.year} onChange={(event) => setAssignmentFilters((current) => ({ ...current, year: event.target.value }))} className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-blue-500"><option value="ALL">All Year Levels</option>{assignmentYearOptions.map((year) => <option key={year} value={year}>{year}</option>)}</select>
+                    <select aria-label="Filter by academic year level" value={assignmentFilters.year} onChange={(event) => setAssignmentFilters((current) => ({ ...current, year: event.target.value }))} className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-blue-500"><option value="ALL">All Year Levels</option>{assignmentYearOptions.map((year) => <option key={year} value={year}>{getYearLevelLabel(year)}</option>)}</select>
                     <select aria-label="Filter by semester" value={assignmentFilters.semester} onChange={(event) => setAssignmentFilters((current) => ({ ...current, semester: event.target.value }))} className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-blue-500"><option value="ALL">All Semesters</option><option value="I">Semester I</option><option value="II">Semester II</option></select>
                     <select aria-label="Filter by section" value={assignmentFilters.section} onChange={(event) => setAssignmentFilters((current) => ({ ...current, section: event.target.value }))} className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-blue-500"><option value="ALL">All Sections</option>{assignmentSectionOptions.map((section) => <option key={section} value={section}>{/^section\s/i.test(section) ? section : `Section ${section}`}</option>)}</select>
                     <label className="relative"><Search className="pointer-events-none absolute left-3 top-3 h-4 w-4 text-slate-400" /><input aria-label="Search assignments" value={assignmentFilters.search} onChange={(event) => setAssignmentFilters((current) => ({ ...current, search: event.target.value }))} placeholder="Course or staff" className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-3 text-sm outline-none focus:ring-2 focus:ring-blue-500" /></label>
@@ -1910,12 +2000,12 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
                       </tr>
                     </thead>
                     <tbody>
-                      {paginatedAssignments.length ? paginatedAssignments.map((assignment) => {
+                      {paginatedAssignments.length ? paginatedAssignments.map((assignment, rowIndex) => {
                         const staffRole = String(assignment.staff_role || assignment.assigned_role || 'instructor').toLowerCase();
                         const staffName = assignment.staff_name || assignment.instructor_name || 'Not Assigned';
                         const semesterLabel = String(assignment.semester || '').replace(/^semester\s*/i, '');
                         const sectionLabel = String(assignment.section || '').replace(/^section\s*/i, '');
-                        return <tr key={assignment.assignment_id || assignment.id} className="border-b border-gray-50 align-top">
+                        return <tr key={`assignment-${assignment.assignment_id || assignment.id || `${assignment.course_id}-${assignment.staff_id}-${rowIndex}`}`} className="border-b border-gray-50 align-top">
                           <td className="py-3 pr-5"><div className="font-medium text-gray-900">{assignment.course_name || 'Unknown course'}</div><div className="mt-1 text-xs text-gray-500">{assignment.course_code || '-'}</div></td>
                           <td className="py-3 pr-5"><div className="font-medium text-gray-900">{staffName}</div><div className="mt-1 text-xs capitalize text-gray-500">{staffRole.replace('_', ' ')}</div></td>
                           <td className="py-3 pr-5">{assignment.year_level || '-'}</td>
@@ -2004,11 +2094,11 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
                         <td colSpan="5" className="px-6 py-8 text-center text-sm text-gray-500">Loading staff…</td>
                       </tr>
                     ) : deptInstructorsList.length ? (
-                      paginatedStaff.map((inst) => {
+                      paginatedStaff.map((inst, rowIndex) => {
                         const targetRole = String(inst.target_role || inst.role || 'instructor').toLowerCase();
                         const isSubmitted = String((inst.evaluation_status || '').toLowerCase()) === 'submitted';
                         return (
-                          <tr key={`${targetRole}-${inst.evaluatee_id || inst.instructor_id || inst.id}`}>
+                          <tr key={`${targetRole}-${inst.evaluatee_id || inst.instructor_id || inst.id || inst.user_id || inst.instructor_name || rowIndex}`}>
                             <td className="px-6 py-4 whitespace-nowrap font-bold text-gray-900 dark:text-white">{inst.instructor_name || inst.full_name || inst.fullName || inst.username}</td>
                             <td className="px-6 py-4 whitespace-nowrap">
                               <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${targetRole === 'lab_assistant' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}`}>
@@ -2178,7 +2268,7 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
                     <label className="space-y-2 text-sm text-gray-700">
                       <span className="font-semibold">Year Level</span>
                       <select value={trackingFilters.year_level} onChange={(e) => handleTrackingFilterChange('year_level')(e.target.value)} className="w-full rounded-2xl border border-gray-200 bg-slate-50 px-4 py-3 text-sm outline-none focus:border-ieps-blue-500 focus:ring-2 focus:ring-ieps-blue-100">
-                        {['All Years', '1st Year (Freshman)', '2nd Year', '3rd Year', '4th Year', '5th Year', '6th Year', '7th Year'].map((option) => <option key={option} value={option}>{option}</option>)}
+                        <option value="All Years">All Years</option>{YEAR_LEVEL_ASSIGNMENT_OPTIONS.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
                       </select>
                     </label>
                     <label className="space-y-2 text-sm text-gray-700">
@@ -2281,10 +2371,10 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
                             {row.status} ({row.completed_evaluations}/{row.total_evaluations})
                           </span>
                         </td>
-                        <td className="px-4 py-4 text-slate-700">{row.student_average.toFixed(2)}%</td>
+                        <td className="px-4 py-4 text-slate-700">{row.has_assigned_course === false || row.has_assigned_courses === false ? 'N/A' : `${Number(row.student_average || 0).toFixed(2)}%`}</td>
                         <td className="px-4 py-4 text-slate-700">{row.peer_average.toFixed(2)}%</td>
                         <td className="px-4 py-4 text-slate-700">{row.dept_head_average.toFixed(2)}%</td>
-                        <td className="px-4 py-4 font-bold text-ieps-blue-700">{row.final_score.toFixed(2)}%</td>
+                        <td className="px-4 py-4 font-bold text-ieps-blue-700">{row.final_score == null ? 'Pending' : `${Number(row.final_score).toFixed(2)}%`}</td>
                         <td className="px-4 py-4"><div className="h-2 w-28 rounded-full bg-slate-200"><div className="h-2 rounded-full bg-ieps-blue-600" style={{ width: `${Math.min(Number(row.completion_rate || 0), 100)}%` }} /></div><span className="mt-1 block text-xs text-slate-500">{Number(row.completion_rate || 0).toFixed(0)}%</span><button type="button" onClick={() => setTrackingDetails(row)} title="View evaluation details" aria-label={`View details for ${row.instructor_name || 'instructor'}`} className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-ieps-blue-700 hover:text-ieps-blue-900"><Eye className="h-3.5 w-3.5" /> Details</button></td>
                       </tr>
                     )) : (
@@ -2316,7 +2406,7 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
                             {row.status === 'Submitted' ? '🟢 Submitted' : '🔴 Pending'}
                           </span>
                         </td>
-                        <td className="px-4 py-4">{row.status === 'Submitted' ? <span className="text-xs font-semibold text-gray-400">Done</span> : <button type="button" onClick={() => sendEvaluationReminder(row.evaluator_id, 'peer', row.peer_instructor)} disabled={reminderSending} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{reminderSending && reminderTarget === String(row.evaluator_id) ? 'Sending…' : '🔔 Remind'}</button>}</td>
+                        <td className="px-4 py-4">{row.status === 'Submitted' ? <span className="text-xs font-semibold text-gray-400">Done</span> : <button type="button" onClick={() => sendEvaluationReminder(row.evaluator_user_id, 'peer', row.peer_instructor)} disabled={reminderSending || !row.evaluator_user_id} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{reminderSending && reminderTarget === String(row.evaluator_user_id) ? 'Sending…' : '🔔 Remind'}</button>}</td>
                       </tr>
                     )) : (
                       <tr>
@@ -2409,10 +2499,10 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
                 <input value={currentUser?.department_name || currentUser?.department || departmentId || ''} readOnly className="mt-1 w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-sm text-gray-700 outline-none" />
               </label>
               <label className="flex-1 text-sm font-medium text-gray-700">Academic Year
-                <select value={reportAcademicYear} onChange={(event) => setReportAcademicYear(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"><option>{String(new Date().getFullYear())}</option><option>2025/2026</option><option>2024/2025</option><option>2026/2027</option></select>
+                <select value={reportAcademicYear} onChange={(event) => setReportAcademicYear(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"><option value="">All academic years</option><option>{String(new Date().getFullYear())}</option><option>2025/2026</option><option>2024/2025</option><option>2026/2027</option></select>
               </label>
               <label className="flex-1 text-sm font-medium text-gray-700">Semester
-                <select value={reportSemester} onChange={(event) => setReportSemester(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"><option>Semester I</option><option>Semester II</option></select>
+                <select value={reportSemester} onChange={(event) => setReportSemester(event.target.value)} className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-500"><option value="">All semesters</option><option>Semester I</option><option>Semester II</option></select>
               </label>
               <button type="button" onClick={() => void loadDashboardData()} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">👁️ View Report</button>
             </div>
@@ -2447,7 +2537,7 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
                       const level = row.finalScore >= 90 ? ['Excellent', 'bg-emerald-100 text-emerald-700'] : row.finalScore >= 80 ? ['Very Good', 'bg-blue-100 text-blue-700'] : row.finalScore >= 75 ? ['Good', 'bg-yellow-100 text-yellow-700'] : ['Average', 'bg-orange-100 text-orange-700'];
                       const completion = getReportCompletion(row);
                       const printableRole = isPrintableReportRole(row);
-                      return <tr key={row.id} className="hover:bg-gray-50"><td className="px-4 py-4">{index + 1}</td><td className="px-4 py-4 font-medium text-gray-900">{row.instructorName}</td><td className="px-4 py-4 text-gray-700">{row.assignedClasses || 'N/A'}</td><td className="px-4 py-4 text-gray-700">{row.totalEvaluators || row.total_student_evaluators || 0}</td><td className="px-4 py-4">{Number(row.studentScore || row.student_average || 0).toFixed(2)}</td><td className="px-4 py-4">{Number(row.peerScore || row.peer_average || 0).toFixed(2)}</td><td className="px-4 py-4">{Number(row.deptHeadScore || row.dept_head_score || 0).toFixed(2)}</td><td className="px-4 py-4 font-bold text-blue-700">{Number(row.finalScore || row.final_score || 0).toFixed(2)}</td><td className="px-4 py-4"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${level[1]}`}>{level[0]}</span></td><td className="px-4 py-4"><span className={`text-xs font-semibold ${row.status === 'Completed' ? 'text-emerald-600' : 'text-orange-600'}`}>{row.status === 'Completed' ? '✓ Completed' : '◷ Pending Submissions'}</span></td><td className="px-4 py-4">{printableRole ? <button type="button" title={completion.canPrint ? `Print report for ${row.instructorName}` : completion.message} onClick={() => printOfficialReport(row)} disabled={!completion.canPrint} className="rounded-lg px-2 py-1 text-lg text-gray-500 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50">🖨️</button> : <span className="text-xs text-gray-400">N/A</span>}</td></tr>;
+                      return <tr key={`report-${row.id || row.instructor_id || row.user_id || row.instructorName || index}`} className="hover:bg-gray-50"><td className="px-4 py-4">{index + 1}</td><td className="px-4 py-4 font-medium text-gray-900">{row.instructorName}</td><td className="px-4 py-4 text-gray-700">{row.assignedClasses || 'N/A'}</td><td className="px-4 py-4 text-gray-700">{row.totalEvaluators || row.total_student_evaluators || 0}</td><td className="px-4 py-4">{Number(row.studentScore || row.student_average || 0).toFixed(2)}</td><td className="px-4 py-4">{Number(row.peerScore || row.peer_average || 0).toFixed(2)}</td><td className="px-4 py-4">{Number(row.deptHeadScore || row.dept_head_score || 0).toFixed(2)}</td><td className="px-4 py-4 font-bold text-blue-700">{Number(row.finalScore || row.final_score || 0).toFixed(2)}</td><td className="px-4 py-4"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${level[1]}`}>{level[0]}</span></td><td className="px-4 py-4"><span className={`text-xs font-semibold ${row.status === 'Completed' ? 'text-emerald-600' : 'text-orange-600'}`}>{row.status === 'Completed' ? '✓ Completed' : '◷ Pending Submissions'}</span></td><td className="px-4 py-4">{printableRole ? <button type="button" title={completion.canPrint ? `Print report for ${row.instructorName}` : completion.message} onClick={() => printOfficialReport(row)} disabled={!completion.canPrint} className="rounded-lg px-2 py-1 text-lg text-gray-500 hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50">🖨️</button> : <span className="text-xs text-gray-400">N/A</span>}</td></tr>;
                     }) : <tr><td colSpan={11} className="px-4 py-10 text-center text-gray-500">No instructor evaluation results available.</td></tr>}
                   </tbody>
                 </table>
@@ -2719,7 +2809,7 @@ const DeptHeadDashboard = ({ isMobileMenuOpen = false, setIsMobileMenuOpen = () 
                           <span className="mb-1 block font-medium">Year level</span>
                           <select value={assignmentDraft.yearLevel} onChange={(e) => setAssignmentDraft({ ...assignmentDraft, yearLevel: e.target.value })} className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm">
                             <option value="">Select Year Level</option>
-                            {yearLevelOptions.map((level) => <option key={level} value={level}>{level}</option>)}
+                            {yearLevelOptions.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
                           </select>
                         </label>
                         <label className="text-sm text-gray-600">
